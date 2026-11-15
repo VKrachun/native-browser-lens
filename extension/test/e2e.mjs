@@ -790,6 +790,8 @@ try {
   mkdirSync(shots, { recursive: true });
   for (const [index, page] of context.pages().entries()) {
     await page.screenshot({ path: join(shots, `page-${index}.png`), fullPage: true }).catch(() => {});
+    const focused = await page.evaluate(() => document.activeElement?.outerHTML.slice(0, 160)).catch(() => null);
+    console.error(`e2e: page ${index} ${page.url().slice(0, 80)} has focus on ${focused}`);
   }
   console.error(`e2e: screenshots of every page are in ${shots}`);
   if (consoleErrors.length) console.error(`e2e: browser console errors:\n${consoleErrors.join('\n')}`);
