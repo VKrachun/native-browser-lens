@@ -254,6 +254,20 @@ fn single_instance(paths: &Paths, wait: bool) -> io::Result<Option<File>> {
     Ok(None)
 }
 
+/// Whether a tray holds its lock now.
+pub fn running(paths: &Paths) -> bool {
+    let Ok(lock) = File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(paths.runtime.join("tray.lock"))
+    else {
+        return true;
+    };
+    // Taken means a tray runs; free means none does (the lock goes with the file on drop).
+    lock.try_lock().is_err()
+}
+
 pub fn run(paths: &Paths, wait: bool) -> io::Result<()> {
     let Some(_lock) = single_instance(paths, wait)? else {
         return Ok(());
