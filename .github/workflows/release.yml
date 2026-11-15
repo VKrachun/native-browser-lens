@@ -44,13 +44,15 @@ jobs:
           rustup toolchain install
           rustup target add ${{ matrix.target }}
       - name: libclang for bindgen (Windows)
-        # Without it, whisper-rs-sys falls back to bindings made on Linux, whose struct sizes are
-        # wrong for Windows (long is 32 bits there).
+        # .cargo/config.toml makes whisper-rs-sys use its bundled bindings, made on Linux, so
+        # building needs no libclang. Their struct sizes are wrong on Windows (long is 32 bits
+        # there): Windows generates its own with the runner's LLVM.
         if: runner.os == 'Windows'
         shell: bash
         run: |
           test -f "/c/Program Files/LLVM/bin/libclang.dll"
           echo 'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"
+          sed -i '/WHISPER_DONT_GENERATE_BINDINGS/d' .cargo/config.toml
           cargo clean -p whisper-rs-sys
       - name: musl C toolchain (bundled SQLite)
         if: runner.os == 'Linux'
@@ -183,13 +185,15 @@ jobs:
         shell: bash
         run: rustup toolchain install
       - name: libclang for bindgen (Windows)
-        # Without it, whisper-rs-sys falls back to bindings made on Linux, whose struct sizes are
-        # wrong for Windows (long is 32 bits there).
+        # .cargo/config.toml makes whisper-rs-sys use its bundled bindings, made on Linux, so
+        # building needs no libclang. Their struct sizes are wrong on Windows (long is 32 bits
+        # there): Windows generates its own with the runner's LLVM.
         if: runner.os == 'Windows'
         shell: bash
         run: |
           test -f "/c/Program Files/LLVM/bin/libclang.dll"
           echo 'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"
+          sed -i '/WHISPER_DONT_GENERATE_BINDINGS/d' .cargo/config.toml
           cargo clean -p whisper-rs-sys
       - name: Tools (Linux)
         if: runner.os == 'Linux'

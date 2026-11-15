@@ -28,13 +28,15 @@ jobs:
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: libclang for bindgen (Windows)
-        # Without it, whisper-rs-sys falls back to bindings made on Linux, whose struct sizes are
-        # wrong for Windows (long is 32 bits there).
+        # .cargo/config.toml makes whisper-rs-sys use its bundled bindings, made on Linux, so
+        # building needs no libclang. Their struct sizes are wrong on Windows (long is 32 bits
+        # there): Windows generates its own with the runner's LLVM.
         if: runner.os == 'Windows'
         shell: bash
         run: |
           test -f "/c/Program Files/LLVM/bin/libclang.dll"
           echo 'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"
+          sed -i '/WHISPER_DONT_GENERATE_BINDINGS/d' .cargo/config.toml
           cargo clean -p whisper-rs-sys
 
       - name: Format
