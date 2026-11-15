@@ -35,7 +35,6 @@ jobs:
           - { os: macos-15-intel, target: x86_64-apple-darwin, speech: x86_64-apple-darwin, gpu: "" }
           # whisper.cpp's Vulkan backend does not configure with the runner's Visual Studio yet: CPU speech.
           - { os: windows-2025, target: x86_64-pc-windows-msvc, speech: x86_64-pc-windows-msvc, gpu: "" }
-          - { os: windows-11-arm, target: aarch64-pc-windows-msvc, speech: aarch64-pc-windows-msvc, gpu: "" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -81,13 +80,13 @@ jobs:
               --target ${{ matrix.speech }} --target-dir target-gpu
           fi
           ext=""; [[ "$RUNNER_OS" == "Windows" ]] && ext=.exe
-          mkdir -p speech
-          cp "target/${{ matrix.speech }}/release/lens-speech$ext" "speech/lens-speech$ext"
+          mkdir -p speech-bin
+          cp "target/${{ matrix.speech }}/release/lens-speech$ext" "speech-bin/lens-speech$ext"
           if [[ -n "${{ matrix.gpu }}" ]]; then
-            cp "target-gpu/${{ matrix.speech }}/release/lens-speech$ext" "speech/lens-speech-gpu$ext"
+            cp "target-gpu/${{ matrix.speech }}/release/lens-speech$ext" "speech-bin/lens-speech-gpu$ext"
           fi
           # Without arguments it prints its usage and fails: proof that it starts.
-          out=$("speech/lens-speech$ext" 2>&1 || true)
+          out=$("speech-bin/lens-speech$ext" 2>&1 || true)
           [[ "$out" == *usage* ]]
 
       - name: Smoke test
@@ -123,7 +122,7 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -s -k "" "$keychain"
           bin=target/${{ matrix.target }}/release/lens
           mkdir -p "$RUNNER_TEMP/notarize"
-          for program in "$bin" speech/*; do
+          for program in "$bin" speech-bin/*; do
             codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$program"
             cp "$program" "$RUNNER_TEMP/notarize/"
           done
@@ -140,7 +139,7 @@ jobs:
           name="sirv-lens-$version-${{ matrix.target }}"
           mkdir -p "dist/$name"
           cp README.md "dist/$name/"
-          cp speech/* "dist/$name/"
+          cp speech-bin/* "dist/$name/"
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             cp target/${{ matrix.target }}/release/lens.exe target/${{ matrix.target }}/release/lensw.exe "dist/$name/"
             (cd dist && 7z a -tzip "$name.zip" "$name" >/dev/null)
@@ -279,6 +278,8 @@ jobs:
         with:
           name: extension
           path: extension/.output/*.zip
+          # .output starts with a dot, and upload-artifact skips hidden folders unless told.
+          include-hidden-files: true
           if-no-files-found: error
 
   publish:
@@ -322,7 +323,7 @@ jobs:
           extension = f"sirv-lens-extension-{version}-chrome.zip"
           manifest = {"version": version, "assets": assets,
                       "extension": {"file": extension, "sha256": sums[extension]} if extension in sums else None}
-          assert len(assets) == 6, f"expected six platform archives, found {sorted(assets)}"
+          assert len(assets) == 5, f"expected five platform archives, found {sorted(assets)}"
           json.dump(manifest, open("latest.json", "w"), indent=2)
           PY
           key="$RUNNER_TEMP/minisign.key"

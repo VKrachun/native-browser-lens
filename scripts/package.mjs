@@ -42,6 +42,18 @@ if (!values['skip-build']) {
   }
 }
 
+// macOS: an x86_64 binary comes out of the linker unsigned (arm64 ones are signed ad hoc), and
+// codesign refuses to sign Lens beside an unsigned program. The speech programs are signed first:
+// with the Developer ID when there is one (cargo-packager signs them again), else ad hoc.
+if (process.platform === 'darwin') {
+  for (const name of ['lens-speech', 'lens-speech-gpu']) {
+    const program = join(release, name);
+    if (!existsSync(program)) continue;
+    const identity = process.env.APPLE_SIGNING_IDENTITY;
+    run('codesign', ['--force', ...(identity ? ['--options', 'runtime', '--timestamp', '--sign', identity] : ['--sign', '-']), program]);
+  }
+}
+
 // The programs that go beside Lens: the speech programs. On Windows the shortcut opens lensw, which
 // starts lens without a console window; lens then sees no terminal and runs the first run.
 const binaries = windows

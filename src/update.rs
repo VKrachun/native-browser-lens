@@ -36,8 +36,8 @@ pub fn target() -> Option<&'static str> {
         ("linux", "aarch64") => "aarch64-unknown-linux-musl",
         ("macos", "aarch64") => "aarch64-apple-darwin",
         ("macos", "x86_64") => "x86_64-apple-darwin",
-        ("windows", "x86_64") => "x86_64-pc-windows-msvc",
-        ("windows", "aarch64") => "aarch64-pc-windows-msvc",
+        // Windows on ARM runs the x64 build through its emulation; there is no ARM build.
+        ("windows", "x86_64" | "aarch64") => "x86_64-pc-windows-msvc",
         _ => return None,
     })
 }

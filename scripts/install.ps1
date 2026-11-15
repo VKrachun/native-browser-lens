@@ -11,7 +11,8 @@ $ErrorActionPreference = 'Stop'
 $repo = if ($env:LENS_REPO) { $env:LENS_REPO } else { 'VKrachun/native-browser-lens' }
 $target = switch ($env:PROCESSOR_ARCHITECTURE) {
     'AMD64' { 'x86_64-pc-windows-msvc' }
-    'ARM64' { 'aarch64-pc-windows-msvc' }
+    # Windows on ARM runs the x64 build through its emulation; there is no ARM build.
+    'ARM64' { 'x86_64-pc-windows-msvc' }
     default { throw "No Lens build for $env:PROCESSOR_ARCHITECTURE" }
 }
 
