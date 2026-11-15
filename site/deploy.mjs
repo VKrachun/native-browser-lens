@@ -13,7 +13,8 @@ const downloads = join(site, 'downloads');
 // Workers static assets take files up to 25 MiB.
 const LIMIT = 25 * 1024 * 1024;
 const KINDS = [
-  [/macos-arm64\.dmg$/, 'mac', 'Download .dmg'],
+  [/macos-arm64\.dmg$/, 'mac', 'Apple silicon (.dmg)'],
+  [/macos-x64\.dmg$/, 'mac', 'Intel (.dmg)'],
   [/\.AppImage$/, 'linux', 'AppImage'],
   [/\.deb$/, 'linux', '.deb (Debian, Ubuntu)'],
   [/^PKGBUILD$/, 'linux', 'Arch (PKGBUILD)'],
@@ -70,7 +71,7 @@ for (const name of existsSync(downloads) ? readdirSync(downloads).sort() : []) {
 const pkgbuild = join(dist, 'download', 'PKGBUILD');
 if (existsSync(pkgbuild)) {
   const data = readFileSync(pkgbuild);
-  files.push({ os: 'linux', label: 'Arch (PKGBUILD)', name: 'PKGBUILD', size: data.length, sha256: createHash('sha256').update(data).digest('hex'), order: 3 });
+  files.push({ os: 'linux', label: 'Arch (PKGBUILD)', name: 'PKGBUILD', size: data.length, sha256: createHash('sha256').update(data).digest('hex'), order: KINDS.findIndex((k) => k[1] === 'linux' && k[2].startsWith('Arch')) });
 }
 files.sort((a, b) => a.order - b.order);
 writeFileSync(join(dist, 'download', 'manifest.json'), JSON.stringify({ files: files.map(({ order, ...f }) => f) }, null, 2));
