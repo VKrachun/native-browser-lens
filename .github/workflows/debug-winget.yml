@@ -1,0 +1,19 @@
+name: Debug winget manifest
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  winget:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Validate and install from the manifest
+        shell: pwsh
+        run: |
+          winget --version
+          winget settings --enable LocalManifestFiles
+          winget validate --manifest .github/winget-check
+          winget install --manifest .github/winget-check --accept-package-agreements --accept-source-agreements --disable-interactivity
+          Write-Output "exit: $LASTEXITCODE"
+          winget list --name "Sirv Lens" --disable-interactivity
+          & "$env:LOCALAPPDATA\Sirv Lens\lens.exe" version
