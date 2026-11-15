@@ -29,7 +29,7 @@ fetch('/download/manifest.json')
       hero.href = `/download/${mine[0].name}`;
     }
     for (const box of document.querySelectorAll('[data-files]')) {
-      if (!box.children.length && box.closest('.dl')?.dataset.os !== 'windows') {
+      if (!box.children.length) {
         const soon = document.createElement('p');
         soon.className = 'soon';
         soon.textContent = 'Coming soon.';

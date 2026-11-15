@@ -14,4 +14,6 @@ jobs:
         run: |
           ls "/c/Program Files/LLVM/bin" | grep -i clang | head
           export LIBCLANG_PATH='C:\Program Files\LLVM\bin'
-          cargo build -p lens-speech -vv 2>&1 | grep -a -i -E "warning=|unable to generate|bindgen|clang|error:" | head -80 || true
+          cargo build -p lens-speech -vv > build.log 2>&1 || true
+          grep -a '^\[whisper-rs-sys' build.log | grep -a -v 'rerun-if\|cargo:rustc-\|cargo:warning=.*-W' | head -60 || true
+          grep -a -i 'unable to generate\|fatal error\|libclang' build.log | head -20 || true
