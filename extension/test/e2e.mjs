@@ -516,7 +516,8 @@ try {
 
   // MCP: an agent sees the reviewed defect and its rendered screenshot, nothing else.
   const mcp = spawn(bin, ['mcp'], {
-    env: { ...env, ...(executablePath ? { LENS_VERIFY_BROWSER: executablePath } : {}) },
+    // verify_fix runs the extension's Playwright with the same Chromium as this test.
+    env: { ...env, LENS_VERIFY_BROWSER: executablePath ?? chromium.executablePath() },
     stdio: ['pipe', 'pipe', 'inherit'],
   });
   const lines = createInterface({ input: mcp.stdout });
