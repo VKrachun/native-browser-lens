@@ -5,15 +5,31 @@ permissions:
 jobs:
   winget:
     runs-on: windows-2025
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Validate and install from the manifest
+      - name: winget version
+        timeout-minutes: 3
+        shell: pwsh
+        run: winget --version
+      - name: Allow local manifests
+        timeout-minutes: 3
+        shell: pwsh
+        run: winget settings --enable LocalManifestFiles
+      - name: Validate
+        timeout-minutes: 5
+        shell: pwsh
+        run: winget validate --manifest .github/winget-check --disable-interactivity
+      - name: Install from the manifest
+        timeout-minutes: 10
         shell: pwsh
         run: |
-          winget --version
-          winget settings --enable LocalManifestFiles
-          winget validate --manifest .github/winget-check
-          winget install --manifest .github/winget-check --accept-package-agreements --accept-source-agreements --disable-interactivity
+          winget install --manifest .github/winget-check --accept-package-agreements --disable-interactivity --silent
           Write-Output "exit: $LASTEXITCODE"
-          winget list --name "Sirv Lens" --disable-interactivity
+      - name: Installed
+        if: always()
+        timeout-minutes: 3
+        shell: pwsh
+        run: |
+          Test-Path "$env:LOCALAPPDATA\Sirv Lens\lens.exe"
           & "$env:LOCALAPPDATA\Sirv Lens\lens.exe" version
