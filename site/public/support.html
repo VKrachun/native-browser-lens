@@ -29,9 +29,12 @@
     <h2>The side panel says "App not installed"</h2>
     <p>Lens needs its app on your computer. <a href="/#download">Download it</a>, open it once, and the panel continues by itself. If the app is installed, open it again from your applications: it repairs its browser registration and opens the setup page.</p>
 
+    <h2>Windows says "Windows protected your PC"</h2>
+    <p>The Windows installer is not code-signed yet, so SmartScreen does not know it. Choose <strong>More info</strong>, then <strong>Run anyway</strong>. Lens installs for you only and needs no administrator rights. You can check the file against the SHA-256 sum shown on the download button.</p>
+
     <h2>Check the setup</h2>
     <p>In a terminal, run <code>lens doctor</code>. It checks each step (the app, starting at login, the browsers, the extension, a site to collect on) and says what to do for each open one. <code>lens setup</code> walks through them.</p>
-    <p>The <code>lens</code> command is the app itself: on macOS it is <code>"/Applications/Sirv Lens.app/Contents/MacOS/lens"</code>.</p>
+    <p>The <code>lens</code> command is the app itself: on macOS it is <code>"/Applications/Sirv Lens.app/Contents/MacOS/lens"</code>, on Windows <code>%LOCALAPPDATA%\Sirv Lens\lens.exe</code>.</p>
 
     <h2>Adding the extension</h2>
     <ul>

@@ -130,7 +130,7 @@ const out = join(root, 'dist');
 for (const file of readdirSync(out)) {
   const found = names.find(([pattern]) => pattern.test(file));
   // cargo-packager names them lens_… (Linux) or "Sirv Lens_…" (macOS, Windows).
-  if (found && /^(lens|Sirv Lens)_/.test(file)) renameSync(join(out, file), join(out, found[1]));
+  if (found && /^(lens|lensw|Sirv Lens)_/.test(file)) renameSync(join(out, file), join(out, found[1]));
 }
 console.log(readdirSync(out).filter((f) => !f.startsWith('.')).join('\n'));
 

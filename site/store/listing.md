@@ -30,7 +30,7 @@ Private by default
 - Passwords, card numbers and private fields are masked. Cookies, request headers and tokens are never recorded.
 - No analytics, no tracking, and no server of ours.
 
-Lens needs its free companion app for macOS or Linux (Windows soon): https://lens.sirv.studio. The app stores the recordings, writes down your voice with Whisper and files the tasks. The extension talks only to that app, on your computer.
+Lens needs its free companion app for macOS, Windows or Linux: https://lens.sirv.studio. The app stores the recordings, writes down your voice with Whisper and files the tasks. The extension talks only to that app, on your computer.
 
 Why each permission: https://lens.sirv.studio/permissions
 Privacy policy: https://lens.sirv.studio/privacy
