@@ -33,7 +33,8 @@ jobs:
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, speech: aarch64-unknown-linux-gnu, gpu: vulkan }
           - { os: macos-15, target: aarch64-apple-darwin, speech: aarch64-apple-darwin, gpu: metal }
           - { os: macos-15-intel, target: x86_64-apple-darwin, speech: x86_64-apple-darwin, gpu: "" }
-          - { os: windows-2025, target: x86_64-pc-windows-msvc, speech: x86_64-pc-windows-msvc, gpu: vulkan }
+          # whisper.cpp's Vulkan backend does not configure with the runner's Visual Studio yet: CPU speech.
+          - { os: windows-2025, target: x86_64-pc-windows-msvc, speech: x86_64-pc-windows-msvc, gpu: "" }
           - { os: windows-11-arm, target: aarch64-pc-windows-msvc, speech: aarch64-pc-windows-msvc, gpu: "" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -169,7 +170,7 @@ jobs:
         include:
           - { os: macos-15, formats: "app,dmg", gpu: metal }
           - { os: macos-15-intel, formats: "app,dmg", gpu: "" }
-          - { os: windows-2025, formats: nsis, gpu: vulkan }
+          - { os: windows-2025, formats: nsis, gpu: "" }
           - { os: ubuntu-24.04, formats: "appimage,deb,pacman", gpu: vulkan }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -202,7 +203,7 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install nsis -y --no-progress
       - name: Vulkan SDK (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.gpu == 'vulkan'
         uses: jakoch/install-vulkan-sdk-action@7fe84289ddbf750f7eff9f8e4588e600e1dd06c8 # v1.8.1
         with:
           cache: true

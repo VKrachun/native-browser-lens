@@ -236,8 +236,19 @@ export function RecordingEditor({
   };
   useEffect(() => {
     const listener = (event: KeyboardEvent) => keys.current(event);
+    // A click on the replay (Highlight, a mark) focuses its iframe, whose keys never reach this
+    // window: the replay needs no keyboard, so the focus comes straight back.
+    const refocus = () =>
+      setTimeout(() => {
+        const active = document.activeElement;
+        if (active instanceof HTMLIFrameElement && stage.current?.contains(active)) active.blur();
+      });
     window.addEventListener('keydown', listener);
-    return () => window.removeEventListener('keydown', listener);
+    window.addEventListener('blur', refocus);
+    return () => {
+      window.removeEventListener('keydown', listener);
+      window.removeEventListener('blur', refocus);
+    };
   }, []);
 
   // Speech, as words at their moments.
