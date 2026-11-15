@@ -264,6 +264,13 @@ pub fn setup(paths: &Paths) -> io::Result<()> {
 /// welcome page until an extension has connected. A problem shows on that page.
 pub fn open(paths: &Paths) -> io::Result<()> {
     let result = open_steps(paths);
+    // The live setup wizard, when the app runs; the page below when it could not start.
+    if result.is_ok()
+        && let Ok(Reply::SetupPage(url)) = Client::attach(paths)
+            .and_then(|mut c| c.call(Request::SetupPage).map_err(io::Error::other))
+    {
+        return open_url(&url);
+    }
     let connected = matches!(result, Ok(true));
     let problem = result.as_ref().err().map(|e| e.to_string());
     if let Err(e) = &result {
@@ -466,6 +473,7 @@ mod tests {
                 profile: "p".into(),
                 protocol: PROTOCOL_VERSION,
                 granted_origins: vec!["https://shop.test".into()],
+                extension_id: None,
             },
             last_seen: 1,
         }];

@@ -18,6 +18,7 @@ import { RecordingEditor } from './RecordingEditor';
 import { Handoff, handoffName, useHandoff } from './Handoff';
 import { Notes } from '../sidepanel/Notes';
 import { useStored } from '../sidepanel/Record';
+import { clock, useSince } from '../sidepanel/Voice';
 import type { SirvantRun } from '@/protocol/SirvantRun';
 import type { Issue } from '@/protocol/Issue';
 import type { Duplicate } from '@/protocol/Duplicate';
@@ -264,7 +265,8 @@ export function Review({ observation: id }: { observation: number }) {
         <section className="summary" aria-label="Title and findings">
           <Notes key={notesVersion} client={client} id={id} onSaved={() => {}} />
           <p className="small muted summary-state" role="status" aria-label="Summary">
-            {summary.state === 'running' && <>Claude is writing a title and the findings…</>}
+            {summary.state === 'running' && <Running text="Claude is writing a title and the findings…" />}
+            {summary.state === 'idle' && waitingForWords && <>The title and findings follow once your words are written down.</>}
             {summary.state === 'done' && <>{summary.agent === 'claude' ? 'Claude Haiku' : 'Codex'} wrote the title and the findings. Edit them as you like.</>}
             {summary.state === 'failed' && <>No title was written: {summary.reason}</>}
             {summary.state !== 'running' && (
@@ -806,6 +808,17 @@ function Duplicates({ client, id }: { client: LensClient; id: number }) {
         ))}
       </ul>
     </section>
+  );
+}
+
+/** Work in progress, with a spinner and the time so far. */
+function Running({ text }: { text: string }) {
+  const elapsed = useSince(text);
+  return (
+    <span className="waiting">
+      <span className="spinner" aria-hidden="true" />
+      {text} {clock(elapsed)}
+    </span>
   );
 }
 

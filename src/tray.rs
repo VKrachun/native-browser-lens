@@ -26,6 +26,7 @@ pub struct Snapshot {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Action {
     TogglePause,
+    OpenSetup,
     ToggleAutomatic,
     UpdateNow,
     OpenLogs,
@@ -80,6 +81,11 @@ pub fn perform(paths: &Paths, action: Action, now: &Snapshot) {
             });
             Ok(())
         }
+        Action::OpenSetup => match call(Request::SetupPage) {
+            Ok(Reply::SetupPage(url)) => crate::setup::open_url(&url),
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        },
         Action::OpenLogs => open(&paths.logs),
         Action::Start => crate::service::start(paths),
         Action::Restart => crate::paths::executable().and_then(|exe| {
@@ -151,12 +157,17 @@ pub fn menu(now: &Snapshot) -> Vec<Option<Item>> {
         ];
     }
     let mut items = vec![text(format!("Lens {} is running", now.version))];
-    if now.setup_done < now.setup_required {
-        items.push(text(format!(
-            "Setup: {} of {} done (lens setup)",
-            now.setup_done, now.setup_required
-        )));
-    }
+    items.push(button(
+        &if now.setup_done < now.setup_required {
+            format!(
+                "Finish setting up ({} of {} done)…",
+                now.setup_done, now.setup_required
+            )
+        } else {
+            "Set up Lens…".to_string()
+        },
+        Action::OpenSetup,
+    ));
     items.push(None);
     items.push(check("Pause collection", Action::TogglePause, now.paused));
     if !now.managed {
@@ -561,7 +572,7 @@ mod tests {
             .flatten()
             .map(|i| i.label)
             .collect();
-        assert!(labels.contains(&"Setup: 2 of 4 done (lens setup)".to_string()));
+        assert!(labels.contains(&"Finish setting up (2 of 4 done)…".to_string()));
         assert!(labels.contains(&"Check for updates now".to_string()));
 
         let managed = Snapshot {

@@ -164,6 +164,8 @@ pub enum Request {
         ask: u64,
         tabs: Vec<crate::live::LiveTab>,
     },
+    /// The setup wizard's address, served by this daemon on 127.0.0.1.
+    SetupPage,
     /// Gives the coding agents here the sirv-lens skill and MCP server (`lens agents connect`).
     ConnectAgents,
     /// Takes them back (`lens agents disconnect`).
@@ -208,6 +210,11 @@ pub enum Request {
         observation: i64,
     },
     DeleteVoiceNote {
+        #[ts(type = "number")]
+        id: i64,
+    },
+    /// Transcribes a voice note again, after it failed.
+    RetryVoiceNote {
         #[ts(type = "number")]
         id: i64,
     },
@@ -385,6 +392,7 @@ pub enum Reply {
     Exported(Exported),
     HandoffApps(Vec<crate::handoff::HandoffApp>),
     AgentSetup(Vec<crate::agents::AgentSetup>),
+    SetupPage(String),
     Ask(Option<crate::live::Ask>),
     LiveEvidence(Vec<crate::live::LiveDigest>),
     /// The review was handed off; `folder` holds the exported report.
@@ -616,6 +624,10 @@ pub struct ClientInfo {
     pub profile: String,
     pub protocol: u32,
     pub granted_origins: Vec<String>,
+    /// The extension's ID in this browser: the store's, or the unpacked one. Older extensions do
+    /// not send it.
+    #[serde(default)]
+    pub extension_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

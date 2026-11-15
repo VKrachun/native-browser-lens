@@ -386,3 +386,36 @@ code,
   background: var(--background);
   box-shadow: var(--app-shadow-hairline), var(--app-shadow-xs);
 }
+
+/* Work in progress: a small spinner beside what is being done. */
+.waiting {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.spinner {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  border: 2px solid var(--border);
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation-duration: 2.4s;
+  }
+}
+.voice-progress {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin: 6px 0 0;
+}

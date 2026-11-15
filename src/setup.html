@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Set up Sirv Lens</title>
+<style>
+  :root {
+    --bg: #f6f7fb; --card: #ffffff; --text: #141a26; --muted: #5d6576; --border: #e1e5ee;
+    --primary: #1f5eff; --primary-text: #ffffff; --soft: #eef3ff; --ok: #1a7f45; --ok-soft: #e6f5ec;
+    --warn: #8a5a00; --warn-soft: #fff4dc; --danger: #b42318;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, monospace;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f131a; --card: #171c25; --text: #e8ecf3; --muted: #9aa3b5; --border: #2a3140;
+      --primary: #6b95ff; --primary-text: #0b1020; --soft: #1b2438; --ok: #4cc27f; --ok-soft: #14271c;
+      --warn: #f0b64b; --warn-soft: #2b2312; --danger: #ff7a6b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 40px 20px 64px; }
+  header { display: flex; align-items: center; gap: 14px; margin-bottom: 8px; }
+  .mark { width: 40px; height: 40px; border-radius: 10px; background: var(--primary); display: grid; place-items: center; flex: none; }
+  .mark svg { width: 24px; height: 24px; }
+  h1 { font-size: 26px; line-height: 1.2; margin: 0; letter-spacing: -0.01em; }
+  .lede { color: var(--muted); margin: 6px 0 24px; }
+  .progress { display: flex; align-items: center; gap: 10px; margin: 0 0 20px; font-size: 13px; color: var(--muted); }
+  .bar { flex: 1; height: 6px; background: var(--border); border-radius: 99px; overflow: hidden; }
+  .bar > span { display: block; height: 100%; background: var(--primary); border-radius: 99px; transition: width .4s ease; }
+  ol.steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+  .step { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 16px 18px; display: grid; grid-template-columns: 28px 1fr; gap: 4px 12px; }
+  .step[data-state="done"] { border-color: color-mix(in oklab, var(--ok) 35%, var(--border)); }
+  .step[data-state="current"] { border-color: var(--primary); box-shadow: 0 0 0 3px var(--soft); }
+  .dot { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-size: 13px; font-weight: 600; background: var(--soft); color: var(--primary); grid-row: span 2; }
+  .step[data-state="done"] .dot { background: var(--ok); color: #fff; }
+  .step[data-state="optional"] .dot { background: var(--border); color: var(--muted); }
+  .step h2 { font-size: 16px; margin: 2px 0 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .tag { font-size: 12px; font-weight: 500; padding: 1px 8px; border-radius: 99px; background: var(--border); color: var(--muted); }
+  .tag.ok { background: var(--ok-soft); color: var(--ok); }
+  .tag.warn { background: var(--warn-soft); color: var(--warn); }
+  .body { color: var(--muted); font-size: 14px; }
+  .body p { margin: 4px 0; }
+  .body strong { color: var(--text); font-weight: 600; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+  button, .btn { font: inherit; font-size: 14px; border-radius: 9px; padding: 7px 13px; border: 1px solid var(--border); background: var(--card); color: var(--text); cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--primary); }
+  button.primary { background: var(--primary); border-color: var(--primary); color: var(--primary-text); font-weight: 600; }
+  button:disabled { opacity: .55; cursor: default; }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+  .tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+  .tabs button[aria-pressed="true"] { background: var(--soft); border-color: var(--primary); color: var(--primary); font-weight: 600; }
+  ol.how { margin: 10px 0 0; padding-left: 20px; display: grid; gap: 6px; }
+  .path { display: flex; gap: 6px; align-items: center; margin-top: 6px; }
+  .path code { font-family: var(--mono); font-size: 12.5px; background: var(--bg); border: 1px solid var(--border); border-radius: 7px; padding: 5px 8px; overflow-x: auto; white-space: nowrap; flex: 1; min-width: 0; }
+  .waiting { display: inline-flex; align-items: center; gap: 8px; }
+  .spinner { width: 13px; height: 13px; flex: none; border: 2px solid var(--border); border-top-color: var(--primary); border-radius: 50%; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(1turn); } }
+  @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } .bar > span { transition: none; } }
+  .meter { height: 6px; background: var(--border); border-radius: 99px; overflow: hidden; margin-top: 8px; max-width: 320px; }
+  .meter > span { display: block; height: 100%; background: var(--primary); }
+  label.choice { display: flex; gap: 8px; align-items: baseline; margin-top: 6px; color: var(--text); }
+  .error { color: var(--danger); font-size: 13px; margin-top: 6px; }
+  .note { font-size: 13px; color: var(--muted); }
+  footer { margin-top: 24px; font-size: 13px; color: var(--muted); }
+  .offline { background: var(--warn-soft); color: var(--warn); border-radius: 10px; padding: 10px 14px; margin-bottom: 16px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/><circle cx="12" cy="12" r="3.5"/></svg></div>
+    <h1>Set up Sirv Lens</h1>
+  </header>
+  <p class="lede" id="lede">Lens runs in the background and starts with your computer. A few steps are left; each turns green by itself when it is done.</p>
+  <div class="offline" id="offline" hidden>Lens does not answer. Open Sirv Lens from your applications, then this page continues.</div>
+  <div class="progress" aria-hidden="true"><div class="bar"><span id="bar" style="width:0"></span></div><span id="count"></span></div>
+  <ol class="steps" id="steps" aria-live="polite"></ol>
+  <footer>You can come back here any time: the Lens icon in the <span id="tray">menu bar</span>, then <strong>Set up Lens</strong>.</footer>
+</main>
+<script>
+"use strict";
+const base = location.pathname.endsWith("/") ? location.pathname : location.pathname + "/";
+let data = null;
+let chosen = null;
+const errors = {};
+const busy = {};
+
+function el(tag, props = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(props)) {
+    if (key === "class") node.className = value;
+    else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+    else if (value === true) node.setAttribute(key, "");
+    else if (value !== false && value != null) node.setAttribute(key, value);
+  }
+  for (const child of children.flat()) {
+    if (child == null || child === false) continue;
+    node.append(typeof child === "string" ? document.createTextNode(child) : child);
+  }
+  return node;
+}
+
+async function act(key, body) {
+  busy[key] = true; delete errors[key]; render();
+  try {
+    const response = await fetch(base + "action", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const answer = await response.json();
+    if (!answer.ok) errors[key] = answer.error;
+  } catch (error) {
+    errors[key] = "Lens did not answer";
+  } finally {
+    busy[key] = false;
+    await load();
+  }
+}
+
+function button(label, key, body, primary) {
+  return el("button", { type: "button", class: primary ? "primary" : "", disabled: !!busy[key], onclick: () => act(key, body) }, busy[key] ? "Working…" : label);
+}
+
+function copy(text, label) {
+  return el("button", { type: "button", onclick: async (event) => {
+    const target = event.currentTarget;
+    try { await navigator.clipboard.writeText(text); target.textContent = "Copied"; }
+    catch { target.textContent = "Select and copy it"; }
+    setTimeout(() => (target.textContent = label), 1600);
+  } }, label);
+}
+
+function error(key) {
+  return errors[key] ? el("p", { class: "error", role: "alert" }, errors[key]) : null;
+}
+
+function waiting(text) {
+  return el("span", { class: "waiting" }, el("span", { class: "spinner", "aria-hidden": "true" }), text);
+}
+
+function step(number, title, state, tag, ...body) {
+  return el("li", { class: "step", "data-state": state },
+    el("span", { class: "dot", "aria-hidden": "true" }, state === "done" ? "✓" : String(number)),
+    el("h2", {}, title, tag ? el("span", { class: "tag " + (tag.kind || "") }, tag.text) : null),
+    el("div", { class: "body" }, ...body));
+}
+
+function mb(bytes) { return Math.round(bytes / 1e6) + " MB"; }
+const BROWSERS = { chrome: "Chrome", chromium: "Chromium", edge: "Edge", brave: "Brave", firefox: "Firefox" };
+function browserName(key) { return BROWSERS[key] || key; }
+
+function render() {
+  if (!data) return;
+  const s = data.setup || {};
+  const steps = [];
+  let done = 0, total = 0;
+  const mac = data.platform === "macos";
+  document.getElementById("tray").textContent = mac ? "menu bar" : "system tray";
+
+  // 1. The app.
+  total++;
+  const service = !!s.service;
+  if (service) done++;
+  steps.push(step(1, "Lens app", service ? "done" : "current", { text: "version " + data.version, kind: service ? "ok" : "warn" },
+    el("p", {}, service ? "Running, and it starts with your computer." : "Running now, but it does not start with your computer yet. Open Sirv Lens from your applications once to fix that.")));
+
+  // 2. The browser extension.
+  total++;
+  const current = (s.extensions || []).find((e) => e.client.protocol === s.protocol);
+  const outdated = !current && (s.extensions || []).length > 0;
+  if (current) done++;
+  const browsers = (data.browsers || []).filter((b) => b.registered);
+  if (!chosen || !browsers.some((b) => b.name === chosen)) chosen = (browsers.find((b) => !b.firefox) || browsers[0] || {}).name || null;
+  const browser = browsers.find((b) => b.name === chosen);
+  const extensionBody = [];
+  if (current) {
+    extensionBody.push(el("p", {}, "Connected from " + browserName(current.client.browser) + " (extension " + current.client.extensionVersion + "). To add Lens to another browser too, choose it below."));
+  } else if (outdated) {
+    extensionBody.push(el("p", {}, "An older Lens extension connected. Reload it on the browser's extensions page so it takes the version that came with this app."));
+  } else {
+    extensionBody.push(el("p", {}, "The extension records the site you test. It comes with the app; your browser adds it from a folder in three steps."));
+  }
+  if (browsers.length === 0) {
+    extensionBody.push(el("p", {}, "Lens found no supported browser. Install Chrome, Edge, Brave, Chromium or Firefox, then come back."));
+  } else {
+    if (browsers.length > 1) extensionBody.push(el("div", { class: "tabs", role: "group", "aria-label": "Browser" },
+      browsers.map((b) => el("button", { type: "button", "aria-pressed": String(b.name === chosen), onclick: () => { chosen = b.name; render(); } }, b.name))));
+    if (browser && !browser.firefox) {
+      const folder = data.folders.chromium;
+      extensionBody.push(el("ol", { class: "how" },
+        el("li", {}, "Open the extensions page of " + browser.name + ". ", button("Open " + browser.page, "ext-" + browser.name, { action: "openExtensions", browser: browser.name })),
+        el("li", {}, "Turn on ", el("strong", {}, "Developer mode"), " (top right of that page)."),
+        el("li", {}, "Choose ", el("strong", {}, "Load unpacked"), " and select this folder", mac ? " (in the folder window, press ⌘⇧G and paste it):" : ":",
+          el("div", { class: "path" }, el("code", {}, folder), copy(folder, "Copy"), button("Show folder", "folder", { action: "showFolder", firefox: false })))));
+      extensionBody.push(error("ext-" + browser.name), error("folder"));
+    } else if (browser) {
+      const manifest = data.folders.firefox;
+      extensionBody.push(el("ol", { class: "how" },
+        el("li", {}, "Open Firefox's debugging page. ", button("Open about:debugging", "ext-" + browser.name, { action: "openExtensions", browser: browser.name })),
+        el("li", {}, "Choose ", el("strong", {}, "Load Temporary Add-on"), " and select this file:",
+          el("div", { class: "path" }, el("code", {}, manifest), copy(manifest, "Copy"), button("Show folder", "folder-ff", { action: "showFolder", firefox: true }))),
+        el("li", {}, "Firefox removes it when it closes; load it again after a restart, until Lens is on Firefox Add-ons.")));
+      extensionBody.push(error("ext-" + browser.name), error("folder-ff"));
+    }
+    if (!current) extensionBody.push(el("p", { class: "row" }, waiting("Waiting for the extension to connect…")));
+  }
+  steps.push(step(2, "Add Lens to your browser", current ? "done" : "current", current ? { text: "connected", kind: "ok" } : null, ...extensionBody));
+
+  // 3. A site.
+  total++;
+  const site = (s.steps || []).find((x) => x.name === "A site to collect on");
+  const siteDone = site && site.mark === "done";
+  if (siteDone) done++;
+  steps.push(step(3, "Choose a site to record", siteDone ? "done" : current ? "current" : "todo", siteDone ? { text: site.detail, kind: "ok" } : null,
+    el("p", {}, "Open the site you test, click the Lens button in the toolbar, and choose ", el("strong", {}, "Collect evidence on this site"), ". Lens reads only the sites you add."),
+    !siteDone && current ? el("p", { class: "row" }, waiting("Waiting for a site…")) : null));
+
+  // 4. Voice.
+  total++;
+  const speech = data.speech;
+  const model = speech && speech.model;
+  const voiceDone = model && model.state === "ready";
+  if (voiceDone) done++;
+  const voice = [];
+  if (!speech) voice.push(el("p", {}, "Lens cannot check its speech program."));
+  else if (voiceDone) voice.push(el("p", {}, "Ready: " + speech.modelName + ", on " + (speech.engines[0] || "this computer") + ". Your voice is written down on this computer only."));
+  else if (model.state === "downloading") {
+    const share = model.total ? model.received / model.total : 0;
+    voice.push(el("p", {}, waiting("Downloading " + speech.modelName + "… " + mb(model.received) + " of " + mb(model.total || speech.downloadBytes))),
+      el("div", { class: "meter", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(Math.round(share * 100)) }, el("span", { style: "width:" + (share * 100).toFixed(1) + "%" })));
+  } else {
+    voice.push(el("p", {}, "Lens writes down what you say while you record, on this computer. It needs the " + speech.modelName + " model once, " + mb(speech.downloadBytes) + "."),
+      model.state === "failed" ? el("p", { class: "error" }, "The download stopped: " + model.reason) : null,
+      el("div", { class: "row" }, button(model.state === "failed" ? "Download again" : "Download the speech model", "speech", { action: "installSpeech" }, true)), error("speech"));
+  }
+  steps.push(step(4, "Voice", voiceDone ? "done" : "todo", voiceDone ? { text: "ready", kind: "ok" } : null, ...voice));
+
+  // 5. AI model (optional).
+  const agents = data.agents || [];
+  const ready = agents.filter((a) => a.state === "ready");
+  const names = { claude: "Claude Code", codex: "Codex" };
+  const stateText = { ready: "ready", signIn: "installed, not signed in", missing: "not installed" };
+  const ai = [el("p", {}, "Lens writes each task's title and findings with your own Claude Code or Codex, as text only. Without one, you write them yourself.")];
+  for (const a of agents) ai.push(el("p", {}, el("strong", {}, names[a.agent] || a.agent), ": " + stateText[a.state]));
+  if (ready.length) {
+    for (const [value, label] of [[null, "Automatic (Claude first)"], ["claude", "Claude Code"], ["codex", "Codex"]]) {
+      const usable = value === null || ready.some((a) => a.agent === value);
+      ai.push(el("label", { class: "choice" }, el("input", { type: "radio", name: "agent", checked: data.summaryAgent === value, disabled: !usable,
+        onchange: () => act("agent", { action: "setSummaryAgent", agent: value }) }), label));
+    }
+  }
+  ai.push(error("agent"));
+  steps.push(step(5, "AI for titles and findings", ready.length ? "done" : "optional", { text: ready.length ? "ready" : "optional", kind: ready.length ? "ok" : "" }, ...ai));
+
+  // 6. Coding agents (optional).
+  steps.push(step(6, "Coding agents", data.codingAgentsConnected ? "done" : "optional", { text: data.codingAgentsConnected ? "connected" : "optional", kind: data.codingAgentsConnected ? "ok" : "" },
+    el("p", {}, "Let Claude Code, Codex, Cursor and Gemini CLI read your recordings, reproduce them and prove a fix."),
+    el("div", { class: "row" }, button(data.codingAgentsConnected ? "Connect again" : "Connect coding agents", "agents", { action: "connectAgents" }, !data.codingAgentsConnected)), error("agents")));
+
+  // 7. VibeQ (optional).
+  const vibeq = data.vibeq || {};
+  const chromium = browsers.find((b) => !b.firefox && current && b.name.toLowerCase().includes(current.client.browser)) || browsers.find((b) => !b.firefox);
+  steps.push(step(7, "VibeQ", vibeq.signedIn ? "done" : "optional", { text: vibeq.signedIn ? "signed in" + (vibeq.account ? " as " + vibeq.account : "") : "optional", kind: vibeq.signedIn ? "ok" : "" },
+    el("p", {}, "File recordings as VibeQ tasks with one click."),
+    !vibeq.signedIn && current && chromium ? el("div", { class: "row" }, button("Open Lens Settings to sign in", "settings", { action: "openSettings", browser: chromium.name })) : null,
+    !vibeq.signedIn && !current ? el("p", { class: "note" }, "First add the extension; then sign in from Lens Settings.") : null,
+    error("settings")));
+
+  const list = document.getElementById("steps");
+  const focused = document.activeElement && document.activeElement.closest(".step") ? [...list.children].indexOf(document.activeElement.closest(".step")) : -1;
+  list.replaceChildren(...steps);
+  if (focused >= 0) list.children[focused]?.querySelector("button, input")?.focus({ preventScroll: true });
+  document.getElementById("bar").style.width = Math.round((done / total) * 100) + "%";
+  document.getElementById("count").textContent = done + " of " + total + " required steps done";
+  document.getElementById("lede").textContent = done === total
+    ? "Lens is ready. Open the site you test, click the Lens button and press Record."
+    : "Lens runs in the background and starts with your computer. A few steps are left; each turns green by itself when it is done.";
+}
+
+async function load() {
+  try {
+    const response = await fetch(base + "status", { cache: "no-store" });
+    if (!response.ok) throw new Error(String(response.status));
+    data = await response.json();
+    document.getElementById("offline").hidden = true;
+    render();
+  } catch {
+    document.getElementById("offline").hidden = false;
+  }
+}
+
+load();
+setInterval(() => { if (!document.hidden) load(); }, 2000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
+</script>
+</body>
+</html>

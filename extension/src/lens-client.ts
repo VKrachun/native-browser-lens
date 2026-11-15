@@ -40,6 +40,8 @@ type ReplyTo = {
   recentEvidence: 'liveEvidence';
   waitForAsk: 'ask';
   provideEvidence: 'done';
+  retryVoiceNote: 'voiceNote';
+  setupPage: 'setupPage';
   disconnectAgents: 'agentSetup';
   handOff: 'handedOff';
   getVibeQ: 'vibeQ';

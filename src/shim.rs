@@ -49,7 +49,16 @@ pub fn connect_or_start(paths: &Paths) -> io::Result<Stream> {
     if let Ok(stream) = ipc::connect(paths) {
         return Ok(stream);
     }
-    spawn_daemon(paths)?;
+    // With the service installed, the service manager starts the daemon: a plain one started
+    // here, say in the seconds an update restarts the service, would take its lock and leave
+    // Lens without its update watch and tray until the next login.
+    // A data folder of its own (LENS_HOME: tests, demos) never uses the person's service.
+    let service = std::env::var_os("LENS_HOME").is_none()
+        && crate::service::state(paths) != crate::service::State::NotInstalled
+        && crate::service::start(paths).is_ok();
+    if !service {
+        spawn_daemon(paths)?;
+    }
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match ipc::connect(paths) {

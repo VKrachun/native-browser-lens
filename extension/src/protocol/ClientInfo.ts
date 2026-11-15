@@ -8,4 +8,9 @@ browser: string, extensionVersion: string,
 /**
  * A random ID kept in the browser profile, so two profiles count as two clients.
  */
-profile: string, protocol: number, grantedOrigins: Array<string>, };
+profile: string, protocol: number, grantedOrigins: Array<string>, 
+/**
+ * The extension's ID in this browser: the store's, or the unpacked one. Older extensions do
+ * not send it.
+ */
+extensionId: string | null, };

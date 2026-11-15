@@ -595,6 +595,15 @@ try {
     for (const left of ['.lens', 'test-results', `lens-verify-${latest.id}-capture-1-reproduced.png`]) {
       if (existsSync(resolve(import.meta.dirname, '..', left))) throw new Error(`verify_fix left ${left} in the project`);
     }
+    // The setup wizard: the daemon serves it on 127.0.0.1 with a token; it sees the extension, and
+    // other sites cannot post to it.
+    const wizard = execFileSync(bin, ['setup-page'], { env, encoding: 'utf8' }).trim();
+    const setup = await (await fetch(`${wizard}status`)).json();
+    if (!setup.setup.extensions.length || !setup.browsers.some((b) => b.registered)) throw new Error(`wizard status: ${JSON.stringify(setup).slice(0, 300)}`);
+    if (!(await (await fetch(wizard)).text()).includes('Set up Sirv Lens')) throw new Error('wizard page');
+    const foreign = await fetch(`${wizard}action`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://evil.test' }, body: '{"action":"connectAgents"}' });
+    if (foreign.status !== 403) throw new Error(`wizard accepted a foreign post: ${foreign.status}`);
+    if ((await fetch(wizard.replace(/[0-9a-f]{32}\/$/, '0'.repeat(32) + '/'))).status !== 404) throw new Error('wizard without its token');
     const image = (await rpc('tools/call', { name: 'read_review_file', arguments: { review: latest.id, file: 'capture-1.png' } })).content[0];
     if (image.type !== 'image' || image.mimeType !== 'image/png' || !image.data.startsWith('iVBORw0KGgo')) {
       throw new Error(`MCP image: ${JSON.stringify(image).slice(0, 200)}`);

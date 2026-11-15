@@ -30,5 +30,6 @@ export async function clientInfo(): Promise<ClientInfo> {
     profile: await profileId(),
     protocol: PROTOCOL_VERSION,
     grantedOrigins: [...new Set(origins.filter((o) => /^https?:\/\//.test(o)).map((o) => o.replace(/\/\*$/, '')))],
+    extensionId: browser.runtime.id,
   };
 }

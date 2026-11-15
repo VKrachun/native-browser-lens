@@ -15,6 +15,7 @@ import type { Shot } from '@/protocol/Shot';
 import type { TimeRange } from '@/protocol/TimeRange';
 import type { VoiceNote } from '@/protocol/VoiceNote';
 import { AddNoteIcon, CutIcon, DeleteIcon, MaskIcon, PenIcon, TargetIcon } from '@/ui/icons';
+import { VoiceProgress } from '../sidepanel/Voice';
 
 type Player = InstanceType<typeof rrwebPlayer>;
 type Mark = { at: number; kind: 'step' | 'error' | 'note'; label: string };
@@ -739,7 +740,7 @@ export function RecordingEditor({
       <aside className="editor-side">
         <section aria-label="Transcript">
           <h3 className="label">Your voice</h3>
-          {words.length ? (
+          {words.length > 0 && (
             <ol className="lines">
               {words.map((w) =>
                 fixing && fixing.note === w.note && fixing.index === w.index ? (
@@ -776,11 +777,18 @@ export function RecordingEditor({
                 ),
               )}
             </ol>
-          ) : (
-            <p className="small muted">
-              {voice.some((v) => v.state !== 'done') ? 'Writing down what you said…' : 'No voice in this recording.'}
-            </p>
           )}
+          {/* Words appear as each note is written down; the others say where they are. */}
+          {voice.map((note, index) => (
+            <VoiceProgress
+              key={note.id}
+              client={client}
+              note={note}
+              label={voice.length > 1 ? `Voice note ${index + 1}` : undefined}
+              onChange={(changed) => onVoice?.(changed)}
+            />
+          ))}
+          {voice.length === 0 && <p className="small muted">No voice in this recording.</p>}
         </section>
         <section aria-label="Notes">
           <h3 className="label">Notes</h3>

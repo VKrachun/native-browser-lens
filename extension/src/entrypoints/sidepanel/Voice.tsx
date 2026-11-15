@@ -5,12 +5,91 @@ import type { VoiceNote } from '@/protocol/VoiceNote';
 import { AddNoteIcon, DeleteIcon, MicIcon, PlayIcon, StopIcon } from '@/ui/icons';
 import { MicrophoneBlocked, record, type Recording } from '@/voice';
 
-const clock = (ms: number) => {
+export const clock = (ms: number) => {
   const s = Math.max(0, Math.round(ms / 1000));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 };
 
 export const transcriptText = (note: VoiceNote) => note.segments.map((s) => s.text.trim()).join(' ');
+
+/** Time since a value last changed, for "Writing down… 0:07". */
+export function useSince(key: string) {
+  const [since, setSince] = useState(() => Date.now());
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => setSince(Date.now()), [key]);
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  return now - since;
+}
+
+/**
+ * Where one voice note's words are: in line, being written down (with the time so far), not
+ * written down (with the reason and Try again), or no speech found. Nothing for a note with words.
+ */
+export function VoiceProgress({
+  client,
+  note,
+  label,
+  ariaLabel,
+  onChange,
+}: {
+  client: LensClient;
+  note: VoiceNote;
+  /** Which note, when there are several, such as "Voice note 2". */
+  label?: string;
+  /** The accessible name of the state line, such as "Transcript". */
+  ariaLabel?: string;
+  onChange: (note: VoiceNote) => void;
+}) {
+  const elapsed = useSince(`${note.id}-${note.state}`);
+  const [retrying, setRetrying] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+  const prefix = label ? `${label}: ` : '';
+  async function retry() {
+    setRetrying(true);
+    setProblem(null);
+    try {
+      onChange(await client.request({ method: 'retryVoiceNote', params: { id: note.id } }));
+    } catch (error) {
+      setProblem((error as Error).message);
+    } finally {
+      setRetrying(false);
+    }
+  }
+  if (note.state === 'done') {
+    return note.segments.length ? null : (
+      <p className="small muted voice-progress" role="status" aria-label={ariaLabel}>
+        {prefix}No speech found in this recording.
+      </p>
+    );
+  }
+  if (note.state === 'failed') {
+    return (
+      <div className="small voice-progress" role="alert" aria-label={ariaLabel}>
+        <span className="danger-text">
+          {prefix}Not written down: {note.detail ?? 'the speech program stopped'}
+        </span>
+        <button type="button" className="btn btn-secondary btn-sm" onClick={() => void retry()} disabled={retrying}>
+          {retrying ? 'Starting…' : 'Try again'}
+        </button>
+        {problem && <span className="danger-text">{problem}</span>}
+      </div>
+    );
+  }
+  // Waiting with a reason is waiting for something the person does, such as the model download.
+  const blocked = note.state === 'waiting' && note.detail;
+  return (
+    <p className="small muted voice-progress waiting" role="status" aria-live="polite" aria-label={ariaLabel}>
+      {!blocked && <span className="spinner" aria-hidden="true" />}
+      {prefix}
+      {note.state === 'transcribing'
+        ? `Writing down what you said… ${clock(elapsed)}`
+        : (note.detail ?? 'In line to be written down…')}
+    </p>
+  );
+}
 
 /**
  * Spoken notes for one observation. Lens writes them down on this computer; while the person
@@ -165,13 +244,18 @@ export function VoiceNotes({
                   </button>
                 </span>
               </div>
-              <p className="voice-text" aria-label="Transcript">
-                {note.state === 'done' &&
-                  (note.segments.length ? transcriptText(note) : <span className="muted">No speech found.</span>)}
-                {note.state === 'transcribing' && <span className="muted">Writing down what you said…</span>}
-                {note.state === 'waiting' && <span className="muted">{note.detail ?? 'Waiting for its turn…'}</span>}
-                {note.state === 'failed' && <span className="danger-text">Not transcribed: {note.detail}</span>}
-              </p>
+              {note.state === 'done' && note.segments.length > 0 ? (
+                <p className="voice-text" aria-label="Transcript">
+                  {transcriptText(note)}
+                </p>
+              ) : (
+                <VoiceProgress
+                  client={client}
+                  note={note}
+                  ariaLabel="Transcript"
+                  onChange={(changed) => setNotes((all) => all?.map((n) => (n.id === changed.id ? changed : n)) ?? null)}
+                />
+              )}
             </li>
           ))}
         </ol>

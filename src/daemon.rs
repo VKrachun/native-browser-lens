@@ -32,6 +32,8 @@ pub struct Daemon {
     paths: Paths,
     /// Agents' questions for live evidence, and the browsers' answers.
     live: crate::live::Asks,
+    /// The setup wizard's address, once its server runs.
+    setup_page: std::sync::OnceLock<String>,
 }
 
 const TOKEN_ACCOUNT: &str = "vibeq-token";
@@ -119,6 +121,12 @@ pub fn run(paths: &Paths, service: bool) -> std::io::Result<()> {
     // Unfinished uploads cannot resume after a restart: the client starts them again.
     let _ = std::fs::remove_dir_all(paths.data.join("uploads"));
     start_transcription(daemon.clone());
+    match crate::wizard::serve(daemon.clone(), paths) {
+        Ok(url) => {
+            let _ = daemon.setup_page.set(url);
+        }
+        Err(e) => log(paths, &format!("the setup page did not start: {e}")),
+    }
     if service {
         SERVICE.store(true, std::sync::atomic::Ordering::SeqCst);
         schedule_updates(daemon.clone());
@@ -222,10 +230,11 @@ impl Daemon {
             notebook: paths.data.clone(),
             paths: paths.clone(),
             live: crate::live::Asks::default(),
+            setup_page: std::sync::OnceLock::new(),
         }
     }
 
-    fn handle(&self, request: Request) -> Outcome {
+    pub(crate) fn handle(&self, request: Request) -> Outcome {
         match self.reply(request) {
             Ok(result) => Outcome::Ok {
                 result: Box::new(result),
@@ -802,6 +811,15 @@ impl Daemon {
                 self.live.answer(ask, tabs);
                 Reply::Done
             }
+            Request::SetupPage => {
+                drop(store);
+                Reply::SetupPage(
+                    self.setup_page
+                        .get()
+                        .cloned()
+                        .ok_or_else(|| bad("the setup page is not running"))?,
+                )
+            }
             Request::ConnectAgents => {
                 drop(store);
                 let lens = crate::paths::executable().map_err(storage)?;
@@ -1067,6 +1085,25 @@ impl Daemon {
             }
             Request::ListVoiceNotes { observation } => {
                 Reply::VoiceNotes(store.list_voice_notes(observation).map_err(storage)?)
+            }
+            Request::RetryVoiceNote { id } => {
+                let note = store
+                    .get_voice_note(id)
+                    .map_err(storage)?
+                    .ok_or_else(|| not_found("no such voice note"))?;
+                if note.state != VoiceState::Failed {
+                    return Err(bad("only a voice note that failed is transcribed again"));
+                }
+                store
+                    .set_voice_state(id, VoiceState::Waiting, None, &[], None)
+                    .map_err(storage)?;
+                let note = store
+                    .get_voice_note(id)
+                    .map_err(storage)?
+                    .ok_or_else(|| not_found("no such voice note"))?;
+                drop(store);
+                self.queue_transcription(id);
+                Reply::VoiceNote(note)
             }
             Request::DeleteVoiceNote { id } => {
                 if !store.delete_voice_note(id).map_err(storage)? {

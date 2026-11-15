@@ -68,6 +68,15 @@ fn result(agent: impl Into<String>, outcome: Result<String, String>) -> AgentSet
     }
 }
 
+/// Whether the agents here have the sirv-lens skill: the sign that `connect` ran.
+pub fn connected() -> bool {
+    home().is_some_and(|home| {
+        skill_folders(&home)
+            .iter()
+            .any(|folder| folder.join("SKILL.md").is_file())
+    })
+}
+
 /// Adds the skill and the MCP server for every agent found. `lens` is the program agents start.
 pub fn connect(lens: &Path) -> Vec<AgentSetup> {
     let Some(home) = home() else {

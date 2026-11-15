@@ -29,6 +29,7 @@ mod tray;
 mod update;
 mod verify;
 mod vibeq;
+mod wizard;
 
 use paths::Paths;
 use protocol::{MAX_REPLY_BYTES, ReplyFrame, Request, RequestFrame};
@@ -38,6 +39,7 @@ const USAGE: &str = "Usage: lens <command>
 
   open               Set Lens up without a terminal and open the welcome page
   setup              Set Lens up step by step, checking each step
+  setup-page         Print the address of the setup wizard (open opens it)
   doctor             Check every setup step once
   status             Show the version, folders, service and daemon
   paths <name>       Print one folder: data, logs or extension (for scripts)
@@ -208,6 +210,16 @@ fn main() -> ExitCode {
                 "lens verify <id> --base-url http://localhost:3000 [--capture N] [--project DIR]",
             )),
         },
+        Some("setup-page") => with_paths(|p| {
+            match crate::client::Client::connect(p)?
+                .call(Request::SetupPage)
+                .map_err(std::io::Error::other)?
+            {
+                protocol::Reply::SetupPage(url) => println!("{url}"),
+                _ => return Err(std::io::Error::other("unexpected reply")),
+            }
+            Ok(())
+        }),
         Some("recent") => {
             let site = args.get(1).map(String::as_str);
             with_paths(|p| cli::recent(p, site))
