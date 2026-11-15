@@ -32,8 +32,8 @@ pub struct Daemon {
     paths: Paths,
     /// Agents' questions for live evidence, and the browsers' answers.
     live: crate::live::Asks,
-    /// The setup wizard's address, once its server runs.
-    setup_page: std::sync::OnceLock<String>,
+    /// The setup wizard, once its server runs.
+    setup_page: std::sync::OnceLock<Arc<crate::wizard::Wizard>>,
 }
 
 const TOKEN_ACCOUNT: &str = "vibeq-token";
@@ -122,8 +122,8 @@ pub fn run(paths: &Paths, service: bool) -> std::io::Result<()> {
     let _ = std::fs::remove_dir_all(paths.data.join("uploads"));
     start_transcription(daemon.clone());
     match crate::wizard::serve(daemon.clone(), paths) {
-        Ok(url) => {
-            let _ = daemon.setup_page.set(url);
+        Ok(wizard) => {
+            let _ = daemon.setup_page.set(wizard);
         }
         Err(e) => log(paths, &format!("the setup page did not start: {e}")),
     }
@@ -816,8 +816,8 @@ impl Daemon {
                 Reply::SetupPage(
                     self.setup_page
                         .get()
-                        .cloned()
-                        .ok_or_else(|| bad("the setup page is not running"))?,
+                        .ok_or_else(|| bad("the setup page is not running"))?
+                        .link(),
                 )
             }
             Request::ConnectAgents => {

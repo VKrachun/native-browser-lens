@@ -164,7 +164,7 @@ pub enum Request {
         ask: u64,
         tabs: Vec<crate::live::LiveTab>,
     },
-    /// The setup wizard's address, served by this daemon on 127.0.0.1.
+    /// A link that opens the setup wizard once, within two minutes (served on 127.0.0.1).
     SetupPage,
     /// Gives the coding agents here the sirv-lens skill and MCP server (`lens agents connect`).
     ConnectAgents,

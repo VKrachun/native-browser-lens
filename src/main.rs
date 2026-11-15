@@ -39,7 +39,7 @@ const USAGE: &str = "Usage: lens <command>
 
   open               Set Lens up without a terminal and open the welcome page
   setup              Set Lens up step by step, checking each step
-  setup-page         Print the address of the setup wizard (open opens it)
+  setup-page         Print a link that opens the setup wizard once (open opens it)
   doctor             Check every setup step once
   status             Show the version, folders, service and daemon
   paths <name>       Print one folder: data, logs or extension (for scripts)

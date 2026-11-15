@@ -595,15 +595,20 @@ try {
     for (const left of ['.lens', 'test-results', `lens-verify-${latest.id}-capture-1-reproduced.png`]) {
       if (existsSync(resolve(import.meta.dirname, '..', left))) throw new Error(`verify_fix left ${left} in the project`);
     }
-    // The setup wizard: the daemon serves it on 127.0.0.1 with a token; it sees the extension, and
-    // other sites cannot post to it.
-    const wizard = execFileSync(bin, ['setup-page'], { env, encoding: 'utf8' }).trim();
-    const setup = await (await fetch(`${wizard}status`)).json();
+    // The setup wizard: a link that works once sets its session cookie; it sees the extension,
+    // and without the cookie, a second use of the link or another site's post, nothing works.
+    const link = execFileSync(bin, ['setup-page'], { env, encoding: 'utf8' }).trim();
+    const wizard = new URL(link).origin;
+    const start = await fetch(link, { redirect: 'manual' });
+    const cookie = (start.headers.get('set-cookie') ?? '').split(';')[0];
+    if (start.status !== 303 || !cookie.startsWith('lens_setup_')) throw new Error(`wizard link: ${start.status} ${cookie}`);
+    if ((await fetch(link, { redirect: 'manual' })).status !== 403) throw new Error('the wizard link worked twice');
+    if ((await fetch(`${wizard}/status`)).status !== 403) throw new Error('the wizard answered without its cookie');
+    const setup = await (await fetch(`${wizard}/status`, { headers: { Cookie: cookie } })).json();
     if (!setup.setup.extensions.length || !setup.browsers.some((b) => b.registered)) throw new Error(`wizard status: ${JSON.stringify(setup).slice(0, 300)}`);
-    if (!(await (await fetch(wizard)).text()).includes('Set up Sirv Lens')) throw new Error('wizard page');
-    const foreign = await fetch(`${wizard}action`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://evil.test' }, body: '{"action":"connectAgents"}' });
+    if (!(await (await fetch(`${wizard}/`, { headers: { Cookie: cookie } })).text()).includes('Set up Sirv Lens')) throw new Error('wizard page');
+    const foreign = await fetch(`${wizard}/action`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json', Origin: 'https://evil.test' }, body: '{"action":"connectAgents"}' });
     if (foreign.status !== 403) throw new Error(`wizard accepted a foreign post: ${foreign.status}`);
-    if ((await fetch(wizard.replace(/[0-9a-f]{32}\/$/, '0'.repeat(32) + '/'))).status !== 404) throw new Error('wizard without its token');
     const image = (await rpc('tools/call', { name: 'read_review_file', arguments: { review: latest.id, file: 'capture-1.png' } })).content[0];
     if (image.type !== 'image' || image.mimeType !== 'image/png' || !image.data.startsWith('iVBORw0KGgo')) {
       throw new Error(`MCP image: ${JSON.stringify(image).slice(0, 200)}`);

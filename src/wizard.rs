@@ -4,42 +4,95 @@
 //! browser's extensions page, show the extension folder, download the speech model, choose the
 //! AI model, connect the coding agents, open Lens Settings.
 //!
-//! Only this computer can reach it, and only with the random token in its address. The Host
-//! header must be the address itself (no DNS rebinding) and actions must come from the page's
-//! own origin (no other site can post to it). It answers through the daemon's own requests,
-//! from a short list.
+//! Access: the app opens a link that works once and for two minutes (a link in a command line or
+//! the browser history is useless after that). It sets an HttpOnly, SameSite=Strict session
+//! cookie, which every page and request then needs. The Host header must be the address itself
+//! (no DNS rebinding) and actions must come from the page's own origin. It answers through the
+//! daemon's own requests, from a short list.
 use crate::daemon::Daemon;
 use crate::investigate::{Agent, AgentInfo};
 use crate::paths::Paths;
 use crate::protocol::{Outcome, Reply, Request, SetupStatus, SpeechStatus, VibeQSettings};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::io::Read;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 const PAGE: &str = include_str!("setup.html");
 const MAX_BODY: u64 = 16 * 1024;
+/// How long a link from the app works.
+const LINK_LIFE: Duration = Duration::from_secs(120);
 
-/// Starts the server and returns the wizard's address.
-pub fn serve(daemon: Arc<Daemon>, paths: &Paths) -> std::io::Result<String> {
+pub struct Wizard {
+    port: u16,
+    session: String,
+    links: Mutex<HashMap<String, Instant>>,
+}
+
+impl Wizard {
+    /// A fresh address that opens the wizard once, within two minutes.
+    pub fn link(&self) -> String {
+        let code = uuid::Uuid::new_v4().simple().to_string();
+        let mut links = self.links.lock().unwrap_or_else(|p| p.into_inner());
+        links.retain(|_, made| made.elapsed() < LINK_LIFE);
+        links.insert(code.clone(), Instant::now());
+        format!("http://127.0.0.1:{}/start/{code}", self.port)
+    }
+
+    fn redeem(&self, code: &str) -> bool {
+        let mut links = self.links.lock().unwrap_or_else(|p| p.into_inner());
+        links
+            .remove(code)
+            .is_some_and(|made| made.elapsed() < LINK_LIFE)
+    }
+
+    fn cookie_name(&self) -> String {
+        format!("lens_setup_{}", self.port)
+    }
+
+    /// Whether the request carries this wizard's session cookie.
+    fn admitted(&self, request: &tiny_http::Request) -> bool {
+        let name = self.cookie_name();
+        header(request, "Cookie").is_some_and(|cookies| {
+            cookies.split(';').any(|pair| {
+                pair.trim()
+                    .split_once('=')
+                    .is_some_and(|(k, v)| k == name && same(v.as_bytes(), self.session.as_bytes()))
+            })
+        })
+    }
+}
+
+/// Equal in time that does not depend on where they differ.
+fn same(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// Starts the server.
+pub fn serve(daemon: Arc<Daemon>, paths: &Paths) -> std::io::Result<Arc<Wizard>> {
     let server = tiny_http::Server::http("127.0.0.1:0").map_err(std::io::Error::other)?;
     let port = server
         .server_addr()
         .to_ip()
         .map(|a| a.port())
         .ok_or_else(|| std::io::Error::other("no port"))?;
-    let token = uuid::Uuid::new_v4().simple().to_string();
-    let url = format!("http://127.0.0.1:{port}/{token}/");
+    let wizard = Arc::new(Wizard {
+        port,
+        session: uuid::Uuid::new_v4().simple().to_string(),
+        links: Mutex::new(HashMap::new()),
+    });
     let paths = paths.clone();
+    let serving = wizard.clone();
     std::thread::spawn(move || {
-        let server = Arc::new(server);
         for request in server.incoming_requests() {
-            let (daemon, paths, token) = (daemon.clone(), paths.clone(), token.clone());
-            std::thread::spawn(move || answer(&daemon, &paths, port, &token, request));
+            let (daemon, paths, wizard) = (daemon.clone(), paths.clone(), serving.clone());
+            std::thread::spawn(move || answer(&daemon, &paths, &wizard, request));
         }
     });
-    Ok(url)
+    Ok(wizard)
 }
 
 #[derive(Deserialize)]
@@ -61,9 +114,15 @@ fn header<'a>(request: &'a tiny_http::Request, name: &str) -> Option<&'a str> {
         .map(|h| h.value.as_str())
 }
 
-fn send(request: tiny_http::Request, status: u16, kind: &str, body: String) {
+fn send(
+    request: tiny_http::Request,
+    status: u16,
+    kind: &str,
+    body: String,
+    extra: &[(&str, &str)],
+) {
     let mut response = tiny_http::Response::from_string(body).with_status_code(status);
-    for (name, value) in [
+    let common = [
         ("Content-Type", kind),
         ("Cache-Control", "no-store"),
         ("X-Content-Type-Options", "nosniff"),
@@ -74,7 +133,8 @@ fn send(request: tiny_http::Request, status: u16, kind: &str, body: String) {
              connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; \
              form-action 'none'",
         ),
-    ] {
+    ];
+    for (name, value) in common.iter().chain(extra) {
         if let Ok(h) = tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()) {
             response.add_header(h);
         }
@@ -82,30 +142,69 @@ fn send(request: tiny_http::Request, status: u16, kind: &str, body: String) {
     let _ = request.respond(response);
 }
 
-fn answer(daemon: &Daemon, paths: &Paths, port: u16, token: &str, mut request: tiny_http::Request) {
-    let origin = format!("http://127.0.0.1:{port}");
+fn refuse(request: tiny_http::Request, status: u16, text: &str) {
+    send(
+        request,
+        status,
+        "text/plain; charset=utf-8",
+        text.into(),
+        &[],
+    );
+}
+
+fn answer(daemon: &Daemon, paths: &Paths, wizard: &Wizard, mut request: tiny_http::Request) {
+    let origin = format!("http://127.0.0.1:{}", wizard.port);
     if header(&request, "Host") != Some(&origin[7..]) {
-        return send(request, 403, "text/plain", "Forbidden".into());
+        return refuse(request, 403, "Forbidden");
     }
     let url = request.url().to_string();
-    let Some(rest) = url.strip_prefix(&format!("/{token}")) else {
-        return send(request, 404, "text/plain", "Not found".into());
-    };
-    let json_kind = "application/json; charset=utf-8";
-    match (request.method(), rest) {
-        (tiny_http::Method::Get, "/" | "") => {
-            send(request, 200, "text/html; charset=utf-8", PAGE.to_string())
+    if let Some(code) = url.strip_prefix("/start/") {
+        if request.method() != &tiny_http::Method::Get || !wizard.redeem(code) {
+            return refuse(
+                request,
+                403,
+                "This setup link was used already or is too old. Open Set up Lens again from the Lens icon.",
+            );
         }
+        let cookie = format!(
+            "{}={}; HttpOnly; SameSite=Strict; Path=/",
+            wizard.cookie_name(),
+            wizard.session
+        );
+        return send(
+            request,
+            303,
+            "text/plain",
+            String::new(),
+            &[("Location", "/"), ("Set-Cookie", &cookie)],
+        );
+    }
+    if !wizard.admitted(&request) {
+        return refuse(
+            request,
+            403,
+            "Open Set up Lens from the Lens icon, or open the Lens app: this page needs its link.",
+        );
+    }
+    let json_kind = "application/json; charset=utf-8";
+    match (request.method(), url.as_str()) {
+        (tiny_http::Method::Get, "/") => send(
+            request,
+            200,
+            "text/html; charset=utf-8",
+            PAGE.to_string(),
+            &[],
+        ),
         (tiny_http::Method::Get, "/status") => {
             let body = status(daemon, paths).to_string();
-            send(request, 200, json_kind, body)
+            send(request, 200, json_kind, body, &[])
         }
         (tiny_http::Method::Post, "/action") => {
             let same_origin = header(&request, "Origin") == Some(origin.as_str());
             let is_json =
                 header(&request, "Content-Type").is_some_and(|t| t.starts_with("application/json"));
             if !same_origin || !is_json {
-                return send(request, 403, "text/plain", "Forbidden".into());
+                return refuse(request, 403, "Forbidden");
             }
             let mut body = String::new();
             if request
@@ -114,7 +213,7 @@ fn answer(daemon: &Daemon, paths: &Paths, port: u16, token: &str, mut request: t
                 .read_to_string(&mut body)
                 .is_err()
             {
-                return send(request, 400, "text/plain", "Bad request".into());
+                return refuse(request, 400, "Bad request");
             }
             let result = match serde_json::from_str::<Action>(&body) {
                 Ok(action) => act(daemon, paths, action),
@@ -124,9 +223,9 @@ fn answer(daemon: &Daemon, paths: &Paths, port: u16, token: &str, mut request: t
                 Ok(()) => json!({ "ok": true }),
                 Err(error) => json!({ "ok": false, "error": error }),
             };
-            send(request, 200, json_kind, body.to_string())
+            send(request, 200, json_kind, body.to_string(), &[])
         }
-        _ => send(request, 404, "text/plain", "Not found".into()),
+        _ => refuse(request, 404, "Not found"),
     }
 }
 
@@ -384,6 +483,23 @@ mod tests {
             Some("com.google.Chrome")
         );
         assert!(launcher("Firefox (Flatpak)").unwrap().firefox);
+    }
+
+    #[test]
+    fn links_work_once_and_cookies_compare_whole() {
+        let wizard = Wizard {
+            port: 1,
+            session: "s".into(),
+            links: Mutex::new(HashMap::new()),
+        };
+        let link = wizard.link();
+        let code = link.rsplit('/').next().unwrap();
+        assert!(wizard.redeem(code));
+        assert!(!wizard.redeem(code), "a link works once");
+        assert!(!wizard.redeem("made-up"));
+        assert!(same(b"abc", b"abc"));
+        assert!(!same(b"abc", b"abd"));
+        assert!(!same(b"abc", b"ab"));
     }
 
     #[test]
