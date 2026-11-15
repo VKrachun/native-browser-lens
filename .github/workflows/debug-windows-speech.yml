@@ -1,0 +1,17 @@
+name: Debug Windows speech build
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  speech:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Rust toolchain
+        run: rustup toolchain install
+      - name: Build with build-script output
+        shell: bash
+        run: |
+          ls "/c/Program Files/LLVM/bin" | grep -i clang | head
+          export LIBCLANG_PATH='C:\Program Files\LLVM\bin'
+          cargo build -p lens-speech -vv 2>&1 | grep -a -i -E "warning=|unable to generate|bindgen|clang|error:" | head -80 || true
