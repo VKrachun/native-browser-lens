@@ -1,6 +1,6 @@
 {
   "name": "sirv-lens-extension",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "private": true,
   "description": "Sirv Lens browser extension",
   "type": "module",

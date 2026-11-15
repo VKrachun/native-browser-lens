@@ -24,7 +24,7 @@ const KINDS = [
 rmSync(dist, { recursive: true, force: true });
 cpSync(join(site, 'public'), dist, { recursive: true });
 mkdirSync(join(dist, 'download'), { recursive: true });
-const files = [];
+let files = [];
 const sums = [];
 for (const name of existsSync(downloads) ? readdirSync(downloads).sort() : []) {
   // The Arch archive is the PKGBUILD's source, not a download of its own.
@@ -68,6 +68,19 @@ for (const name of existsSync(downloads) ? readdirSync(downloads).sort() : []) {
   const sha256 = createHash('sha256').update(readFileSync(path)).digest('hex');
   files.push({ os: kind[1], label: kind[2], name, size, sha256, order: KINDS.indexOf(kind) });
 }
+// Older versions stay downloadable at their address (winget and old links point there), but the
+// page lists only the newest file of each kind.
+const versionOf = (name) => (name.match(/(\d+)\.(\d+)\.(\d+)/) ?? []).slice(1).map(Number);
+const newer = (a, b) => {
+  for (let i = 0; i < 3; i++) if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) > (b[i] ?? 0);
+  return false;
+};
+const newest = new Map();
+for (const file of files) {
+  const best = newest.get(file.order);
+  if (!best || newer(versionOf(file.name), versionOf(best.name))) newest.set(file.order, file);
+}
+files = [...newest.values()];
 const pkgbuild = join(dist, 'download', 'PKGBUILD');
 if (existsSync(pkgbuild)) {
   const data = readFileSync(pkgbuild);
