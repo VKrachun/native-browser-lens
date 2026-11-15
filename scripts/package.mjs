@@ -112,7 +112,17 @@ if (process.platform === 'darwin' && APPLE_API_KEY && APPLE_API_ISSUER && APPLE_
   for (const dmg of readdirSync(join(root, 'dist')).filter((f) => f.endsWith('.dmg'))) {
     const file = join(root, 'dist', dmg);
     run('xcrun', ['notarytool', 'submit', file, '--key', APPLE_API_KEY_PATH, '--key-id', APPLE_API_KEY, '--issuer', APPLE_API_ISSUER, '--wait']);
-    run('xcrun', ['stapler', 'staple', file]);
+    // The connection to Apple's ticket service sometimes drops, and a new ticket can take a moment
+    // to arrive: try again before failing the release.
+    for (let attempt = 1; ; attempt++) {
+      try {
+        run('xcrun', ['stapler', 'staple', file]);
+        break;
+      } catch (error) {
+        if (attempt === 5) throw error;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, attempt * 15_000);
+      }
+    }
   }
 }
 
