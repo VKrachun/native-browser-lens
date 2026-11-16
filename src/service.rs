@@ -36,6 +36,20 @@ fn run(program: &str, arguments: &[&str]) -> io::Result<String> {
     }
 }
 
+/// Installs the service, or moves it to `executable` when it starts another Lens program: the
+/// Lens the person opens is the one they want, say a new AppImage beside an older `lens`.
+/// Otherwise starts it. A data folder of its own (LENS_HOME: tests, demos) never moves the
+/// person's service.
+pub fn ensure(paths: &Paths, executable: &Path) -> io::Result<()> {
+    match state(paths) {
+        State::NotInstalled => install(paths, executable),
+        _ if std::env::var_os("LENS_HOME").is_none() && !runs(paths, executable) => {
+            install(paths, executable)
+        }
+        _ => start(paths),
+    }
+}
+
 /// Starts the daemon without any service manager, detached (as the browser shim does).
 fn spawn_detached(paths: &Paths) -> io::Result<()> {
     crate::shim::connect_or_start(paths).map(drop)
@@ -84,6 +98,19 @@ pub fn plist(executable: &Path, paths: &Paths) -> String {
         escape(executable),
         escape(&paths.logs.join("lensd.log")),
     )
+}
+
+/// Whether the installed service starts `executable`.
+#[cfg(target_os = "macos")]
+fn runs(paths: &Paths, executable: &Path) -> bool {
+    let want = plist(executable, paths);
+    let program = want
+        .lines()
+        .find(|l| l.contains("<array>"))
+        .unwrap_or_default();
+    plist_path()
+        .and_then(std::fs::read_to_string)
+        .is_ok_and(|have| have.contains(program))
 }
 
 #[cfg(target_os = "macos")]
@@ -176,6 +203,23 @@ pub fn unit(executable: &Path, paths: &Paths) -> String {
     )
 }
 
+/// Whether the installed service starts `executable`.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn runs(paths: &Paths, executable: &Path) -> bool {
+    let want = unit(executable, paths);
+    let program = want
+        .lines()
+        .find(|l| l.starts_with("ExecStart="))
+        .unwrap_or_default();
+    let autostart = format!("Exec=\"{}\" daemon", executable.display());
+    unit_path()
+        .and_then(std::fs::read_to_string)
+        .is_ok_and(|have| have.lines().any(|l| l == program))
+        || autostart_path()
+            .and_then(std::fs::read_to_string)
+            .is_ok_and(|have| have.contains(&autostart))
+}
+
 #[cfg(all(unix, not(target_os = "macos")))]
 pub fn install(paths: &Paths, executable: &Path) -> io::Result<()> {
     paths.ensure()?;
@@ -203,6 +247,7 @@ pub fn install(paths: &Paths, executable: &Path) -> io::Result<()> {
             executable.display()
         ),
     )?;
+    let _ = crate::stop_daemon(paths);
     spawn_detached(paths)
 }
 
@@ -258,6 +303,18 @@ pub fn launcher(executable: &Path) -> PathBuf {
     executable.with_file_name("lensw.exe")
 }
 
+/// Whether the installed service starts `executable`.
+#[cfg(windows)]
+fn runs(_paths: &Paths, executable: &Path) -> bool {
+    use winreg::{RegKey, enums::HKEY_CURRENT_USER};
+    RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(RUN_KEY)
+        .and_then(|k| k.get_value::<String, _>(RUN_VALUE))
+        .is_ok_and(|have| {
+            have == format!("\"{}\" daemon --service", launcher(executable).display())
+        })
+}
+
 #[cfg(windows)]
 pub fn install(paths: &Paths, executable: &Path) -> io::Result<()> {
     use winreg::{RegKey, enums::HKEY_CURRENT_USER};
@@ -274,6 +331,7 @@ pub fn install(paths: &Paths, executable: &Path) -> io::Result<()> {
         RUN_VALUE,
         &format!("\"{}\" daemon --service", launcher.display()),
     )?;
+    let _ = crate::stop_daemon(paths);
     start(paths)
 }
 

@@ -210,10 +210,7 @@ pub fn setup(paths: &Paths) -> io::Result<()> {
     println!(
         "Setting up Lens. Press Ctrl+C at any time; lens setup continues where you stopped.\n"
     );
-    if crate::service::state(paths) == crate::service::State::NotInstalled {
-        crate::service::install(paths, &executable)?;
-        println!("Lens now starts at login.");
-    }
+    crate::service::ensure(paths, &executable)?;
     crate::register::register(paths, &executable)?;
     let mut client = Client::connect(paths)?;
     let mut shown: Option<Vec<Step>> = None;
@@ -278,11 +275,7 @@ fn open_steps(paths: &Paths) -> io::Result<bool> {
     let executable = crate::paths::executable()?;
     crate::bundle::sync_extensions(paths)?;
     crate::register::register(paths, &executable)?;
-    if crate::service::state(paths) == crate::service::State::NotInstalled {
-        crate::service::install(paths, &executable)?;
-    } else {
-        crate::service::start(paths)?;
-    }
+    crate::service::ensure(paths, &executable)?;
     // The service manager starts the daemon; give it a moment before asking it.
     for _ in 0..40 {
         if let Ok(found) = Client::attach(paths).and_then(|mut c| status(&mut c)) {
