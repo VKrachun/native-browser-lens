@@ -276,13 +276,14 @@ jobs:
           (cd "$work/feed" && python -m http.server 8766 --bind 127.0.0.1 >/dev/null 2>&1 &)
           sleep 2
           export LENS_UPDATE_FEED=http://127.0.0.1:8766 LENS_UPDATE_PUBLIC_KEY=$(sed -n 2p "$work/test.pub" | tr -d '\r')
-          "$work/bin/lens.exe" start
-          "$work/bin/lens.exe" status | grep "daemon           running"
-          "$work/bin/lens.exe" update --check | grep "9.9.9 is available"
-          "$work/bin/lens.exe" update | grep "9.9.9 is installed"
+          lens() { timeout 120 "$work/bin/lens.exe" "$@" > "$work/out.txt" 2>&1; cat "$work/out.txt"; }
+          lens start
+          lens status && grep "daemon           running" "$work/out.txt"
+          lens update --check && grep "9.9.9 is available" "$work/out.txt"
+          lens update && grep "9.9.9 is installed" "$work/out.txt"
           tail -c 9 "$work/bin/lens.exe" | grep -q "new build"
           tail -c 9 "$work/bin/lensw.exe" | grep -q "new build"
           # The running daemon was renamed aside and restarted from the new file.
           sleep 3
-          "$work/bin/lens.exe" status | grep "daemon           running"
-          "$work/bin/lens.exe" stop
+          lens status && grep "daemon           running, version" "$work/out.txt"
+          lens stop

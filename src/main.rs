@@ -139,8 +139,13 @@ fn main() -> ExitCode {
                     // the new binary, at the path read before the update, does the restart.
                     if ipc::connect(p).is_ok() || service::state(p) != service::State::NotInstalled
                     {
+                        // No inherited output: on Windows the daemon this starts would keep a
+                        // pipe like `lens update | grep` open, and the reader would never finish.
                         std::process::Command::new(&executable)
                             .arg("restart")
+                            .stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
                             .status()?;
                     }
                     println!("Lens {} is installed.", manifest.version);
