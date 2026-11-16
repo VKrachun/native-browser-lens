@@ -290,6 +290,11 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      # Every installed copy takes this release: only a commit already on main ships.
+      - name: The tag is on main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
       - name: The tag matches both version numbers
         run: |
           crate="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
