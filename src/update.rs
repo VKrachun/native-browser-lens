@@ -25,6 +25,10 @@ pub struct Manifest {
     pub version: String,
     /// Keyed by target triple, as release archives are named.
     pub assets: BTreeMap<String, Asset>,
+    /// The installers, keyed as their names end ("macos-arm64", "linux-x86_64"): the macOS app
+    /// and the AppImage update from these as a whole.
+    #[serde(default)]
+    pub installers: BTreeMap<String, Asset>,
     /// The unpacked-extension package, refreshed with the app until store listings take over.
     pub extension: Option<Asset>,
 }
@@ -42,10 +46,38 @@ pub fn target() -> Option<&'static str> {
     })
 }
 
+/// The installer this computer's app and AppImage update from.
+fn installer() -> Option<&'static str> {
+    Some(match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => "linux-x86_64",
+        ("macos", "aarch64") => "macos-arm64",
+        ("macos", "x86_64") => "macos-x64",
+        _ => return None,
+    })
+}
+
+/// The AppImage this Lens runs from: Lens replaces that file as a whole.
+fn appimage() -> Option<PathBuf> {
+    std::env::var_os("APPIMAGE")
+        .map(PathBuf::from)
+        .filter(|image| image.is_file())
+}
+
+/// The macOS app bundle `executable` lives in: Lens replaces the bundle as a whole.
+fn app_bundle(executable: &Path) -> Option<PathBuf> {
+    let macos = executable.parent()?;
+    let bundle = macos.parent()?.parent()?;
+    (macos.ends_with("Contents/MacOS") && bundle.extension().is_some_and(|e| e == "app"))
+        .then(|| bundle.to_path_buf())
+}
+
 /// Who updates this copy instead of Lens: a package manager or the Microsoft Store.
 pub fn managed_by(executable: &Path) -> Option<&'static str> {
     if std::env::var("LENS_UPDATES").is_ok_and(|v| v == "off") {
         return Some("LENS_UPDATES=off");
+    }
+    if appimage().is_some() {
+        return None;
     }
     let path = executable.to_string_lossy();
     if path.contains("/Cellar/") || path.contains("/homebrew/") {
@@ -54,9 +86,6 @@ pub fn managed_by(executable: &Path) -> Option<&'static str> {
         Some("the system package manager")
     } else if path.contains("\\WindowsApps\\") {
         Some("the Microsoft Store")
-    } else if path.contains(".app/Contents/MacOS/") || std::env::var_os("APPIMAGE").is_some() {
-        // Replacing a file inside a signed app bundle or an AppImage would break it.
-        Some("The Sirv Lens installer")
     } else {
         None
     }
@@ -148,12 +177,33 @@ pub fn install(paths: &Paths, manifest: &Manifest) -> Result<(), String> {
     if let Some(manager) = managed_by(&executable) {
         return Err(format!("{manager} updates this copy of Lens"));
     }
+    let agent = agent();
+    let fetch_installer = || {
+        let key = installer().ok_or("no Lens installer exists for this computer")?;
+        let asset = manifest
+            .installers
+            .get(key)
+            .ok_or_else(|| format!("release {} has no installer for {key}", manifest.version))?;
+        checked(
+            download(&agent, &format!("{}/{}", feed(), asset.file))?,
+            asset,
+        )
+    };
+    // Installer copies are replaced whole: one changed file would break the app's signature or
+    // the AppImage. Their bundled extensions follow on the next start.
+    if let Some(image) = appimage() {
+        let bytes = fetch_installer()?;
+        return replace(&image, &bytes).map_err(|e| format!("cannot replace the AppImage: {e}"));
+    }
+    if let Some(bundle) = app_bundle(&executable) {
+        let dmg = fetch_installer()?;
+        return replace_app(paths, &bundle, &dmg);
+    }
     let target = target().ok_or("no Lens build exists for this computer")?;
     let asset = manifest
         .assets
         .get(target)
         .ok_or_else(|| format!("release {} has no build for {target}", manifest.version))?;
-    let agent = agent();
     let archive = checked(
         download(&agent, &format!("{}/{}", feed(), asset.file))?,
         asset,
@@ -188,6 +238,86 @@ pub fn install(paths: &Paths, manifest: &Manifest) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Copies the app out of the signed DMG beside `bundle`, checks its signature, and swaps it in.
+#[cfg(target_os = "macos")]
+fn replace_app(paths: &Paths, bundle: &Path, dmg: &[u8]) -> Result<(), String> {
+    use std::process::Command;
+    let run = |program: &str, args: &[&std::ffi::OsStr]| -> Result<(), String> {
+        let output = Command::new(program)
+            .args(args)
+            .output()
+            .map_err(|e| format!("cannot start {program}: {e}"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "{program}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
+        }
+    };
+    let work = paths.data.join("tmp").join("update");
+    let _ = std::fs::remove_dir_all(&work);
+    let mount = work.join("mount");
+    std::fs::create_dir_all(&mount).map_err(|e| e.to_string())?;
+    let image = work.join("Sirv-Lens.dmg");
+    std::fs::write(&image, dmg).map_err(|e| e.to_string())?;
+    let fresh = bundle.with_extension("app-update");
+    let _ = std::fs::remove_dir_all(&fresh);
+    let os = |p: &Path| p.as_os_str().to_owned();
+    run(
+        "hdiutil",
+        &[
+            "attach".as_ref(),
+            "-nobrowse".as_ref(),
+            "-readonly".as_ref(),
+            "-noautoopen".as_ref(),
+            "-mountpoint".as_ref(),
+            &os(&mount),
+            &os(&image),
+        ],
+    )?;
+    let copied = std::fs::read_dir(&mount)
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|p| p.extension().is_some_and(|e| e == "app"))
+        .ok_or_else(|| "the update has no app in it".to_string())
+        .and_then(|app| run("ditto", &[&os(&app), &os(&fresh)]));
+    let _ = run(
+        "hdiutil",
+        &["detach".as_ref(), "-force".as_ref(), &os(&mount)],
+    );
+    let _ = std::fs::remove_dir_all(&work);
+    copied?;
+    run(
+        "codesign",
+        &[
+            "--verify".as_ref(),
+            "--deep".as_ref(),
+            "--strict".as_ref(),
+            &os(&fresh),
+        ],
+    )
+    .map_err(|e| format!("the new app's signature does not verify ({e}); nothing was installed"))?;
+    // The running Lens keeps its open files; the next start runs the new bundle at the same path.
+    let old = bundle.with_extension("app-old");
+    let _ = std::fs::remove_dir_all(&old);
+    std::fs::rename(bundle, &old)
+        .map_err(|e| format!("cannot replace {}: {e}", bundle.display()))?;
+    if let Err(e) = std::fs::rename(&fresh, bundle) {
+        let _ = std::fs::rename(&old, bundle);
+        return Err(format!("cannot replace {}: {e}", bundle.display()));
+    }
+    let _ = std::fs::remove_dir_all(&old);
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn replace_app(_paths: &Paths, _bundle: &Path, _dmg: &[u8]) -> Result<(), String> {
+    Err("an app bundle updates only on macOS".into())
 }
 
 /// One file from a release archive, found by its name in any folder.
@@ -271,6 +401,23 @@ pub fn clean_up() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_bundles_are_found_and_installers_listed() {
+        assert_eq!(
+            app_bundle(Path::new("/Applications/Sirv Lens.app/Contents/MacOS/lens")),
+            Some(PathBuf::from("/Applications/Sirv Lens.app"))
+        );
+        assert_eq!(app_bundle(Path::new("/home/a/.local/bin/lens")), None);
+        let manifest: Manifest = serde_json::from_str(
+            r#"{"version":"1.0.0","assets":{},"installers":{"macos-arm64":{"file":"a.dmg","sha256":"00"}},"extension":null}"#,
+        )
+        .unwrap();
+        assert_eq!(manifest.installers["macos-arm64"].file, "a.dmg");
+        let old: Manifest =
+            serde_json::from_str(r#"{"version":"1.0.0","assets":{},"extension":null}"#).unwrap();
+        assert!(old.installers.is_empty());
+    }
 
     #[test]
     fn versions_compare_by_number() {

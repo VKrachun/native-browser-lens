@@ -1,7 +1,7 @@
 name: Release
 
-# A v* tag builds every target natively, the extension for both stores, and a draft GitHub
-# release with SHA256SUMS. A person reviews the draft and publishes it.
+# A v* tag builds every target natively, the extension for both stores, and publishes a GitHub
+# release with SHA256SUMS and the signed update feed (latest.json) that installed copies read.
 on:
   push:
     tags: ["v*"]
@@ -315,15 +315,22 @@ jobs:
           version = sys.argv[1]
           sums = dict(reversed(line.split(maxsplit=1)) for line in open("SHA256SUMS").read().splitlines())
           sums = {name.lstrip("*"): digest for name, digest in sums.items()}
-          assets = {}
+          v = re.escape(version)
+          assets, installers = {}, {}
           for name, digest in sums.items():
-              found = re.fullmatch(rf"sirv-lens-{re.escape(version)}-(.+)\.(tar\.gz|zip)", name)
+              # Target triples only: the Arch package (…-linux-x86_64-pacman.tar.gz) is not one.
+              found = re.fullmatch(rf"sirv-lens-{v}-(\w+-(?:apple|unknown|pc)-[\w-]+)\.(tar\.gz|zip)", name)
               if found:
                   assets[found.group(1)] = {"file": name, "sha256": digest}
+              # The macOS app and the AppImage update as a whole, from their installers.
+              found = re.fullmatch(rf"Sirv-Lens-{v}-(macos-arm64|macos-x64)\.dmg|Sirv-Lens-{v}-(linux-x86_64)\.AppImage", name)
+              if found:
+                  installers[found.group(1) or found.group(2)] = {"file": name, "sha256": digest}
           extension = f"sirv-lens-extension-{version}-chrome.zip"
-          manifest = {"version": version, "assets": assets,
+          manifest = {"version": version, "assets": assets, "installers": installers,
                       "extension": {"file": extension, "sha256": sums[extension]} if extension in sums else None}
           assert len(assets) == 5, f"expected five platform archives, found {sorted(assets)}"
+          assert len(installers) == 3, f"expected three installers, found {sorted(installers)}"
           json.dump(manifest, open("latest.json", "w"), indent=2)
           PY
           key="$RUNNER_TEMP/minisign.key"
@@ -332,7 +339,8 @@ jobs:
           rm -f "$key"
           minisign -V -P RWRUIk1sA/LfACfTQLljdyJArqZHzXbSZB32dsXEr2AMUrXAmSXevoDr -m latest.json
           sha256sum latest.json latest.json.minisig >> SHA256SUMS
-      - name: Draft release
+      # Published at once: installed copies read releases/latest, which skips drafts.
+      - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --draft --verify-tag --generate-notes release/*
+        run: gh release create "$GITHUB_REF_NAME" --latest --verify-tag --generate-notes release/*
