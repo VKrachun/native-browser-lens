@@ -1177,7 +1177,11 @@ impl Daemon {
         let executable = crate::paths::executable().map_err(storage)?;
         Ok(UpdateState {
             current: env!("CARGO_PKG_VERSION").into(),
-            available: store.setting("update.available").map_err(storage)?,
+            // Empty once checked and none was found; stale once this version installed it.
+            available: store
+                .setting("update.available")
+                .map_err(storage)?
+                .filter(|v| crate::update::newer(v, env!("CARGO_PKG_VERSION"))),
             checked_at: store
                 .setting("update.checked_at")
                 .map_err(storage)?
