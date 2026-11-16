@@ -99,6 +99,7 @@ pub fn serve(daemon: Arc<Daemon>, paths: &Paths) -> std::io::Result<Arc<Wizard>>
 #[serde(tag = "action", rename_all = "camelCase")]
 enum Action {
     OpenExtensions { browser: String },
+    OpenStore { browser: String },
     OpenSettings { browser: String },
     ShowFolder { firefox: bool },
     InstallSpeech,
@@ -306,6 +307,13 @@ fn act(daemon: &Daemon, paths: &Paths, action: Action) -> Result<(), String> {
             let launch = launcher(&browser).ok_or("Lens does not know that browser")?;
             open_in(&launch, launch.page)
         }
+        Action::OpenStore { browser } => {
+            let launch = launcher(&browser).ok_or("Lens does not know that browser")?;
+            if launch.firefox {
+                return Err("Lens is not on Firefox Add-ons yet".into());
+            }
+            open_in(&launch, crate::setup::CHROME_STORE)
+        }
         Action::OpenSettings { browser } => {
             let launch = launcher(&browser).ok_or("Lens does not know that browser")?;
             if launch.firefox {
@@ -507,6 +515,9 @@ mod tests {
         let action: Action =
             serde_json::from_str(r#"{"action":"openExtensions","browser":"Brave"}"#).unwrap();
         assert!(matches!(action, Action::OpenExtensions { browser } if browser == "Brave"));
+        let action: Action =
+            serde_json::from_str(r#"{"action":"openStore","browser":"Brave"}"#).unwrap();
+        assert!(matches!(action, Action::OpenStore { browser } if browser == "Brave"));
         assert!(serde_json::from_str::<Action>(r#"{"action":"shutdown"}"#).is_err());
     }
 }

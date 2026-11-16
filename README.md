@@ -20,6 +20,9 @@ The first time Sirv Lens opens, it sets itself up: it starts at login with a tra
 with your browsers, and opens a page that shows how to add the browser extension. Open Sirv Lens
 again to see that page. In a terminal, `lens open` does the same and `lens doctor` checks each step.
 
+The extension for Chrome, Edge and Brave is in the
+[Chrome Web Store](https://chromewebstore.google.com/detail/sirv-lens/lihjnfpbomppjmdlnchkookggmefanbg).
+
 Prefer the terminal? `curl -fsSL https://github.com/VKrachun/native-browser-lens/releases/latest/download/install.sh | sh`
 (PowerShell: `irm https://github.com/VKrachun/native-browser-lens/releases/latest/download/install.ps1 | iex`).
 

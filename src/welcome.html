@@ -87,7 +87,11 @@ footer { margin-top: 32px; color: var(--muted); font-size: 13px; }
   {{PROBLEM}}
   <section aria-labelledby="chrome">
     <h2 id="chrome">Chrome, Edge, Brave or Chromium</h2>
-    <p class="for">About a minute. Until Lens is in the Chrome Web Store, the browser loads it from this computer.</p>
+    <ol>
+      <li>Open <a href="https://chromewebstore.google.com/detail/sirv-lens/lihjnfpbomppjmdlnchkookggmefanbg">Sirv Lens in the Chrome Web Store</a> and choose <strong>Add to Chrome</strong>. Edge first asks to allow extensions from other stores.</li>
+      <li>Pin Lens: click the puzzle piece in the toolbar, then the pin next to Sirv Lens.</li>
+    </ol>
+    <p class="for">No store? Load Lens from this computer:</p>
     <ol>
       <li>Open the extensions page. Paste this address into the address bar (Edge: <code>edge://extensions</code>, Brave: <code>brave://extensions</code>):
         <div class="copy-row"><code>chrome://extensions</code><button type="button" data-copy="chrome://extensions">Copy</button></div>
@@ -96,7 +100,6 @@ footer { margin-top: 32px; color: var(--muted); font-size: 13px; }
       <li>Click <strong>Load unpacked</strong> and choose this folder:
         <div class="copy-row"><code>{{CHROME_FOLDER}}</code><button type="button" data-copy="{{CHROME_FOLDER}}">Copy</button></div>
       </li>
-      <li>Pin Lens: click the puzzle piece in the toolbar, then the pin next to Sirv Lens.</li>
     </ol>
   </section>
   <!--firefox-->

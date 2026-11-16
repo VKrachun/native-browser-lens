@@ -7,9 +7,10 @@ use crate::protocol::{PROTOCOL_VERSION, Reply, Request, SetupStatus};
 use std::io::{self, Write};
 use std::time::Duration;
 
-/// Store listings, once they exist. Until then setup explains Load unpacked.
-const CHROME_STORE: Option<&str> = None;
-const FIREFOX_STORE: Option<&str> = None;
+/// Chrome, Edge and Brave add Lens from here. Firefox loads it from this computer until Lens is on
+/// Firefox Add-ons.
+pub const CHROME_STORE: &str =
+    "https://chromewebstore.google.com/detail/sirv-lens/lihjnfpbomppjmdlnchkookggmefanbg";
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
@@ -155,24 +156,14 @@ pub fn steps(status: &SetupStatus, paths: &Paths) -> Vec<Step> {
 }
 
 fn extension_instructions(paths: &Paths) -> String {
-    match CHROME_STORE.or(FIREFOX_STORE) {
-        Some(url) => format!("add the Lens extension: {url}"),
-        None => {
-            let folder = paths.data.join("extension");
-            if folder.is_dir() {
-                format!(
-                    "add the extension: open chrome://extensions (or edge://, brave://), turn on Developer mode, click Load unpacked and choose {}; in Firefox, open about:debugging, This Firefox, Load Temporary Add-on, and choose {}",
-                    folder.display(),
-                    paths
-                        .data
-                        .join("extension-firefox")
-                        .join("manifest.json")
-                        .display()
-                )
-            } else {
-                "add the Lens extension to your browser".into()
-            }
-        }
+    let firefox = paths.data.join("extension-firefox").join("manifest.json");
+    if firefox.is_file() {
+        format!(
+            "add the extension in Chrome, Edge or Brave from {CHROME_STORE}; in Firefox, open about:debugging, This Firefox, Load Temporary Add-on, and choose {}",
+            firefox.display()
+        )
+    } else {
+        format!("add the extension in Chrome, Edge or Brave from {CHROME_STORE}")
     }
 }
 
@@ -242,9 +233,7 @@ pub fn setup(paths: &Paths) -> io::Result<()> {
         };
         if open.name == "Browser extension" && !opened {
             opened = true;
-            if let Some(url) = CHROME_STORE.or(FIREFOX_STORE) {
-                let _ = open_url(url);
-            }
+            let _ = open_url(CHROME_STORE);
         }
         if matches!(
             open.name.as_str(),

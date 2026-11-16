@@ -53,6 +53,8 @@
   .tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
   .tabs button[aria-pressed="true"] { background: var(--soft); border-color: var(--primary); color: var(--primary); font-weight: 600; }
   ol.how { margin: 10px 0 0; padding-left: 20px; display: grid; gap: 6px; }
+  details.fallback { margin-top: 12px; }
+  details.fallback summary { cursor: pointer; color: var(--muted); }
   .path { display: flex; gap: 6px; align-items: center; margin-top: 6px; }
   .path code { font-family: var(--mono); font-size: 12.5px; background: var(--bg); border: 1px solid var(--border); border-radius: 7px; padding: 5px 8px; overflow-x: auto; white-space: nowrap; flex: 1; min-width: 0; }
   .waiting { display: inline-flex; align-items: center; gap: 8px; }
@@ -85,6 +87,7 @@
 const base = "/";
 let data = null;
 let chosen = null;
+let fallbackOpen = false;
 const errors = {};
 const busy = {};
 
@@ -178,7 +181,7 @@ function render() {
   } else if (outdated) {
     extensionBody.push(el("p", {}, "An older Lens extension connected. Reload it on the browser's extensions page so it takes the version that came with this app."));
   } else {
-    extensionBody.push(el("p", {}, "The extension records the site you test. It comes with the app; your browser adds it from a folder in three steps."));
+    extensionBody.push(el("p", {}, "The extension records the site you test."));
   }
   if (browsers.length === 0) {
     extensionBody.push(el("p", {}, "Lens found no supported browser. Install Chrome, Edge, Brave, Chromium or Firefox, then come back."));
@@ -188,11 +191,17 @@ function render() {
     if (browser && !browser.firefox) {
       const folder = data.folders.chromium;
       extensionBody.push(el("ol", { class: "how" },
-        el("li", {}, "Open the extensions page of " + browser.name + ". ", button("Open " + browser.page, "ext-" + browser.name, { action: "openExtensions", browser: browser.name })),
-        el("li", {}, "Turn on ", el("strong", {}, "Developer mode"), " (top right of that page)."),
-        el("li", {}, "Choose ", el("strong", {}, "Load unpacked"), " and select this folder", mac ? " (in the folder window, press ⌘⇧G and paste it):" : ":",
-          el("div", { class: "path" }, el("code", {}, folder), copy(folder, "Copy"), button("Show folder", "folder", { action: "showFolder", firefox: false })))));
-      extensionBody.push(error("ext-" + browser.name), error("folder"));
+        el("li", {}, "Open Lens in the Chrome Web Store. ", button("Open the Chrome Web Store", "store-" + browser.name, { action: "openStore", browser: browser.name }, true)),
+        el("li", {}, "Choose ", el("strong", {}, browser.name === "Brave" ? "Add to Brave" : "Add to Chrome"), browser.name === "Microsoft Edge" ? " (Edge first asks to allow extensions from other stores; allow it)." : "."),
+        el("li", {}, "Pin Lens: click the puzzle piece in the toolbar, then the pin next to Sirv Lens.")));
+      extensionBody.push(error("store-" + browser.name));
+      extensionBody.push(el("details", { class: "fallback", open: fallbackOpen, ontoggle: (event) => (fallbackOpen = event.currentTarget.open) }, el("summary", {}, "No store? Load Lens from this computer"),
+        el("ol", { class: "how" },
+          el("li", {}, "Open the extensions page of " + browser.name + ". ", button("Open " + browser.page, "ext-" + browser.name, { action: "openExtensions", browser: browser.name })),
+          el("li", {}, "Turn on ", el("strong", {}, "Developer mode"), " (top right of that page)."),
+          el("li", {}, "Choose ", el("strong", {}, "Load unpacked"), " and select this folder", mac ? " (in the folder window, press ⌘⇧G and paste it):" : ":",
+            el("div", { class: "path" }, el("code", {}, folder), copy(folder, "Copy"), button("Show folder", "folder", { action: "showFolder", firefox: false })))),
+        error("ext-" + browser.name), error("folder")));
     } else if (browser) {
       const manifest = data.folders.firefox;
       extensionBody.push(el("ol", { class: "how" },
