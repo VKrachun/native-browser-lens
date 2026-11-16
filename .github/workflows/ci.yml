@@ -258,8 +258,9 @@ jobs:
           set -x
           work=$(mktemp -d)
           curl -fsSL -o "$work/minisign.zip" https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-win64.zip
+          echo "37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479  $work/minisign.zip" | sha256sum -c -
           7z x -o"$work/minisign" "$work/minisign.zip" >/dev/null
-          minisign=$(find "$work/minisign" -name minisign.exe | head -1)
+          minisign="$work/minisign/minisign-win64/x86_64/minisign.exe"
           export LENS_HOME="$(cygpath -w "$work/lens")"
           name=sirv-lens-9.9.9-x86_64-pc-windows-msvc
           mkdir -p "$work/bin" "$work/feed/$name"
