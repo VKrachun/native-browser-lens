@@ -59,6 +59,21 @@ pub fn connect_or_start(paths: &Paths) -> io::Result<Stream> {
     if !service {
         spawn_daemon(paths)?;
     }
+    wait_for_daemon(paths)
+}
+
+/// Starts a plain daemon when none answers, never through the service: how a service without a
+/// manager (Windows, Linux without systemd) starts Lens. Going through `connect_or_start` there
+/// would ask the service again, without end.
+pub fn connect_or_spawn(paths: &Paths) -> io::Result<Stream> {
+    if let Ok(stream) = ipc::connect(paths) {
+        return Ok(stream);
+    }
+    spawn_daemon(paths)?;
+    wait_for_daemon(paths)
+}
+
+fn wait_for_daemon(paths: &Paths) -> io::Result<Stream> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match ipc::connect(paths) {

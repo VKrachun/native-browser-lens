@@ -52,7 +52,7 @@ pub fn ensure(paths: &Paths, executable: &Path) -> io::Result<()> {
 
 /// Starts the daemon without any service manager, detached (as the browser shim does).
 fn spawn_detached(paths: &Paths) -> io::Result<()> {
-    crate::shim::connect_or_start(paths).map(drop)
+    crate::shim::connect_or_spawn(paths).map(drop)
 }
 
 // ---------------------------------------------------------------- macOS
