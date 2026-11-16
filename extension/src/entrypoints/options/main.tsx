@@ -481,8 +481,10 @@ function Updates({ client }: { client: LensClient }) {
           <p className="small muted num">
             {state.available
               ? `Lens ${state.available} is available.`
-              : state.checkedAt
-                ? `Up to date. Checked ${new Date(state.checkedAt).toLocaleString()}.`
+              : state.checkedAt && state.lastError
+                ? `The last check failed, ${new Date(state.checkedAt).toLocaleString()}.`
+                : state.checkedAt
+                  ? `Up to date. Checked ${new Date(state.checkedAt).toLocaleString()}.`
                 : `Lens ${state.current}`}
           </p>
         </div>

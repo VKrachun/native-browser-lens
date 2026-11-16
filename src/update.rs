@@ -130,7 +130,13 @@ pub fn newer(candidate: &str, current: &str) -> bool {
 pub fn check() -> Result<Option<Manifest>, String> {
     let agent = agent();
     let base = feed();
-    let manifest = download(&agent, &format!("{base}/latest.json"))?;
+    let manifest = download(&agent, &format!("{base}/latest.json")).map_err(|e| {
+        if e.ends_with("404") {
+            "no published Lens release to update from yet".to_string()
+        } else {
+            e
+        }
+    })?;
     let signature = download(&agent, &format!("{base}/latest.json.minisig"))?;
     let manifest = verified(&manifest, &String::from_utf8_lossy(&signature))?;
     Ok(newer(&manifest.version, env!("CARGO_PKG_VERSION")).then_some(manifest))
