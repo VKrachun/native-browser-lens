@@ -37,6 +37,7 @@ function Settings() {
         <h1>Settings</h1>
         {version && <span className="small muted num">Lens {version}</span>}
       </header>
+      <StatusLine client={client} />
       <VibeQ client={client} />
       <Voice client={client} />
       <Models client={client} />
@@ -52,6 +53,59 @@ function Settings() {
         </p>
       </section>
     </main>
+  );
+}
+
+/**
+ * What is ready and what is missing, at a glance; each item jumps to its section below. It asks
+ * again when the window comes back, after a sign-in or a download in another tab.
+ */
+function StatusLine({ client }: { client: LensClient }) {
+  const [items, setItems] = useState<{ label: string; ok: boolean; target: string }[] | null>(null);
+  const load = useCallback(async () => {
+    const [vibeq, speech, agents, setup] = await Promise.all([
+      client.request({ method: 'getVibeQ' }).catch(() => null),
+      client.request({ method: 'speechStatus' }).catch(() => null),
+      client.request({ method: 'listAgents' }).catch(() => null),
+      client.request({ method: 'setupStatus' }).catch(() => null),
+    ]);
+    const ready = agents?.filter((a) => a.state === 'ready').map((a) => (a.agent === 'codex' ? 'Codex' : 'Claude Code')) ?? [];
+    setItems([
+      {
+        label: vibeq?.hasToken ? `VibeQ: ${vibeq.account ?? 'signed in'}` : 'VibeQ: not signed in',
+        ok: !!vibeq?.hasToken,
+        target: 'VibeQ',
+      },
+      {
+        label: speech?.model.state === 'ready' ? `Voice: ready (${speech.engines[0] ?? 'CPU'})` : 'Voice: needs the speech model',
+        ok: speech?.model.state === 'ready',
+        target: 'Voice notes',
+      },
+      { label: ready.length ? `AI model: ${ready.join(', ')}` : 'AI model: none signed in', ok: ready.length > 0, target: 'AI model' },
+      { label: setup?.service ? 'Starts at login' : 'Does not start at login', ok: !!setup?.service, target: '' },
+    ]);
+  }, [client]);
+  useEffect(() => {
+    void load();
+    window.addEventListener('focus', load);
+    return () => window.removeEventListener('focus', load);
+  }, [load]);
+  if (!items) return null;
+  return (
+    <nav className="status-line" aria-label="Status">
+      {items.map((item) => (
+        <button
+          key={item.label}
+          type="button"
+          className="pill"
+          data-tone={item.ok ? 'success' : 'warning'}
+          disabled={!item.target}
+          onClick={() => document.querySelector(`section[aria-label="${item.target}"]`)?.scrollIntoView({ behavior: 'smooth' })}
+        >
+          {item.label}
+        </button>
+      ))}
+    </nav>
   );
 }
 

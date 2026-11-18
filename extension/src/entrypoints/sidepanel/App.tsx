@@ -4,7 +4,8 @@ import { originOf, send, type Broadcast, type CaptureResult, type TabStatus } fr
 import type { Capture } from '@/protocol/Capture';
 import type { Hello } from '@/protocol/Hello';
 import type { ObservationSummary } from '@/protocol/ObservationSummary';
-import { AlertIcon, BackIcon, CameraIcon, DeleteIcon, ExportIcon, LensMark, MicIcon, PenIcon, PlayIcon, SettingsIcon } from '@/ui/icons';
+import { AlertIcon, BackIcon, CameraIcon, DeleteIcon, ExportIcon, LensMark, LinkIcon, MicIcon, PenIcon, PlayIcon, SettingsIcon } from '@/ui/icons';
+import { readable } from '@/findings';
 import type { BlobRef } from '@/protocol/BlobRef';
 import { Notes } from './Notes';
 import { VoiceNotes } from './Voice';
@@ -350,6 +351,9 @@ function Observations({
   onOpen: (id: number) => void;
   onChanged: () => void;
 }) {
+  // Search the titles and findings; show all, the ones still to file, or the filed ones.
+  const [query, setQuery] = useState('');
+  const [show, setShow] = useStored<'all' | 'open' | 'filed'>('lens.listFilter', 'all');
   if (list === null) {
     return (
       <div className="list-skeleton" aria-hidden="true">
@@ -358,8 +362,14 @@ function Observations({
       </div>
     );
   }
+  const words = query.trim().toLowerCase();
+  const shown = list.filter(
+    (o) =>
+      (show === 'all' || (show === 'filed') === (o.status === 'filed')) &&
+      (!words || `${o.title} ${o.headline ?? ''}`.toLowerCase().includes(words)),
+  );
   const days: [string, ObservationSummary[]][] = [];
-  for (const o of list) {
+  for (const o of shown) {
     const day = dayOf(Number(o.createdAt));
     if (days.at(-1)?.[0] === day) days.at(-1)![1].push(o);
     else days.push([day, [o]]);
@@ -373,8 +383,36 @@ function Observations({
     <section className="observations" aria-label="Your observations">
       <div className="section-head">
         <h2>Recordings and captures</h2>
-        {list.length > 0 && <span className="small muted num">{list.length}</span>}
+        {list.length > 0 && (
+          <span className="small muted num">{shown.length === list.length ? list.length : `${shown.length} of ${list.length}`}</span>
+        )}
       </div>
+      {list.length > 5 && (
+        <div className="obs-tools">
+          <input
+            className="input obs-search"
+            type="search"
+            aria-label="Search recordings and captures"
+            placeholder="Search titles and findings"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+          <div className="segmented" role="group" aria-label="Show">
+            {(
+              [
+                ['all', 'All'],
+                ['open', 'To file'],
+                ['filed', 'Filed'],
+              ] as const
+            ).map(([value, label]) => (
+              <button key={value} type="button" className="btn btn-sm" aria-pressed={show === value} onClick={() => setShow(value)}>
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      {list.length > 0 && shown.length === 0 && <p className="small muted">Nothing matches.</p>}
       {list.length === 0 ? (
         <div className="empty">
           <p>Nothing recorded yet.</p>
@@ -396,7 +434,7 @@ function Observations({
                     <Thumbnail client={client} blob={o.thumbnail} />
                     <span className="obs-text">
                       <span className="obs-title">{o.title}</span>
-                      {o.headline && <span className="obs-headline small muted">{o.headline}</span>}
+                      {o.headline && <span className="obs-headline small muted">{readable(o.headline)}</span>}
                       <span className="obs-meta small muted num">
                         {o.kind === 'session' ? (
                           <span className="obs-kind">
@@ -423,6 +461,18 @@ function Observations({
                       </span>
                     )}
                   </button>
+                  {o.taskUrl?.startsWith('https://') && (
+                    <a
+                      className="btn btn-ghost btn-icon btn-sm obs-task"
+                      href={o.taskUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      aria-label={`Open the VibeQ task of ${o.title}`}
+                      title="Open the VibeQ task"
+                    >
+                      <LinkIcon />
+                    </a>
+                  )}
                   <button
                     type="button"
                     className="btn btn-ghost btn-icon btn-sm obs-delete"

@@ -430,3 +430,110 @@ code,
   gap: 6px 10px;
   margin: 6px 0 0;
 }
+
+/* ---------- Notes: tags and findings (review page and side panel) ---------- */
+/* Tags as chips, like sid-kit's Badge: small, muted, removable. */
+.tag-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+}
+.tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 22px;
+  padding: 0 2px 0 8px;
+  border-radius: 6px;
+  background: var(--muted);
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 500;
+}
+.tag-chip button {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--muted-foreground);
+  font: inherit;
+  cursor: pointer;
+}
+.tag-chip button:hover {
+  background: color-mix(in oklch, var(--foreground) 10%, transparent);
+  color: var(--foreground);
+}
+.tag-draft {
+  flex: 1;
+  min-width: 120px;
+  height: 24px;
+  padding: 0 4px;
+  border: 0;
+  background: none;
+  color: var(--foreground);
+  font: 12px var(--font-ui);
+  outline: none;
+}
+.tag-draft::placeholder {
+  color: var(--muted-foreground);
+}
+.findings-edit {
+  display: grid;
+  gap: 6px;
+}
+.findings-edit ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.findings-edit li {
+  display: flex;
+  align-items: start;
+  gap: 4px;
+}
+.findings-edit li::before {
+  content: '';
+  flex: none;
+  width: 5px;
+  height: 5px;
+  margin: 13px 4px 0 2px;
+  border-radius: 50%;
+  background: var(--muted-foreground);
+}
+/* A finding reads as text until it is edited. */
+.finding-input {
+  flex: 1;
+  min-height: 0;
+  padding: 6px 8px;
+  border-color: transparent;
+  background: none;
+  field-sizing: content;
+  resize: none;
+}
+.finding-input:hover {
+  border-color: var(--border);
+}
+.finding-input:focus {
+  border-color: var(--ring);
+  background: var(--background);
+}
+.findings-edit > .btn {
+  justify-self: start;
+}
+/* The title field wraps a long title (Notes): sized to its text where the browser can. */
+textarea.title-input {
+  height: auto;
+  min-height: 0;
+  padding-block: 6px;
+  resize: none;
+  field-sizing: content;
+  line-height: 1.25;
+}

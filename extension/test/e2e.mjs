@@ -11,6 +11,10 @@ import { chromium } from 'playwright-core';
 import { execFileSync, spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { createServer } from 'node:http';
+
+/** The findings a page shows, one per line, as the person reads them. */
+const findingsOn = (page) =>
+  page.getByRole('region', { name: 'Findings', exact: true }).getByRole('textbox').evaluateAll((fields) => fields.map((f) => f.value));
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -344,9 +348,12 @@ try {
   if (summaries) {
     if ((await review.getByLabel('Title', { exact: true }).inputValue()) !== 'Checkout: total shows NaN after Pay') throw new Error('the title was not written');
     // The model's tags, cleaned, ready for the VibeQ task; the person can edit them.
-    if ((await review.getByLabel('Tags', { exact: true }).inputValue()) !== 'checkout, bug') throw new Error('the tags were not written');
-    if (!(await review.getByLabel('Notes', { exact: true }).inputValue()).startsWith('Findings (written by Claude Haiku from the recording; check them):\n- The total shows NaN after Pay\n- The coupon field')) {
-      throw new Error(`the findings are not first: ${await review.getByLabel('Notes', { exact: true }).inputValue()}`);
+    const tags = (await review.getByRole('group', { name: 'Tags' }).locator('.tag-chip').allInnerTexts()).map((t) => t.replace('×', '').trim());
+    if (tags.join(', ') !== 'checkout, bug') throw new Error(`the tags were not written: ${tags}`);
+    // The findings show as lines of their own, above the person's notes.
+    const written = await findingsOn(review);
+    if (written[0] !== 'The total shows NaN after Pay' || !written[1]?.startsWith('The coupon field')) {
+      throw new Error(`the findings are not first: ${JSON.stringify(written)}`);
     }
     // Two unrelated defects: the coupon one moves to a task of its own, with a copy of the capture.
     // The model found two unrelated problems: Lens offers one task each; here the person keeps one.
@@ -358,14 +365,15 @@ try {
     await review.getByRole('checkbox', { name: 'The coupon field accepts expired codes' }).check();
     if ((await review.getByLabel('Title of the new task').inputValue()) !== 'The coupon field accepts expired codes') throw new Error('the new task has no title');
     const [split] = await Promise.all([context.waitForEvent('page'), review.getByRole('button', { name: 'Move 1 to a new task' }).click()]);
-    const splitNotes = split.getByLabel('Notes', { exact: true });
-    await splitNotes.waitFor({ timeout: 15_000 });
-    const moved = await splitNotes.inputValue();
-    if (!moved.includes('- The coupon field accepts expired codes') || moved.includes('- The total shows NaN')) throw new Error(`the new task's notes: ${moved}`);
+    await split.getByRole('region', { name: 'Findings', exact: true }).waitFor({ timeout: 15_000 });
+    const moved = await findingsOn(split);
+    if (!moved.includes('The coupon field accepts expired codes') || moved.some((f) => f.includes('The total shows NaN'))) {
+      throw new Error(`the new task's findings: ${JSON.stringify(moved)}`);
+    }
     await split.getByRole('img', { name: /before review/ }).first().waitFor({ timeout: 15_000 });
     await split.close();
     await review.getByRole('status', { name: 'Split' }).waitFor();
-    const left = await review.getByLabel('Notes', { exact: true }).inputValue();
+    const left = (await findingsOn(review)).join('\n');
     if (left.includes('coupon field accepts') || !left.includes('NaN after Pay')) throw new Error(`the split left: ${left}`);
   }
   await freeze.click();

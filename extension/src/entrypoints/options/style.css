@@ -99,3 +99,18 @@
   padding: 0;
   list-style: none;
 }
+
+/* What is ready and what is missing, above the sections. */
+.status-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.status-line .pill {
+  border: 0;
+  font-family: inherit;
+  cursor: pointer;
+}
+.status-line .pill:disabled {
+  cursor: default;
+}

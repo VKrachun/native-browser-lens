@@ -4,7 +4,8 @@
   grid-template-columns: minmax(0, 1fr) 480px;
   gap: 16px;
 }
-@media (max-width: 1100px) {
+/* By the width of the editor's own column: the review page puts the task beside it. */
+@container (max-width: 1000px) {
   .editor {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -20,6 +21,10 @@
 }
 .stage-wrap {
   position: relative;
+  /* As wide as the replay, centred: the replay has the recorded window's shape. */
+  width: fit-content;
+  max-width: 100%;
+  margin-inline: auto;
   border-radius: var(--radius-card);
   overflow: hidden;
   background: var(--muted);

@@ -1,3 +1,4 @@
+import { stepsOf } from '@/steps';
 import rrwebPlayer from 'rrweb-player';
 import 'rrweb-player/dist/style.css';
 import './editor.css';
@@ -82,10 +83,19 @@ export function RecordingEditor({
           events?: { timestamp: number; kind: string; data: Record<string, unknown> }[];
         };
         if (cancelled) return;
-        const width = target.clientWidth;
+        // The stage takes the shape of the recorded window, as large as the column and the
+        // window allow: no bars around a tall or narrow page.
+        const viewport = (events as { type: number; data: { width?: number; height?: number } }[]).find(
+          (e) => e.type === 4 && e.data.width && e.data.height,
+        )?.data;
+        const aspect = viewport ? viewport.height! / viewport.width! : 0.5625;
+        const room = Math.max(320, window.innerHeight - 330);
+        const column = target.closest('.editor-main')?.clientWidth || target.clientWidth;
+        const height = Math.min(Math.round(column * aspect), room);
+        const width = Math.round(height / aspect);
         const instance = new rrwebPlayer({
           target,
-          props: { events, width, height: Math.round(width * 0.5625), autoPlay: false, showController: false, skipInactive: false },
+          props: { events, width, height, autoPlay: false, showController: false, skipInactive: false },
         });
         player.current = instance;
         const meta = instance.getMetaData();
@@ -94,23 +104,7 @@ export function RecordingEditor({
         setNow(Math.max(meta.startTime, capture.startedAt));
         // Seeking once also sets rrweb's base time: before it, getCurrentTime() is not a position.
         instance.goto(Math.max(0, capture.startedAt - meta.startTime), false);
-        const failed = (e: { kind: string; data: Record<string, unknown> }) =>
-          (e.kind === 'response' && Number(e.data.status) >= 400) ||
-          e.kind === 'exception' ||
-          e.kind === 'networkFailure' ||
-          (e.kind === 'console' && e.data.level === 'error');
-        setSteps(
-          [
-            ...(evidence.actions ?? [])
-              .filter((a) => a.kind !== 'scroll')
-              .map((a) => ({ at: a.timestamp, text: `${a.kind} ${describe(a.target)}${a.masked ? ' (private)' : a.value && a.kind !== 'press' ? ` “${a.value}”` : a.value ? ` ${a.value}` : ''}`, error: false })),
-            ...(evidence.events ?? []).filter(failed).map((e) => ({
-              at: e.timestamp,
-              text: e.kind === 'response' ? `HTTP ${e.data.status} ${e.data.url}` : `${e.kind}: ${String(e.data.text ?? e.data.errorText ?? '')}`,
-              error: true,
-            })),
-          ].sort((a, b) => a.at - b.at),
-        );
+        setSteps(stepsOf(evidence.actions ?? [], evidence.events ?? [], capture.pageUrl));
       } catch (error) {
         setProblem(`The recording did not load: ${(error as Error).message}`);
       }

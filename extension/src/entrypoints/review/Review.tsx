@@ -17,6 +17,7 @@ import { AlertIcon, DoneIcon, DraftIcon, ExportIcon, FileIcon, MaskIcon } from '
 import { RecordingEditor } from './RecordingEditor';
 import { Handoff, handoffName, useHandoff } from './Handoff';
 import { Notes } from '../sidepanel/Notes';
+import { FINDINGS_HEADER, joinNotes, splitNotes } from '@/findings';
 import { useStored } from '../sidepanel/Record';
 import { clock, useSince } from '../sidepanel/Voice';
 import type { SirvantRun } from '@/protocol/SirvantRun';
@@ -94,11 +95,7 @@ export function Review({ observation: id }: { observation: number }) {
       const latest = await client.request({ method: 'getObservation', params: { id } });
       // The findings go first in the notes; what the person wrote stays below them.
       const previous = latest.notes.replace(/^Findings[^\n]*:\n(- .*\n?)+\n*/, '').trim();
-      // The model read page text: its words cannot add links, images or HTML to the notes.
-      const escape = (text: string) => text.replace(/[\\`[\]<>]/g, (c) => `\\${c}`);
-      const findings = found.findings.length
-        ? `${FINDINGS_HEADER}\n${found.findings.map((f) => `- ${escape(f)}`).join('\n')}`
-        : '';
+      const findings = joinNotes(found.findings, '');
       const saved = await client.request({
         method: 'updateObservation',
         params: {
@@ -271,23 +268,6 @@ export function Review({ observation: id }: { observation: number }) {
         {review && <h1>{observation.title}</h1>}
         {review && (observation.notes ? <p className="notes-text">{observation.notes}</p> : <p className="muted">No notes.</p>)}
       </header>
-      {!review && (
-        <section className="summary" aria-label="Title and findings">
-          <Notes key={notesVersion} client={client} id={id} onSaved={() => {}} />
-          <p className="small muted summary-state" role="status" aria-label="Summary">
-            {summary.state === 'running' && <Running text="Claude is writing a title and the findings…" />}
-            {summary.state === 'idle' && waitingForWords && <>The title and findings follow once your words are written down.</>}
-            {summary.state === 'done' && <>{summary.agent === 'claude' ? 'Claude Haiku' : 'Codex'} wrote the title and the findings. Edit them as you like.</>}
-            {summary.state === 'failed' && <>No title was written: {summary.reason}</>}
-            {summary.state !== 'running' && (
-              <button type="button" className="btn btn-ghost btn-sm" onClick={() => void summarize()}>
-                <DraftIcon /> {summary.state === 'done' ? 'Write them again' : 'Write a title and findings'}
-              </button>
-            )}
-          </p>
-          <Split client={client} id={id} onSplit={() => setNotesVersion((v) => v + 1)} />
-        </section>
-      )}
 
       {notice && (
         <div role="status" className="notice" data-tone="info">
@@ -479,88 +459,104 @@ export function Review({ observation: id }: { observation: number }) {
         </>
       ) : (
         <>
-          {filedTask?.startsWith('https://') && (
-            <div role="status" aria-label="Filed earlier" className="notice" data-tone="info">
-              <DoneIcon />
-              <span>
-                Filed earlier:{' '}
-                <a href={filedTask} target="_blank" rel="noreferrer">
-                  {filedTask}
-                </a>
-                . Filing again updates that task.
-              </span>
-            </div>
-          )}
-          <section className="section">
-            <h2>Choose what to share</h2>
-            <p className="muted small">
-              Nothing leaves your computer until you create the review.
-            </p>
-            <label className="check">
-              <input type="checkbox" checked={typedValues} onChange={(e) => setTypedValues(e.target.checked)} />
-              <span>
-                Include what I typed and the site’s API data
-                <span className="small muted" style={{ display: 'block' }}>
-                  So an agent can repeat the steps and replay the server. Without it, only failed answers leave, and the
-                  shots after your steps stay here. Passwords, card numbers and private fields are always masked.
-                </span>
-              </span>
-            </label>
-          </section>
-          {captures
-            .filter((c) => c.kind === 'session' && c.recording)
-            .map((c) => (
-              <RecordingEditor key={c.id} client={client} capture={c} voice={voice} onVoice={(note) => setVoice((all) => all.map((v) => (v.id === note.id ? note : v)))} />
-            ))}
-          {/* Below the editor: it arrives when the summary does and must not move the replay. */}
-          <Issues client={client} id={id} refresh={notesVersion} />
-          {captures.length > 0 && (
-            <ol aria-label="Captures to review" className="review-list">
-              {captures.map((c) => (
-                  // A recording shows in the editor above; its page at Stop does not leave.
-                  <li key={c.id} className="card review-item" data-session={c.kind === 'session' || undefined}>
-                    {c.kind !== 'session' && (
-                      <BlobImage client={client} blob={c.screenshot} alt={`Capture ${c.id} before review`} />
-                    )}
-                    <div className="review-side">
-                      <span className="small muted num">{c.eventCount} events</span>
-                      {c.kind !== 'session' && (
-                        <button
-                          type="button"
-                          className="btn btn-ghost btn-sm"
-                          onClick={() => void browser.tabs.create({ url: browser.runtime.getURL(`/annotate.html?capture=${c.id}`) })}
-                        >
-                          <MaskIcon />
-                          Mark up or mask
-                        </button>
-                      )}
-                      <Steps client={client} evidence={c.evidence} label={`Steps of capture ${c.id}`} hideValues={!typedValues} />
-                    </div>
-                  </li>
+          <div className="review-layout">
+            <div className="review-main">
+              {captures
+                .filter((c) => c.kind === 'session' && c.recording)
+                .map((c) => (
+                  <RecordingEditor key={c.id} client={client} capture={c} voice={voice} onVoice={(note) => setVoice((all) => all.map((v) => (v.id === note.id ? note : v)))} />
                 ))}
-            </ol>
-          )}
-          {voice.length > 0 && !captures.some((c) => c.kind === 'session') && (
-            <section className="card voice-review">
-              <VoiceList notes={voice.filter((v) => v.state === 'done')} label="Voice notes to share" />
-              {voice.some((v) => v.state !== 'done') && (
-                <p className="small muted">Voice notes that are not transcribed yet stay out of this review.</p>
+              {/* Below the editor: it arrives when the summary does and must not move the replay. */}
+              <Issues client={client} id={id} refresh={notesVersion} />
+              {/* A recording's steps are in its editor's table; moment captures show here. */}
+              {captures.some((c) => c.kind !== 'session') && (
+                <ol aria-label="Captures to review" className="review-list">
+                  {captures
+                    .filter((c) => c.kind !== 'session')
+                    .map((c) => (
+                      <li key={c.id} className="card review-item">
+                        <BlobImage client={client} blob={c.screenshot} alt={`Capture ${c.id} before review`} />
+                        <div className="review-side">
+                          <span className="small muted num">{c.eventCount} events</span>
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-sm"
+                            onClick={() => void browser.tabs.create({ url: browser.runtime.getURL(`/annotate.html?capture=${c.id}`) })}
+                          >
+                            <MaskIcon />
+                            Mark up or mask
+                          </button>
+                          <Steps client={client} evidence={c.evidence} label={`Steps of capture ${c.id}`} hideValues={!typedValues} />
+                        </div>
+                      </li>
+                    ))}
+                </ol>
               )}
-              <p className="small muted">Only the transcripts leave; the recordings stay on this computer.</p>
-            </section>
-          )}
-          {problem && (
-            <div role="alert" className="notice">
-              <AlertIcon />
-              <span>{problem}</span>
+              {voice.length > 0 && !captures.some((c) => c.kind === 'session') && (
+                <section className="card voice-review">
+                  <VoiceList notes={voice.filter((v) => v.state === 'done')} label="Voice notes to share" />
+                  {voice.some((v) => v.state !== 'done') && (
+                    <p className="small muted">Voice notes that are not transcribed yet stay out of this review.</p>
+                  )}
+                  <p className="small muted">Only the transcripts leave; the recordings stay on this computer.</p>
+                </section>
+              )}
             </div>
-          )}
-          <footer className="action-bar">
-            <span className="spacer" />
-            <button type="button" className="btn btn-primary" onClick={freeze} disabled={captures.length === 0}>
-              Create review
-            </button>
-          </footer>
+            <aside className="review-task" aria-label="Task">
+            <section className="summary" aria-label="Title and findings">
+              <Notes key={notesVersion} client={client} id={id} onSaved={() => {}} />
+              <p className="small muted summary-state" role="status" aria-label="Summary">
+                {summary.state === 'running' && <Running text="Claude is writing a title and the findings…" />}
+                {summary.state === 'idle' && waitingForWords && <>The title and findings follow once your words are written down.</>}
+                {summary.state === 'done' && <>{summary.agent === 'claude' ? 'Claude Haiku' : 'Codex'} wrote the title and the findings. Edit them as you like.</>}
+                {summary.state === 'failed' && <>No title was written: {summary.reason}</>}
+                {summary.state !== 'running' && (
+                  <button type="button" className="btn btn-ghost btn-sm" onClick={() => void summarize()}>
+                    <DraftIcon /> {summary.state === 'done' ? 'Write them again' : 'Write a title and findings'}
+                  </button>
+                )}
+              </p>
+              <Split client={client} id={id} onSplit={() => setNotesVersion((v) => v + 1)} />
+            </section>
+              {filedTask?.startsWith('https://') && (
+                <div role="status" aria-label="Filed earlier" className="notice" data-tone="info">
+                  <DoneIcon />
+                  <span>
+                    Filed earlier:{' '}
+                    <a href={filedTask} target="_blank" rel="noreferrer">
+                      {filedTask}
+                    </a>
+                    . Filing again updates that task.
+                  </span>
+                </div>
+              )}
+              <section className="section">
+                <h2>Choose what to share</h2>
+                <p className="muted small">
+                  Nothing leaves your computer until you create the review.
+                </p>
+                <label className="check">
+                  <input type="checkbox" checked={typedValues} onChange={(e) => setTypedValues(e.target.checked)} />
+                  <span>
+                    Include what I typed and the site’s API data
+                    <span className="small muted" style={{ display: 'block' }}>
+                      So an agent can repeat the steps and replay the server. Without it, only failed answers leave, and the
+                      shots after your steps stay here. Passwords, card numbers and private fields are always masked.
+                    </span>
+                  </span>
+                </label>
+              </section>
+              {problem && (
+                <div role="alert" className="notice">
+                  <AlertIcon />
+                  <span>{problem}</span>
+                </div>
+              )}
+              <button type="button" className="btn btn-primary review-create" onClick={freeze} disabled={captures.length === 0}>
+                Create review
+              </button>
+            </aside>
+          </div>
         </>
       )}
     </main>
@@ -588,9 +584,6 @@ function VoiceList({ notes, label }: { notes: (VoiceNote | ReviewVoice)[]; label
     </section>
   );
 }
-
-/** Must equal FINDINGS_HEADER in src/daemon.rs. */
-const FINDINGS_HEADER = 'Findings (written by Claude Haiku from the recording; check them):';
 
 /** The person's steps from a capture's evidence, as the review will share them. */
 function Steps({
@@ -845,14 +838,7 @@ function siteOf(url: string | undefined): string {
 
 /** The findings lines at the top of the notes, as the person reads them. */
 function findingsOf(notes: string): string[] {
-  const lines = notes.split('\n');
-  if (lines[0]?.trim() !== FINDINGS_HEADER && lines[0]?.trim() !== 'Findings:') return [];
-  const out: string[] = [];
-  for (const line of lines.slice(1)) {
-    if (!line.trimStart().startsWith('- ')) break;
-    out.push(line.trim().slice(2).replace(/\\(.)/g, '$1'));
-  }
-  return out;
+  return splitNotes(notes).findings ?? [];
 }
 
 /**

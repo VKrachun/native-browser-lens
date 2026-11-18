@@ -2,3 +2,6 @@
 TS_RS_EXPORT_DIR = { value = "extension/src/protocol", relative = true }
 # whisper-rs-sys: use its bundled bindings, so building needs no libclang.
 WHISPER_DONT_GENERATE_BINDINGS = "1"
+# whisper.cpp builds for the CPU it compiles on by default: a release runner with AVX-512 made
+# speech crash (illegal instruction) on every CPU without it. Off, it builds for AVX2.
+GGML_NATIVE = "OFF"

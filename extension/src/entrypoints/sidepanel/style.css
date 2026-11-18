@@ -308,9 +308,29 @@
   bottom: 6px;
   opacity: 0;
 }
+/* A filed item opens its VibeQ task beside the delete button. */
+.obs-task {
+  position: absolute;
+  right: 26px;
+  bottom: 6px;
+  opacity: 0;
+}
 .obs-item:hover .obs-delete,
-.obs-delete:focus-visible {
+.obs-delete:focus-visible,
+.obs-item:hover .obs-task,
+.obs-task:focus-visible {
   opacity: 1;
+}
+/* Search and filter above a long list. */
+.obs-tools {
+  display: grid;
+  gap: 8px;
+}
+.obs-tools .segmented {
+  justify-self: start;
+}
+.obs-search {
+  height: 32px;
 }
 .empty {
   display: grid;
