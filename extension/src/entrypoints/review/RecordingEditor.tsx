@@ -84,19 +84,35 @@ export function RecordingEditor({
         };
         if (cancelled) return;
         // The stage takes the shape of the recorded window, as large as the column and the
-        // window allow: no bars around a tall or narrow page.
+        // window allow: no bars around a tall or narrow page. The person may resize the window
+        // while recording, so the stage follows each resize the replay reaches.
+        const fit = (recordedWidth: number, recordedHeight: number) => {
+          const aspect = recordedHeight / recordedWidth;
+          // Room for the controls and the timeline below it; the shots may scroll.
+          const room = Math.max(360, window.innerHeight - 300);
+          const column = target.closest('.editor-main')?.clientWidth || target.clientWidth;
+          const height = Math.min(Math.round(column * aspect), room);
+          return { width: Math.round(height / aspect), height };
+        };
         const viewport = (events as { type: number; data: { width?: number; height?: number } }[]).find(
           (e) => e.type === 4 && e.data.width && e.data.height,
         )?.data;
-        const aspect = viewport ? viewport.height! / viewport.width! : 0.5625;
-        // Room for the controls and the timeline below it; the shots may scroll.
-        const room = Math.max(360, window.innerHeight - 300);
-        const column = target.closest('.editor-main')?.clientWidth || target.clientWidth;
-        const height = Math.min(Math.round(column * aspect), room);
-        const width = Math.round(height / aspect);
         const instance = new rrwebPlayer({
           target,
-          props: { events, width, height, autoPlay: false, showController: false, skipInactive: false },
+          props: {
+            events,
+            ...(viewport ? fit(viewport.width!, viewport.height!) : fit(16, 9)),
+            autoPlay: false,
+            showController: false,
+            skipInactive: false,
+          },
+        });
+        instance.getReplayer().on('resize', (size) => {
+          const { width, height } = size as { width: number; height: number };
+          if (!width || !height) return;
+          // A Svelte 4 component: $set is there at run time; its types need Svelte, which Lens lacks.
+          (instance as unknown as { $set: (props: { width: number; height: number }) => void }).$set(fit(width, height));
+          instance.triggerResize();
         });
         player.current = instance;
         const meta = instance.getMetaData();
