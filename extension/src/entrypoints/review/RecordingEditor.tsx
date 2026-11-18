@@ -89,7 +89,8 @@ export function RecordingEditor({
           (e) => e.type === 4 && e.data.width && e.data.height,
         )?.data;
         const aspect = viewport ? viewport.height! / viewport.width! : 0.5625;
-        const room = Math.max(320, window.innerHeight - 330);
+        // Room for the controls and the timeline below it; the shots may scroll.
+        const room = Math.max(360, window.innerHeight - 300);
         const column = target.closest('.editor-main')?.clientWidth || target.clientWidth;
         const height = Math.min(Math.round(column * aspect), room);
         const width = Math.round(height / aspect);

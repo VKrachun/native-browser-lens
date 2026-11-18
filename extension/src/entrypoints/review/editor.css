@@ -1,7 +1,8 @@
 /* ---------- Recording editor ---------- */
 .editor {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 480px;
+  /* Two thirds for the replay, one for what happened. */
+  grid-template-columns: minmax(0, 2fr) minmax(380px, 1fr);
   gap: 16px;
 }
 /* By the width of the editor's own column: the review page puts the task beside it. */
