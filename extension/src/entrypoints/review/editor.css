@@ -1,10 +1,10 @@
 /* ---------- Recording editor ---------- */
 .editor {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 320px;
+  grid-template-columns: minmax(0, 1fr) 480px;
   gap: 16px;
 }
-@media (max-width: 1000px) {
+@media (max-width: 1100px) {
   .editor {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -309,6 +309,106 @@
 .editor-side section {
   display: grid;
   gap: 6px;
+}
+
+/* What happened: sid-kit's Table contract (row rules, muted hover, selected row, sticky head). */
+.happened table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 13px;
+}
+.happened th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  height: 32px;
+  padding: 0 8px;
+  background: var(--background);
+  border-bottom: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+  white-space: nowrap;
+}
+.happened td {
+  padding: 6px 8px;
+  vertical-align: top;
+}
+.happened tbody tr {
+  border-bottom: 1px solid var(--border-subtle);
+  transition: background-color 120ms;
+}
+.happened tbody tr:hover {
+  background: color-mix(in oklch, var(--muted) 50%, transparent);
+}
+.happened tbody tr[data-state='selected'] {
+  background: var(--muted);
+}
+.happened-time {
+  width: 52px;
+  padding-right: 0;
+}
+.happened-time .happened-seek {
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+.happened-seek {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+.happened-seek:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+.happened-line {
+  display: flex;
+  align-items: start;
+  gap: 2px;
+}
+.happened-line:hover .line-edit,
+.happened-line .line-edit:focus-visible {
+  opacity: 1;
+}
+.happened-events ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.happened-events li {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+/* Long accessible names: two lines, the rest in the tooltip. */
+.happened-events .happened-seek {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.happened-events li[data-error] {
+  color: var(--danger-foreground);
+}
+.happened-count {
+  flex: none;
+  font-size: 11px;
 }
 .lines {
   display: grid;

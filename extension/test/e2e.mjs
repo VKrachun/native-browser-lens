@@ -637,10 +637,10 @@ try {
   await editorRegion.waitFor({ timeout: 30_000 });
   await studio.getByRole('status', { name: 'Edits' }).filter({ hasText: /kept/ }).waitFor({ timeout: 15_000 });
   if (speech) {
-    const transcriptPanel = studio.getByRole('region', { name: 'Transcript' });
+    const transcriptPanel = studio.getByRole('region', { name: 'What happened' });
     await transcriptPanel.getByText(/fellow Americans/i).first().waitFor({ timeout: 180_000 });
-    // The person corrects what Whisper heard before it leaves.
-    await transcriptPanel.getByRole('listitem').first().hover();
+    // The person corrects what Whisper heard before it leaves; it sits in the row of its moment.
+    await transcriptPanel.getByRole('row').filter({ hasText: /fellow Americans/i }).first().hover();
     await transcriptPanel.getByRole('button', { name: 'Correct this line' }).first().click();
     await transcriptPanel.getByLabel('Correct the transcript').fill('And so, my fellow testers, the total is wrong.');
     await transcriptPanel.getByLabel('Correct the transcript').press('Enter');

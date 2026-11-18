@@ -268,6 +268,38 @@ export function RecordingEditor({
         .sort((a, b) => a.at - b.at),
     [voice],
   );
+  /**
+   * What happened, row by row: each spoken line, with what the person did and what failed from
+   * that line until the next. Steps before the first line get a row of their own; a step done
+   * again and again in a row shows once, with a count.
+   */
+  const rows = useMemo(() => {
+    type Happened = { at: number; text: string; error: boolean; count: number };
+    const out: { at: number; word: (typeof words)[number] | null; events: Happened[] }[] = words.map((word) => ({
+      at: word.at,
+      word,
+      events: [],
+    }));
+    for (const step of steps) {
+      let row = out.findLast((r) => r.at <= step.at);
+      if (!row || (!words.length && row.events.length && !sameStep(row.events.at(-1)!, step))) {
+        row = { at: step.at, word: null, events: [] };
+        out.push(row);
+        out.sort((a, b) => a.at - b.at);
+      }
+      const last = row.events.at(-1);
+      if (last && sameStep(last, step)) last.count += 1;
+      else row.events.push({ ...step, count: 1 });
+    }
+    return out;
+  }, [words, steps]);
+  const currentRow = rows.findLastIndex((r) => r.at <= now);
+  // While it plays, the row being played stays in view.
+  const side = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (playing) side.current?.querySelector('tr[data-state="selected"]')?.scrollIntoView({ block: 'nearest' });
+  }, [currentRow, playing]);
+
   /** Saves a corrected line of the transcript; the words leave as the person fixed them. */
   async function saveWords() {
     const current = fixing;
@@ -737,58 +769,94 @@ export function RecordingEditor({
         )}
       </div>
 
-      <aside className="editor-side">
-        <section aria-label="Transcript">
-          <h3 className="label">Your voice</h3>
-          {words.length > 0 && (
-            <ol className="lines">
-              {words.map((w) =>
-                fixing && fixing.note === w.note && fixing.index === w.index ? (
-                  <li key={`${w.note}-${w.index}`} className="fixing">
-                    <textarea
-                      className="textarea"
-                      rows={2}
-                      autoFocus
-                      aria-label="Correct the transcript"
-                      value={fixing.text}
-                      onChange={(e) => setFixing({ ...fixing, text: e.target.value })}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Escape') setFixing(null);
-                        if (e.key === 'Enter' && !e.shiftKey) (e.preventDefault(), void saveWords());
-                      }}
-                      onBlur={() => void saveWords()}
-                    />
-                  </li>
-                ) : (
-                  <li key={`${w.note}-${w.index}`} data-current={(now >= w.at && now <= w.end + 500) || undefined}>
-                    <button type="button" className="line" onClick={() => seek(w.at)}>
-                      <span className="num muted">{span ? clock(w.at - span.start) : ''}</span> {w.text}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-ghost btn-icon btn-sm line-edit"
-                      aria-label="Correct this line"
-                      title="Correct this line"
-                      onClick={() => setFixing({ note: w.note, index: w.index, text: w.text })}
-                    >
-                      <PenIcon size={14} />
-                    </button>
-                  </li>
-                ),
-              )}
-            </ol>
+      <aside className="editor-side" ref={side}>
+        {/* Words appear as each note is written down; the others say where they are. */}
+        {voice.map((note, index) => (
+          <VoiceProgress
+            key={note.id}
+            client={client}
+            note={note}
+            label={voice.length > 1 ? `Voice note ${index + 1}` : undefined}
+            onChange={(changed) => onVoice?.(changed)}
+          />
+        ))}
+        <section aria-label="What happened" className="happened">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col" className="happened-time">
+                  Time
+                </th>
+                <th scope="col">You said</th>
+                <th scope="col">On the page</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, i) => {
+                const w = row.word;
+                return (
+                  <tr key={w ? `${w.note}-${w.index}` : `step-${row.at}`} data-state={i === currentRow ? 'selected' : undefined}>
+                    <td className="happened-time">
+                      <button type="button" className="happened-seek num" onClick={() => seek(row.at)}>
+                        {span ? clock(row.at - span.start) : ''}
+                      </button>
+                    </td>
+                    <td className="happened-said">
+                      {w && fixing && fixing.note === w.note && fixing.index === w.index ? (
+                        <textarea
+                          className="textarea"
+                          rows={2}
+                          autoFocus
+                          aria-label="Correct the transcript"
+                          value={fixing.text}
+                          onChange={(e) => setFixing({ ...fixing, text: e.target.value })}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Escape') setFixing(null);
+                            if (e.key === 'Enter' && !e.shiftKey) (e.preventDefault(), void saveWords());
+                          }}
+                          onBlur={() => void saveWords()}
+                        />
+                      ) : (
+                        w && (
+                          <div className="happened-line">
+                            <button type="button" className="happened-seek" onClick={() => seek(w.at)}>
+                              {w.text}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-icon btn-sm line-edit"
+                              aria-label="Correct this line"
+                              title="Correct this line"
+                              onClick={() => setFixing({ note: w.note, index: w.index, text: w.text })}
+                            >
+                              <PenIcon size={14} />
+                            </button>
+                          </div>
+                        )
+                      )}
+                    </td>
+                    <td className="happened-events">
+                      {row.events.length > 0 && (
+                        <ul>
+                          {row.events.map((e) => (
+                            <li key={`${e.at}-${e.text}`} data-error={e.error || undefined}>
+                              <button type="button" className="happened-seek" title={e.text} onClick={() => seek(e.at)}>
+                                {e.text}
+                              </button>
+                              {e.count > 1 && <span className="happened-count num">×{e.count}</span>}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {rows.length === 0 && (
+            <p className="small muted">{voice.length ? 'Your words and steps appear here.' : 'No voice and no steps in this recording.'}</p>
           )}
-          {/* Words appear as each note is written down; the others say where they are. */}
-          {voice.map((note, index) => (
-            <VoiceProgress
-              key={note.id}
-              client={client}
-              note={note}
-              label={voice.length > 1 ? `Voice note ${index + 1}` : undefined}
-              onChange={(changed) => onVoice?.(changed)}
-            />
-          ))}
-          {voice.length === 0 && <p className="small muted">No voice in this recording.</p>}
         </section>
         <section aria-label="Notes">
           <h3 className="label">Notes</h3>
@@ -814,18 +882,6 @@ export function RecordingEditor({
           ) : (
             <p className="small muted">Pause where something is wrong and add a note, or draw on it.</p>
           )}
-        </section>
-        <section aria-label="Steps">
-          <h3 className="label">Steps and errors</h3>
-          <ol className="lines">
-            {steps.map((s, i) => (
-              <li key={i} data-error={s.error || undefined}>
-                <button type="button" className="line" onClick={() => seek(s.at)}>
-                  <span className="num muted">{span ? clock(s.at - span.start) : ''}</span> {s.text}
-                </button>
-              </li>
-            ))}
-          </ol>
         </section>
       </aside>
     </section>
@@ -1026,6 +1082,10 @@ function ShotMasker({
       </div>
     </div>
   );
+}
+
+function sameStep(a: { text: string; error: boolean }, b: { text: string; error: boolean }) {
+  return a.text === b.text && a.error === b.error;
 }
 
 /** Ruler labels: about eight of them, at round steps. Offsets in milliseconds. */
