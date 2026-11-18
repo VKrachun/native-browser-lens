@@ -21,7 +21,8 @@ with your browsers, and opens a page that shows how to add the browser extension
 again to see that page. In a terminal, `lens open` does the same and `lens doctor` checks each step.
 
 The extension for Chrome, Edge and Brave is in the
-[Chrome Web Store](https://chromewebstore.google.com/detail/sirv-lens/lihjnfpbomppjmdlnchkookggmefanbg).
+[Chrome Web Store](https://chromewebstore.google.com/detail/sirv-lens/lihjnfpbomppjmdlnchkookggmefanbg),
+and the one for Firefox is in [Firefox Add-ons](https://addons.mozilla.org/firefox/addon/sirv-lens/).
 
 Prefer the terminal? `curl -fsSL https://github.com/VKrachun/native-browser-lens/releases/latest/download/install.sh | sh`
 (PowerShell: `irm https://github.com/VKrachun/native-browser-lens/releases/latest/download/install.ps1 | iex`).

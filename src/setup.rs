@@ -7,10 +7,11 @@ use crate::protocol::{PROTOCOL_VERSION, Reply, Request, SetupStatus};
 use std::io::{self, Write};
 use std::time::Duration;
 
-/// Chrome, Edge and Brave add Lens from here. Firefox loads it from this computer until Lens is on
-/// Firefox Add-ons.
+/// Chrome, Edge and Brave add Lens from here.
 pub const CHROME_STORE: &str =
     "https://chromewebstore.google.com/detail/sirv-lens/lihjnfpbomppjmdlnchkookggmefanbg";
+/// Firefox adds Lens from here.
+pub const FIREFOX_STORE: &str = "https://addons.mozilla.org/firefox/addon/sirv-lens/";
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
@@ -30,7 +31,7 @@ pub struct Step {
     pub detail: String,
 }
 
-pub fn steps(status: &SetupStatus, paths: &Paths) -> Vec<Step> {
+pub fn steps(status: &SetupStatus) -> Vec<Step> {
     let step = |name: &str, mark, detail: String| Step {
         name: name.into(),
         mark,
@@ -101,11 +102,7 @@ pub fn steps(status: &SetupStatus, paths: &Paths) -> Vec<Step> {
             Mark::Todo,
             "the extension is newer than this app; update Lens".into(),
         ),
-        (None, None) => step(
-            "Browser extension",
-            Mark::Todo,
-            extension_instructions(paths),
-        ),
+        (None, None) => step("Browser extension", Mark::Todo, extension_instructions()),
     });
 
     let granted: usize = status
@@ -155,16 +152,10 @@ pub fn steps(status: &SetupStatus, paths: &Paths) -> Vec<Step> {
     steps
 }
 
-fn extension_instructions(paths: &Paths) -> String {
-    let firefox = paths.data.join("extension-firefox").join("manifest.json");
-    if firefox.is_file() {
-        format!(
-            "add the extension in Chrome, Edge or Brave from {CHROME_STORE}; in Firefox, open about:debugging, This Firefox, Load Temporary Add-on, and choose {}",
-            firefox.display()
-        )
-    } else {
-        format!("add the extension in Chrome, Edge or Brave from {CHROME_STORE}")
-    }
+fn extension_instructions() -> String {
+    format!(
+        "add the extension in Chrome, Edge or Brave from {CHROME_STORE}; in Firefox, from {FIREFOX_STORE}"
+    )
 }
 
 fn status(client: &mut Client) -> io::Result<SetupStatus> {
@@ -394,14 +385,6 @@ mod tests {
         }
     }
 
-    fn paths() -> Paths {
-        Paths {
-            data: "/nowhere".into(),
-            runtime: "/nowhere/run".into(),
-            logs: "/nowhere/logs".into(),
-        }
-    }
-
     fn mark(steps: &[Step], name: &str) -> Mark {
         steps.iter().find(|s| s.name == name).unwrap().mark
     }
@@ -425,7 +408,7 @@ mod tests {
 
     #[test]
     fn a_fresh_install_needs_every_browser_step() {
-        let steps = steps(&status(), &paths());
+        let steps = steps(&status());
         for name in [
             "Starts at login",
             "Browser",
@@ -459,10 +442,10 @@ mod tests {
             },
             last_seen: 1,
         }];
-        assert!(steps(&ready, &paths()).iter().all(|s| s.mark != Mark::Todo));
+        assert!(steps(&ready).iter().all(|s| s.mark != Mark::Todo));
 
         ready.extensions[0].client.protocol = PROTOCOL_VERSION + 1;
-        let steps = steps(&ready, &paths());
+        let steps = steps(&ready);
         assert!(
             steps
                 .iter()

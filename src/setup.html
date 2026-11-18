@@ -205,11 +205,16 @@ function render() {
     } else if (browser) {
       const manifest = data.folders.firefox;
       extensionBody.push(el("ol", { class: "how" },
-        el("li", {}, "Open Firefox's debugging page. ", button("Open about:debugging", "ext-" + browser.name, { action: "openExtensions", browser: browser.name })),
-        el("li", {}, "Choose ", el("strong", {}, "Load Temporary Add-on"), " and select this file:",
-          el("div", { class: "path" }, el("code", {}, manifest), copy(manifest, "Copy"), button("Show folder", "folder-ff", { action: "showFolder", firefox: true }))),
-        el("li", {}, "Firefox removes it when it closes; load it again after a restart, until Lens is on Firefox Add-ons.")));
-      extensionBody.push(error("ext-" + browser.name), error("folder-ff"));
+        el("li", {}, "Open Lens in Firefox Add-ons. ", button("Open Firefox Add-ons", "store-" + browser.name, { action: "openStore", browser: browser.name }, true)),
+        el("li", {}, "Choose ", el("strong", {}, "Add to Firefox"), ", then ", el("strong", {}, "Add"), " when Firefox asks.")));
+      extensionBody.push(error("store-" + browser.name));
+      extensionBody.push(el("details", { class: "fallback", open: fallbackOpen, ontoggle: (event) => (fallbackOpen = event.currentTarget.open) }, el("summary", {}, "No store? Load Lens from this computer"),
+        el("ol", { class: "how" },
+          el("li", {}, "Open Firefox's debugging page. ", button("Open about:debugging", "ext-" + browser.name, { action: "openExtensions", browser: browser.name })),
+          el("li", {}, "Choose ", el("strong", {}, "Load Temporary Add-on"), " and select this file:",
+            el("div", { class: "path" }, el("code", {}, manifest), copy(manifest, "Copy"), button("Show folder", "folder-ff", { action: "showFolder", firefox: true }))),
+          el("li", {}, "Firefox removes it when it closes; load it again after a restart.")),
+        error("ext-" + browser.name), error("folder-ff")));
     }
     if (!current) extensionBody.push(el("p", { class: "row" }, waiting("Waiting for the extension to connect…")));
   }

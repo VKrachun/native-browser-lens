@@ -309,10 +309,12 @@ fn act(daemon: &Daemon, paths: &Paths, action: Action) -> Result<(), String> {
         }
         Action::OpenStore { browser } => {
             let launch = launcher(&browser).ok_or("Lens does not know that browser")?;
-            if launch.firefox {
-                return Err("Lens is not on Firefox Add-ons yet".into());
-            }
-            open_in(&launch, crate::setup::CHROME_STORE)
+            let store = if launch.firefox {
+                crate::setup::FIREFOX_STORE
+            } else {
+                crate::setup::CHROME_STORE
+            };
+            open_in(&launch, store)
         }
         Action::OpenSettings { browser } => {
             let launch = launcher(&browser).ok_or("Lens does not know that browser")?;

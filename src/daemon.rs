@@ -707,7 +707,7 @@ impl Daemon {
                     vibeq_configured: store.setting("vibeq.endpoint").map_err(storage)?.is_some(),
                     steps: Vec::new(),
                 };
-                status.steps = crate::setup::steps(&status, &self.paths);
+                status.steps = crate::setup::steps(&status);
                 Reply::Setup(Box::new(status))
             }
             Request::SetPaused { paused } => {
