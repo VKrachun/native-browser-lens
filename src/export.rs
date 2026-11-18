@@ -291,14 +291,14 @@ fn fenced(text: &str) -> String {
     format!("{fence}text\n{}\n{fence}\n", text.trim_end())
 }
 
-/// Backslash-escapes Markdown and HTML punctuation, on one line.
+/// Text from a page or a model, on one line, where it cannot form a link, an image, HTML or code:
+/// only those characters are escaped, so the text stays readable where people edit it.
 pub fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars().take(500) {
         match c {
             '\n' | '\r' => out.push(' '),
-            '\\' | '`' | '*' | '_' | '{' | '}' | '[' | ']' | '(' | ')' | '#' | '+' | '-' | '.'
-            | '!' | '|' | '<' | '>' | '~' | '&' => {
+            '\\' | '`' | '[' | ']' | '<' | '>' => {
                 out.push('\\');
                 out.push(c);
             }
@@ -407,7 +407,8 @@ mod tests {
             code("x\n![t](https://evil.test/p.png)"),
             "` x ![t](https://evil.test/p.png) `"
         );
-        assert_eq!(escape("![t](u) <img>"), "\\!\\[t\\]\\(u\\) \\<img\\>");
+        assert_eq!(escape("![t](u) <img>"), "!\\[t\\](u) \\<img\\>");
+        assert_eq!(escape("It's a regression. Ctrl+A - done"), "It's a regression. Ctrl+A - done");
     }
 
     #[test]

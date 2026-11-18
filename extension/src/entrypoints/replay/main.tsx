@@ -58,7 +58,9 @@ function Recording({ id }: { id: number }) {
       </header>
       {capture && <RecordingEditor client={client} capture={capture} voice={voice} onVoice={(note) => setVoice((all) => all.map((v) => (v.id === note.id ? note : v)))} />}
       {capture && (
-        <div className="recording-actions">
+        <footer className="action-bar">
+          <span className="small muted">Cuts, notes and fixes save as you make them.</span>
+          <span className="spacer" />
           <button
             type="button"
             className="btn btn-primary"
@@ -68,7 +70,7 @@ function Recording({ id }: { id: number }) {
           >
             Review and export
           </button>
-        </div>
+        </footer>
       )}
     </main>
   );

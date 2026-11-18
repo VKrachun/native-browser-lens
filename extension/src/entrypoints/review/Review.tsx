@@ -95,7 +95,7 @@ export function Review({ observation: id }: { observation: number }) {
       // The findings go first in the notes; what the person wrote stays below them.
       const previous = latest.notes.replace(/^Findings[^\n]*:\n(- .*\n?)+\n*/, '').trim();
       // The model read page text: its words cannot add links, images or HTML to the notes.
-      const escape = (text: string) => text.replace(/[\\`*_{}[\]()#+!|<>~&]/g, (c) => `\\${c}`);
+      const escape = (text: string) => text.replace(/[\\`[\]<>]/g, (c) => `\\${c}`);
       const findings = found.findings.length
         ? `${FINDINGS_HEADER}\n${found.findings.map((f) => `- ${escape(f)}`).join('\n')}`
         : '';
@@ -517,22 +517,24 @@ export function Review({ observation: id }: { observation: number }) {
           {captures.length > 0 && (
             <ol aria-label="Captures to review" className="review-list">
               {captures.map((c) => (
-                  <li key={c.id} className="card review-item">
-                    <BlobImage client={client} blob={c.screenshot} alt={`Capture ${c.id} before review`} />
+                  // A recording shows in the editor above; its page at Stop does not leave.
+                  <li key={c.id} className="card review-item" data-session={c.kind === 'session' || undefined}>
+                    {c.kind !== 'session' && (
+                      <BlobImage client={client} blob={c.screenshot} alt={`Capture ${c.id} before review`} />
+                    )}
                     <div className="review-side">
                       <span className="small muted num">{c.eventCount} events</span>
-                      <button
-                        type="button"
-                        className="btn btn-ghost btn-sm"
-                        onClick={() => void browser.tabs.create({ url: browser.runtime.getURL(`/annotate.html?capture=${c.id}`) })}
-                      >
-                        <MaskIcon />
-                        Mark up or mask
-                      </button>
-                      <Steps client={client} evidence={c.evidence} label={`Steps of capture ${c.id}`} hideValues={!typedValues} />
-                      {c.kind === 'session' && (
-                        <p className="small muted">This screenshot of the page at Stop goes with the recording.</p>
+                      {c.kind !== 'session' && (
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => void browser.tabs.create({ url: browser.runtime.getURL(`/annotate.html?capture=${c.id}`) })}
+                        >
+                          <MaskIcon />
+                          Mark up or mask
+                        </button>
                       )}
+                      <Steps client={client} evidence={c.evidence} label={`Steps of capture ${c.id}`} hideValues={!typedValues} />
                     </div>
                   </li>
                 ))}

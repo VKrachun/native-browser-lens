@@ -1,8 +1,3 @@
 .recording {
   max-width: 1400px;
-  padding-bottom: 48px;
-}
-.recording-actions {
-  display: flex;
-  justify-content: flex-end;
 }

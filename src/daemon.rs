@@ -1247,7 +1247,10 @@ impl Daemon {
         let base: usize = review
             .items
             .iter()
-            .map(|i| 2 + usize::from(i.recording.is_some()))
+            .map(|i| {
+                1 + usize::from(crate::record::files_end_screenshot(i))
+                    + usize::from(i.recording.is_some())
+            })
             .sum();
         if base > limit {
             return Err(bad(format!(

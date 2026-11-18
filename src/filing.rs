@@ -69,10 +69,23 @@ pub fn prepare(
     let folder = export::export(review, blobs, root)
         .map_err(|e| format!("the review cannot be frozen: {e}"))?;
     let submission_id = Uuid::new_v4();
+    // The local export keeps every screenshot; a recording's page at Stop does not leave.
+    let left_out: Vec<String> = review
+        .items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| !crate::record::files_end_screenshot(item))
+        .map(|(index, _)| format!("capture-{}.png", index + 1))
+        .collect();
     let mut files: Vec<PathBuf> = std::fs::read_dir(&folder)
         .map_err(|e| e.to_string())?
         .filter_map(|entry| entry.ok().map(|e| e.path()))
         .filter(|path| path.is_file() && attach(path))
+        .filter(|path| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .is_none_or(|n| !left_out.iter().any(|out| out == n))
+        })
         .collect();
     files.sort();
     if files.len() > MAX_ATTACHMENTS {

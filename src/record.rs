@@ -109,6 +109,12 @@ pub fn build(
     Ok(bytes)
 }
 
+/// A recording's page at Stop adds nothing to its replay and the shots after each step: only a
+/// moment capture, whose screenshot is the capture, files it.
+pub fn files_end_screenshot(item: &ReviewItem) -> bool {
+    !(item.kind == crate::protocol::CaptureKind::Session && item.recording.is_some())
+}
+
 /// Keeps at most `budget` shots across the items, evenly spaced within each, in proportion to
 /// how many each has; each item counts what it lost.
 pub fn share_shots(items: &mut [ReviewItem], budget: usize) {
@@ -345,10 +351,12 @@ fn assemble(review: &Review, item: &ReviewItem, n: usize, evidence: &Evidence) -
                 "contentType": "image/webp", "reason": shot.reason,
             })
         })
-        .chain(std::iter::once(json!({
-            "id": "end", "atMs": at(end), "file": format!("capture-{n}.png"),
-            "sha256": item.screenshot.sha256, "contentType": "image/png", "reason": "end",
-        })))
+        .chain(files_end_screenshot(item).then(|| {
+            json!({
+                "id": "end", "atMs": at(end), "file": format!("capture-{n}.png"),
+                "sha256": item.screenshot.sha256, "contentType": "image/png", "reason": "end",
+            })
+        }))
         .collect();
 
     let mut steps: Vec<Value> = Vec::new();
@@ -844,7 +852,14 @@ mod tests {
         assert_eq!(record["console"][0]["count"], 2);
         assert_eq!(record["dropped"]["cut"], 4);
         assert_eq!(record["annotations"][0]["kind"], "highlight");
-        assert_eq!(record["shots"][1]["reason"], "end");
+        // A recording files no screenshot of the page at Stop.
+        assert!(
+            record["shots"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|s| s["reason"] != "end")
+        );
         assert_eq!(record["recording"]["file"], "capture-1.rrweb.json");
     }
 
