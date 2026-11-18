@@ -1,6 +1,6 @@
 [package]
 name = "lens-speech"
-version = "0.12.10"
+version = "0.12.11"
 edition = "2024"
 description = "Sirv Lens transcription: whisper.cpp in its own process, so the daemon stays small and safe"
 
