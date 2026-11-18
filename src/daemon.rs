@@ -1862,12 +1862,13 @@ static SERVICE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::n
 /// then restarts on the new program instead of serving the old one until the next login.
 /// Keeps the menu-bar icon there: a tray can end when an update replaces the app while it hands
 /// over to the new one, and nothing else starts it again. Quit Lens stops this daemon too, so a
-/// tray the person quit does not come back. A session without a menu bar never keeps one: after
-/// three tries this stops asking.
+/// tray the person quit does not come back. At login the service can start before the desktop's
+/// panel: after three quick tries this tries every five minutes, so the icon comes once the panel
+/// is up, and a session without a panel costs one try now and then.
 fn watch_tray(paths: &Paths) {
     let paths = paths.clone();
     std::thread::spawn(move || {
-        let mut misses = 0;
+        let mut misses = 0u32;
         loop {
             std::thread::sleep(std::time::Duration::from_secs(30));
             if crate::tray::running(&paths) {
@@ -1875,13 +1876,13 @@ fn watch_tray(paths: &Paths) {
                 continue;
             }
             misses += 1;
-            if misses > 3 {
-                if misses == 4 {
-                    log(
-                        &paths,
-                        "the tray does not stay up here; not starting it again",
-                    );
-                }
+            if misses == 4 {
+                log(
+                    &paths,
+                    "the tray does not stay up yet (see tray.log); trying every five minutes",
+                );
+            }
+            if misses > 3 && !misses.is_multiple_of(10) {
                 continue;
             }
             log(&paths, "the tray was not running; starting it");

@@ -196,12 +196,18 @@ pub fn transcribe(paths: &Paths, wav: &Path, duration_ms: i64) -> Result<Transcr
             .arg("--vad")
             .arg(dir.join(VAD.file))
             .args(["--threads", &threads.to_string()]);
-        match run(command, limit, &paths.data.join("tmp")) {
-            Ok(stdout) => {
-                return serde_json::from_slice(&stdout)
-                    .map_err(|e| format!("the {label} speech program answered badly: {e}"));
+        let (stdout, failure) = match run(command, limit, &paths.data.join("tmp")) {
+            Ok(stdout) => (stdout, None),
+            Err((e, stdout)) => (stdout, Some(e)),
+        };
+        // A complete answer counts even when the program crashed after it: GPU drivers can crash
+        // in their exit handlers (NVIDIA's EGL does), after the transcript is out.
+        match (serde_json::from_slice::<Transcript>(&stdout), failure) {
+            (Ok(transcript), _) => return Ok(transcript),
+            (Err(e), None) => {
+                return Err(format!("the {label} speech program answered badly: {e}"));
             }
-            Err(e) => failures.push(format!("{label}: {e}")),
+            (Err(_), Some(e)) => failures.push(format!("{label}: {e}")),
         }
     }
     Err(failures.join("; "))
@@ -209,12 +215,18 @@ pub fn transcribe(paths: &Paths, wav: &Path, duration_ms: i64) -> Result<Transcr
 
 /// Runs a program with a deadline. Its output goes to files, so a full pipe cannot stall it. The
 /// files live in Lens's own data folder, not the shared temporary folder, and must be new.
-fn run(mut command: Command, limit: Duration, private: &Path) -> Result<Vec<u8>, String> {
+/// A failure keeps what the program wrote, which can still be a complete answer.
+fn run(
+    mut command: Command,
+    limit: Duration,
+    private: &Path,
+) -> Result<Vec<u8>, (String, Vec<u8>)> {
     static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let run = RUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let scratch = private.join(format!("speech-{}-{run}", std::process::id()));
-    std::fs::create_dir_all(&scratch).map_err(|e| e.to_string())?;
-    let result = (|| {
+    let plain = |e: String| (e, Vec::new());
+    std::fs::create_dir_all(&scratch).map_err(|e| plain(e.to_string()))?;
+    let result = (|| -> Result<Vec<u8>, String> {
         let new = |name: &str| {
             std::fs::OpenOptions::new()
                 .write(true)
@@ -245,7 +257,7 @@ fn run(mut command: Command, limit: Duration, private: &Path) -> Result<Vec<u8>,
             std::thread::sleep(Duration::from_millis(100));
         };
         if status.success() {
-            std::fs::read(scratch.join("out")).map_err(|e| e.to_string())
+            Ok(Vec::new())
         } else {
             let errors = std::fs::read_to_string(scratch.join("err")).unwrap_or_default();
             let last = errors
@@ -256,8 +268,12 @@ fn run(mut command: Command, limit: Duration, private: &Path) -> Result<Vec<u8>,
             Err(format!("it stopped ({status}) {last}").trim_end().into())
         }
     })();
+    let stdout = std::fs::read(scratch.join("out")).unwrap_or_default();
     let _ = std::fs::remove_dir_all(&scratch);
-    result
+    match result {
+        Ok(_) => Ok(stdout),
+        Err(e) => Err((e, stdout)),
+    }
 }
 
 /// The length of a 16 kHz mono 16-bit WAV, or why it is not one.
@@ -321,6 +337,20 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             assert!(run(command, Duration::from_millis(300), dir.path()).is_err());
             assert!(started.elapsed() < Duration::from_secs(3));
+        }
+    }
+
+    /// What a program wrote before it crashed stays readable: a GPU driver can crash on exit
+    /// after the transcript is out.
+    #[test]
+    fn a_crash_keeps_the_output() {
+        #[cfg(unix)]
+        {
+            let mut command = Command::new("sh");
+            command.args(["-c", "echo done; kill -SEGV $$"]);
+            let dir = tempfile::tempdir().unwrap();
+            let (_, stdout) = run(command, Duration::from_secs(5), dir.path()).unwrap_err();
+            assert_eq!(stdout, b"done\n");
         }
     }
 }

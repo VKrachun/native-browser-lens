@@ -27,10 +27,20 @@ struct Segment {
 fn main() -> ExitCode {
     match run() {
         Ok(transcript) => {
-            println!(
-                "{}",
-                serde_json::to_string(&transcript).expect("JSON serializes")
-            );
+            use std::io::Write;
+            let json = serde_json::to_string(&transcript).expect("JSON serializes");
+            let mut out = std::io::stdout().lock();
+            if writeln!(out, "{json}").and_then(|()| out.flush()).is_err() {
+                return ExitCode::FAILURE;
+            }
+            // The transcript is out. GPU drivers can crash in their exit handlers (NVIDIA's EGL
+            // does), so end here without them.
+            #[cfg(unix)]
+            // SAFETY: _exit only ends the process; stdout is flushed above.
+            unsafe {
+                libc::_exit(0)
+            }
+            #[cfg(not(unix))]
             ExitCode::SUCCESS
         }
         Err(message) => {

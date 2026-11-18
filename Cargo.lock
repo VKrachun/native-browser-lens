@@ -1707,7 +1707,7 @@ dependencies = [
 
 [[package]]
 name = "lens"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "base64",
  "directories",
@@ -1743,9 +1743,10 @@ dependencies = [
 
 [[package]]
 name = "lens-speech"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "hound",
+ "libc",
  "serde",
  "serde_json",
  "whisper-rs",

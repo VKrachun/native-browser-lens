@@ -1,6 +1,6 @@
 [package]
 name = "lens-speech"
-version = "0.12.6"
+version = "0.12.7"
 edition = "2024"
 description = "Sirv Lens transcription: whisper.cpp in its own process, so the daemon stays small and safe"
 
@@ -15,6 +15,7 @@ metal = ["whisper-rs-sys/metal"]
 
 [dependencies]
 hound = "3.5.1"
+libc = "0.2.191"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 whisper-rs = "0.16.0"

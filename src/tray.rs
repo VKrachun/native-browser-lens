@@ -326,11 +326,16 @@ pub fn spawn(paths: &Paths) {
         executable
     };
     let mut command = std::process::Command::new(program);
+    // Why a tray did not stay up goes to tray.log.
+    let errors = paths
+        .log("tray.log")
+        .map(std::process::Stdio::from)
+        .unwrap_or_else(|_| std::process::Stdio::null());
     command
         .arg("tray")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stderr(errors);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
