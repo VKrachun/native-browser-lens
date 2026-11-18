@@ -10,7 +10,7 @@ followSystemTheme();
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <AppStatus />
+    <AppStatus onBack={() => {}} />
     <Editor capture={Number(new URLSearchParams(location.search).get('capture'))} />
   </StrictMode>,
 );

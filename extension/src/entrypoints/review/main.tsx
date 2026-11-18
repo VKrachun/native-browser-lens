@@ -10,7 +10,7 @@ followSystemTheme();
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <AppStatus />
+    <AppStatus onBack={() => {}} />
     <Review observation={Number(new URLSearchParams(location.search).get('observation'))} />
   </StrictMode>,
 );

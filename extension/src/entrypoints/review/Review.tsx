@@ -52,7 +52,10 @@ export function Review({ observation: id }: { observation: number }) {
   const [filedTask, setFiledTask] = useState<string | null>(null);
   const handoff = useHandoff(client, siteOf(review?.items[0]?.pageUrl ?? captures[0]?.pageUrl));
 
+  // Until the app answers, the page tries again every few seconds (the banner says why).
+  const [loadAttempt, setLoadAttempt] = useState(0);
   useEffect(() => {
+    let retry: ReturnType<typeof setTimeout> | undefined;
     Promise.all([
       client.request({ method: 'getObservation', params: { id } }),
       client.request({ method: 'listCaptures', params: { observation: id } }),
@@ -63,13 +66,20 @@ export function Review({ observation: id }: { observation: number }) {
           .request({ method: 'listObservations' })
           .then((all) => setFiledTask(all.find((o) => o.id === id)?.taskUrl ?? null))
           .catch(() => {});
+        setProblem(null);
         setObservation(found);
         setCaptures(list);
         setVoice(notes);
       })
-      .catch((error: Error) => setProblem(error.message));
-    return () => client.disconnect();
-  }, [client, id]);
+      .catch((error: Error) => {
+        setProblem(error.message);
+        retry = setTimeout(() => setLoadAttempt((n) => n + 1), 5000);
+      });
+    return () => {
+      clearTimeout(retry);
+      client.disconnect();
+    };
+  }, [client, id, loadAttempt]);
 
   // A title and findings from a small model, once the person's words are written down.
   const [summary, setSummary] = useState<

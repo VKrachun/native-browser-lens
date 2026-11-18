@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { LensClient } from '@/lens-client';
 import { AlertIcon } from './icons';
 
@@ -10,9 +10,19 @@ const ANSWER_WITHIN_MS = 8_000;
  * connection of its own, so a long request of the page never reads as an app that is down. A
  * new connection starts the app when it is installed but not running.
  */
-export function AppStatus() {
+export function AppStatus({ onBack }: { onBack?: () => void }) {
   const [down, setDown] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
+  // When the app answers again after it was down, the page catches up: by default it loads again.
+  const wasDown = useRef(false);
+  const back = useRef(onBack ?? (() => location.reload()));
+  useEffect(() => {
+    if (down) wasDown.current = true;
+    else if (wasDown.current) {
+      wasDown.current = false;
+      back.current();
+    }
+  }, [down]);
 
   useEffect(() => {
     const lens = new LensClient();
