@@ -13,6 +13,7 @@ import { AlertIcon, DoneIcon, LensMark, LinkIcon } from '@/ui/icons';
 import '@/ui/base.css';
 import { followSystemTheme } from '@/ui/theme';
 import './style.css';
+import { AppStatus } from '@/ui/AppStatus';
 
 const DEFAULT_VIBEQ = 'https://work.sirv.studio';
 /** How long Lens waits for the person to sign in to VibeQ in the other tab. */
@@ -536,6 +537,7 @@ followSystemTheme();
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
+    <AppStatus />
     <Settings />
   </StrictMode>,
 );

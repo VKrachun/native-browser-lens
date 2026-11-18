@@ -8,6 +8,7 @@ import '@/ui/page.css';
 import { followSystemTheme } from '@/ui/theme';
 import { RecordingEditor } from '../review/RecordingEditor';
 import './style.css';
+import { AppStatus } from '@/ui/AppStatus';
 
 /** One recording in the editor: the replay with the voice of its observation, notes and cuts. */
 function Recording({ id }: { id: number }) {
@@ -76,6 +77,7 @@ function Recording({ id }: { id: number }) {
 followSystemTheme();
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
+    <AppStatus />
     <Recording id={Number(new URLSearchParams(location.search).get('capture'))} />
   </StrictMode>,
 );

@@ -273,10 +273,19 @@ export default defineBackground(() => {
     return { ok: true, startedAt };
   }
 
+  /** The voice of a Stop that the app did not take: the next Stop saves it with the recording. */
+  const keptVoice = new Map<number, OffscreenReply | null>();
   async function stopSession(tabId: number): Promise<CaptureResult> {
     const startedAt = sessions.get(tabId);
     if (startedAt === undefined) return { ok: false, error: 'No recording runs in this tab.' };
-    const [result, spoken] = await Promise.all([capture(tabId, null, startedAt), endMicrophone(tabId, 'mic-stop')]);
+    const voiceSoFar = keptVoice.has(tabId) ? Promise.resolve(keptVoice.get(tabId) ?? null) : endMicrophone(tabId, 'mic-stop');
+    const [result, spoken] = await Promise.all([capture(tabId, null, startedAt), voiceSoFar]);
+    if (!result.ok) {
+      // The app did not take it (not running, say): the session and its voice stay for Stop again.
+      keptVoice.set(tabId, spoken);
+      return { ok: false, error: `${result.error}. The recording is kept: press Stop again when the Lens app runs` };
+    }
+    keptVoice.delete(tabId);
     sessions.delete(tabId);
     buffer.hold(tabId, null);
     actions.hold(tabId, null);

@@ -64,6 +64,8 @@ export function RecordControls({
   const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(Date.now());
   const microphone = useRef<Recording | null>(null);
+  /** The voice of a Stop that the app did not take: the next Stop saves it. */
+  const keptVoice = useRef<{ wav: Blob; startedAt: number } | null>(null);
   const running = site?.session ?? null;
   const screenAccess = useScreenAccess();
   // With the voice on, the speech model must be there to write it down: offer it here, once.
@@ -131,16 +133,23 @@ export function RecordControls({
     const spoken = microphone.current;
     microphone.current = null;
     try {
+      const kept = keptVoice.current;
       const [result, wav] = await Promise.all([
         send<CaptureResult>({ kind: 'stopSession', tabId }),
-        spoken ? spoken.stop() : Promise.resolve(null),
+        kept ? Promise.resolve(kept.wav) : spoken ? spoken.stop() : Promise.resolve(null),
       ]);
-      if (!result.ok) return onProblem(`The recording was not saved: ${result.error}`);
-      if (wav && spoken) {
+      const startedAt = kept?.startedAt ?? spoken?.startedAt;
+      if (!result.ok) {
+        // The background keeps the session; the voice waits here for Stop again.
+        if (wav && startedAt !== undefined) keptVoice.current = { wav, startedAt };
+        return onProblem(`The recording was not saved: ${result.error}`);
+      }
+      keptVoice.current = null;
+      if (wav && startedAt !== undefined) {
         const audio = await client.upload(wav, 'audio/wav');
         await client.request({
           method: 'addVoiceNote',
-          params: { observation: result.capture.observation, startedAt: spoken.startedAt, audio },
+          params: { observation: result.capture.observation, startedAt, audio },
         });
       }
       onProblem(null);
@@ -160,7 +169,7 @@ export function RecordControls({
         <span className="rec-dot" aria-hidden="true" />
         <span className="record-time num">{clock(now - running)}</span>
         <span className="small muted record-what">
-          {microphone.current || site?.voice ? 'Screen, steps and your voice' : 'Screen and steps'}
+          {microphone.current || keptVoice.current || site?.voice ? 'Screen, steps and your voice' : 'Screen and steps'}
         </span>
         <button type="button" className="btn btn-danger" onClick={() => void stop()} disabled={busy}>
           <StopIcon />

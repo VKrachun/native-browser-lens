@@ -329,6 +329,17 @@ code,
   flex: none;
   margin-top: 1px;
 }
+/* The app is down: on top of every page until it answers. */
+.app-status {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  align-items: center;
+  margin: 8px;
+}
+.app-status span {
+  flex: 1;
+}
 
 /* ---------- Surfaces ---------- */
 .mark {

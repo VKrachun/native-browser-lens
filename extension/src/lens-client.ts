@@ -83,41 +83,65 @@ export class LensError extends Error {
   }
 }
 
-/** One native messaging port to the shim, which relays to `lensd`. */
+/**
+ * A native messaging port to the shim, which relays to `lensd`. When the app restarts (an update
+ * does), the requests in flight fail and the next request opens a new port, which starts the app
+ * again when it is not running.
+ */
 export class LensClient {
-  private readonly port: Browser.runtime.Port;
+  private port: Browser.runtime.Port | null = null;
   private nextId = 1;
   private readonly pending = new Map<number, { resolve: (reply: Reply) => void; reject: (error: Error) => void }>();
-  private closed: LensError | null = null;
 
   constructor(private readonly onClose: (error: LensError) => void = () => {}) {
-    this.port = browser.runtime.connectNative(HOST_NAME);
-    this.port.onMessage.addListener((frame: ReplyFrame) => {
+    this.open();
+  }
+
+  private open(): Browser.runtime.Port {
+    const port = browser.runtime.connectNative(HOST_NAME);
+    port.onMessage.addListener((frame: ReplyFrame) => {
       const waiter = this.pending.get(frame.id);
       if (!waiter) return;
       this.pending.delete(frame.id);
       if (frame.status === 'ok') waiter.resolve(frame.result);
       else waiter.reject(new LensError(frame.error.code, frame.error.message));
     });
-    this.port.onDisconnect.addListener(() => {
-      this.closed = new LensError('disconnected', browser.runtime.lastError?.message ?? 'Lens closed the connection');
-      for (const waiter of this.pending.values()) waiter.reject(this.closed);
+    port.onDisconnect.addListener(() => {
+      if (this.port !== port) return;
+      this.port = null;
+      const closed = new LensError('disconnected', browser.runtime.lastError?.message ?? 'Lens closed the connection');
+      for (const waiter of this.pending.values()) waiter.reject(closed);
       this.pending.clear();
-      this.onClose(this.closed);
+      this.onClose(closed);
     });
+    this.port = port;
+    return port;
   }
 
   request<M extends Request['method']>(request: Extract<Request, { method: M }>): Promise<ReplyData<M>> {
-    if (this.closed) return Promise.reject(this.closed);
+    const port = this.port ?? this.open();
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve: (reply) => resolve((reply as { data?: unknown }).data as ReplyData<M>), reject });
-      this.port.postMessage({ id, ...request });
+      try {
+        port.postMessage({ id, ...request });
+      } catch (error) {
+        this.pending.delete(id);
+        this.port = null;
+        reject(new LensError('disconnected', (error as Error).message));
+      }
     });
   }
 
+  /** Closes the port; a later request opens a new one. */
   disconnect() {
-    this.port.disconnect();
+    const port = this.port;
+    this.port = null;
+    port?.disconnect();
+    // The browser reports no disconnect for a port this side closed: end what still waits.
+    const closed = new LensError('disconnected', 'the connection to Lens was closed');
+    for (const waiter of this.pending.values()) waiter.reject(closed);
+    this.pending.clear();
   }
 
   /** Sends a file in chunks (requests stay under 16 MiB); the last reply names the stored blob. */
