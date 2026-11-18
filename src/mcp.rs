@@ -392,6 +392,11 @@ impl LensMcp {
             .strip_prefix("shot:")
             .and_then(|k| k.parse::<usize>().ok());
         let blob = match kind {
+            "png" if !crate::record::files_end_screenshot(item) => {
+                return Err(failure(format!(
+                    "recording {n} has no screenshot; read its shots"
+                )));
+            }
             "png" => &item.screenshot,
             _ if shot.is_some() => {
                 &item
@@ -470,12 +475,14 @@ pub fn review_json(review: &Review) -> serde_json::Value {
             let n = index + 1;
             let mut files = vec![
                 format!("capture-{n}.lens.json"),
-                format!("capture-{n}.png"),
                 format!("capture-{n}-timeline.txt"),
                 format!("capture-{n}.spec.ts"),
                 format!("capture-{n}.har"),
                 format!("capture-{n}-evidence.json"),
             ];
+            if crate::record::files_end_screenshot(item) {
+                files.insert(1, format!("capture-{n}.png"));
+            }
             if item.recording.is_some() {
                 files.push(format!("capture-{n}.rrweb.json"));
             }

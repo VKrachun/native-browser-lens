@@ -720,7 +720,6 @@ try {
   const recorded = studio.getByRole('status', { name: 'Export' });
   await recorded.waitFor({ timeout: 15_000 });
   const sessionFolder = (await recorded.textContent()).replace(/^Exported to /, '');
-  if (!existsSync(join(sessionFolder, 'capture-1.png'))) throw new Error('the recording lacks its screenshot');
   if (speech && !readFileSync(join(sessionFolder, 'voice-1.txt'), 'utf8').includes('my fellow testers, the total is wrong')) {
     throw new Error('the corrected transcript did not leave');
   }
@@ -758,7 +757,11 @@ try {
     return [...context.getImageData(5, 5, 1, 1).data];
   }, maskedFile);
   if (pixel.slice(0, 3).some((v) => v !== 0)) throw new Error(`the shared shot is not masked: ${pixel}`);
-  if (!lens.shots.some((shot) => shot.reason === 'end') || typeof lens.dropped.cut !== 'number') throw new Error('the record lacks its end shot or its cut count');
+  // A recording's page at Stop never leaves: not in the record, not as a file.
+  if (lens.shots.some((shot) => shot.reason === 'end') || existsSync(join(sessionFolder, 'capture-1.png'))) {
+    throw new Error('the recording still carries its screenshot of the page at Stop');
+  }
+  if (typeof lens.dropped.cut !== 'number') throw new Error('the record lacks its cut count');
   // The cut recording leaves now, rebuilt from the kept part only (before, it stayed here).
   const trimmed = JSON.parse(readFileSync(join(sessionFolder, 'capture-1.rrweb.json'), 'utf8'));
   const last = trimmed.at(-1);

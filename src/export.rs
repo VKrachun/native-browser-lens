@@ -36,10 +36,15 @@ pub fn export(review: &Review, blobs: &Blobs, root: &Path) -> io::Result<PathBuf
     for (index, item) in review.items.iter().enumerate() {
         let n = index + 1;
         let session = item.kind == CaptureKind::Session;
-        std::fs::write(
-            folder.join(format!("capture-{n}.png")),
-            blobs.read_all(&item.screenshot.sha256)?,
-        )?;
+        // A recording's page at Stop is not in its review: it cannot be masked there, and no
+        // copy of it leaves (filings, agents and hand-offs read this folder).
+        let screenshot = crate::record::files_end_screenshot(item);
+        if screenshot {
+            std::fs::write(
+                folder.join(format!("capture-{n}.png")),
+                blobs.read_all(&item.screenshot.sha256)?,
+            )?;
+        }
         let evidence = blobs.read_all(&item.evidence.sha256)?;
         std::fs::write(folder.join(format!("capture-{n}-evidence.json")), &evidence)?;
         let parsed = repro::parse(&evidence);
@@ -65,11 +70,14 @@ pub fn export(review: &Review, blobs: &Blobs, root: &Path) -> io::Result<PathBuf
         };
         let _ = write!(
             report,
-            "## {} {n}: {}\n\nPage: {}\n\n![Capture {n}](capture-{n}.png)\n\n",
+            "## {} {n}: {}\n\nPage: {}\n\n",
             if session { "Recording" } else { "Capture" },
             escape(title),
             code(&item.page_url)
         );
+        if screenshot {
+            let _ = write!(report, "![Capture {n}](capture-{n}.png)\n\n");
+        }
         if !item.annotations.is_empty() {
             report.push_str("The person's notes on the recording:\n\n");
             for note in &item.annotations {
@@ -408,7 +416,10 @@ mod tests {
             "` x ![t](https://evil.test/p.png) `"
         );
         assert_eq!(escape("![t](u) <img>"), "!\\[t\\](u) \\<img\\>");
-        assert_eq!(escape("It's a regression. Ctrl+A - done"), "It's a regression. Ctrl+A - done");
+        assert_eq!(
+            escape("It's a regression. Ctrl+A - done"),
+            "It's a regression. Ctrl+A - done"
+        );
     }
 
     #[test]

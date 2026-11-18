@@ -148,7 +148,8 @@ pub fn investigate(
     let work = Workspace::new()?;
     let mut images = Vec::new();
     for item in review.items.iter().take(MAX_IMAGES) {
-        if item.screenshot.size > MAX_IMAGE_BYTES {
+        // A recording's page at Stop is not in its review, so it cannot have been masked.
+        if item.screenshot.size > MAX_IMAGE_BYTES || !crate::record::files_end_screenshot(item) {
             continue;
         }
         let path = work.0.join(format!("capture-{}.png", images.len() + 1));
