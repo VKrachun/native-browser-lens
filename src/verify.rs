@@ -5,7 +5,6 @@
 use crate::protocol::{Evidence, Review, ReviewItem};
 use serde_json::{Value, json};
 use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
 
 /// The test's own time, then Playwright's start and the browser.
@@ -15,7 +14,7 @@ const RUN: Duration = Duration::from_secs(240);
 /// The dev server's URLs and console text go to the agent: query values, credentials and
 /// secret-looking text are redacted first (failures compare by path), and the lists are bounded.
 const WATCH: &str = r#"
-const lensSeen = { requests: [] as { status: number; method: string; url: string }[], console: [] as string[], keys: [] as string[] };
+const lensSeen = { requests: [] as { status: number; method: string; url: string }[], console: [] as string[], keys: [] as string[], missed: [] as string[], blocked: [] as string[] };
 const lensUrl = (u: string) => { try { const x = new URL(u); x.username = ''; x.password = ''; x.hash = ''; for (const k of [...x.searchParams.keys()]) x.searchParams.set(k, 'REDACTED'); return x.toString(); } catch { return '[unreadable URL]'; } };
 const lensText = (t: string) => t.slice(0, 1000)
   .replace(/\b(Bearer|Basic)\s+\S+/gi, '$1 [REDACTED]')
@@ -31,6 +30,10 @@ const lensRequest = (status: number, method: string, url: string) => {
   if (lensSeen.requests.length < 100) lensSeen.requests.push({ status, method, url: lensUrl(url) });
 };
 const lensConsole = (text: string) => { const clean = lensText(text); if (lensSeen.console.length < 500 && !lensSeen.console.includes(clean)) lensSeen.console.push(clean); };
+// The generated test calls these: a page that did not go on by itself, a page load on another site.
+const lensHooks = globalThis as { lensMissed?: (url: string) => void; lensBlocked?: (url: string) => void };
+lensHooks.lensMissed = (u) => { if (lensSeen.missed.length < 100) lensSeen.missed.push(lensUrl(u)); };
+lensHooks.lensBlocked = (u) => { if (lensSeen.blocked.length < 100) lensSeen.blocked.push(lensUrl(u)); };
 test.afterEach(() => writeFileSync(process.env.LENS_VERIFY_OUT ?? 'lens-verify.json', JSON.stringify(lensSeen)));
 "#;
 const LISTEN: &str = "  page.on('response', (r) => { if (r.status() >= 400) lensRequest(r.status(), r.request().method(), r.url()); });
@@ -106,7 +109,7 @@ pub fn verify(
     {
         return Err("Lens recorded no steps to repeat for this capture".into());
     }
-    let skipped = skipped_steps(&spec);
+    let mut skipped = skipped_steps(&spec);
     // A folder of its own for each run: two runs at once, or files someone keeps in
     // .lens/verify, are never overwritten or removed.
     let folder = project
@@ -141,6 +144,7 @@ pub fn verify(
     let private = forms(&private);
     let (report, watched) = result.map_err(|e| scrub(&strip_ansi(&e), &private))?;
     let errors = errors(&report);
+    skipped.extend(run_skips(&watched));
     let passed = report["stats"]["unexpected"].as_u64() == Some(0)
         && report["stats"]["expected"].as_u64().unwrap_or(0) > 0;
     let recorded = crate::export::findings(raw_evidence);
@@ -221,7 +225,9 @@ pub fn verify(
 fn forms(private: &[String]) -> Vec<String> {
     let mut all: Vec<String> = private
         .iter()
-        .filter(|v| !v.is_empty())
+        // A value of a few characters ("3000", "a") is also in the base URL and the verdict:
+        // replacing it everywhere would leave the answer unreadable, and it reveals little.
+        .filter(|v| v.chars().count() >= MIN_SCRUBBED_CHARS)
         .flat_map(|v| {
             let json = serde_json::to_string(v).expect("strings serialize");
             let inner = json[1..json.len() - 1].to_string();
@@ -231,12 +237,33 @@ fn forms(private: &[String]) -> Vec<String> {
                 inner,
                 twice[1..twice.len() - 1].to_string(),
                 url::form_urlencoded::byte_serialize(v.as_bytes()).collect(),
+                // encodeURIComponent, and encodeURI as a URL path keeps `/` and friends.
+                percent(v, ""),
+                percent(v, ";,/?:@&=+$#"),
             ]
         })
         .collect();
     all.sort_by_key(|f| std::cmp::Reverse(f.len()));
     all.dedup();
     all
+}
+
+const MIN_SCRUBBED_CHARS: usize = 4;
+
+/// `text` percent-encoded as JavaScript's encodeURIComponent does, leaving `keep` as it is too.
+fn percent(text: &str, keep: &str) -> String {
+    let mut out = String::new();
+    for c in text.chars() {
+        if c.is_ascii_alphanumeric() || "-_.!~*'()".contains(c) || keep.contains(c) {
+            out.push(c);
+        } else {
+            let mut bytes = [0; 4];
+            for b in c.encode_utf8(&mut bytes).bytes() {
+                out.push_str(&format!("%{b:02X}"));
+            }
+        }
+    }
+    out
 }
 
 /// Each string in the answer, scrubbed.
@@ -262,6 +289,26 @@ fn scrub(text: &str, private: &[String]) -> String {
 /// The steps the test does not really take: ones Lens could not write (a file upload, a private
 /// option, an element it could not find), private values the environment does not give, and a
 /// stop before another site. A run without them proves nothing about the defect.
+/// What the run itself could not repeat: a click that no longer took the page on (the test went
+/// there by address, so its passing proves nothing), and page loads on another site it stopped.
+fn run_skips(watched: &Value) -> Vec<String> {
+    let list = |key: &str| {
+        watched[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect::<Vec<_>>()
+    };
+    let missed = list("missed").into_iter().map(|url| {
+        format!("the page did not go to {url} after the step; the test opened it by address")
+    });
+    let blocked = list("blocked")
+        .into_iter()
+        .map(|url| format!("a page load on another site was stopped: {url}"));
+    missed.chain(blocked).collect()
+}
+
 fn skipped_steps(spec: &str) -> Vec<String> {
     let mut skipped = Vec::new();
     for line in spec.lines().map(str::trim) {
@@ -290,7 +337,7 @@ fn run(project: &Path, config: &Path, seen: &Path) -> Result<(Value, Value), Str
         .or_else(|| crate::investigate::program("npx"))
         .ok_or("npx is not installed: install Node.js, then @playwright/test in the project")?;
     let (_, out, err) = crate::handoff::bounded(
-        Command::new(&npx)
+        crate::investigate::command(&npx)
             .env("PATH", crate::investigate::path_for(&npx))
             // The JSON report goes to stdout, never over a file the project's CI keeps.
             .env_remove("PLAYWRIGHT_JSON_OUTPUT_FILE")
@@ -441,6 +488,23 @@ mod tests {
         scrub_value(&mut answer, &private);
         let text = answer.to_string();
         assert!(!text.contains("b c") && !text.contains("a%22b"), "{text}");
+        // In a URL path, as a browser writes it, and inside the returned JSON.
+        let private = forms(&["my card/4242 x".into()]);
+        let mut answer = json!({
+            "failedRequestsNow": [{ "url": "http://localhost:3000/pay/my%20card/4242%20x" },
+                                  { "url": "http://localhost:3000/q/my%20card%2F4242%20x" }],
+        });
+        scrub_value(&mut answer, &private);
+        let text = answer.to_string();
+        assert!(!text.contains("4242"), "{text}");
+        // Short values stay: the answer must stay readable.
+        let private = forms(&["abc".into()]);
+        let mut answer = json!({ "baseUrl": "http://abc.test", "verdict": "abc" });
+        scrub_value(&mut answer, &private);
+        assert_eq!(
+            answer,
+            json!({ "baseUrl": "http://abc.test", "verdict": "abc" })
+        );
         assert_eq!(
             without_queries("GET https://a.test/x?id=REDACTED failed"),
             without_queries("GET https://a.test/x?id=7 failed")

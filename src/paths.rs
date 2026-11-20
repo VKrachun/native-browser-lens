@@ -142,7 +142,8 @@ impl Paths {
 
     /// A socket address holds 104 bytes on macOS (108 on Linux), so a long home folder or
     /// LENS_HOME does not fit: then the socket goes to a short 0700 folder of this account's own in
-    /// the temporary folder, named for the runtime folder so two data folders never meet.
+    /// the temporary folder, named for the runtime folder so two data folders never meet. Not from
+    /// TMPDIR: the service and a shell can set it differently, and both must find one socket.
     #[cfg(unix)]
     pub fn socket(&self) -> PathBuf {
         let path = self.runtime.join("lensd.sock");
@@ -157,12 +158,9 @@ impl Paths {
             .fold(0xcbf29ce484222325u64, |h, b| {
                 (h ^ *b as u64).wrapping_mul(0x100000001b3)
             });
-        let temporary = std::env::temp_dir();
-        let base = if temporary.as_os_str().len() > 60 {
-            PathBuf::from("/tmp")
-        } else {
-            temporary
-        };
+        let base = account_temp_dir()
+            .filter(|t| t.as_os_str().len() <= 60)
+            .unwrap_or_else(|| PathBuf::from("/tmp"));
         // SAFETY: getuid has no preconditions and cannot fail.
         let uid = unsafe { libc::getuid() };
         base.join(format!("sirv-lens-{uid}"))
@@ -183,6 +181,33 @@ impl Paths {
             });
         format!("sirv-lens-{digest:016x}")
     }
+}
+
+/// macOS gives each account its own temporary folder (/var/folders/...), the same for every
+/// process of the account whatever its environment.
+#[cfg(target_os = "macos")]
+fn account_temp_dir() -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut buffer = vec![0u8; 1024];
+    // SAFETY: the buffer is writable for its whole length, which confstr is told.
+    let n = unsafe {
+        libc::confstr(
+            libc::_CS_DARWIN_USER_TEMP_DIR,
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+        )
+    };
+    // n counts the closing NUL; 0 is an error, more than the buffer is a cut-off value.
+    if n == 0 || n > buffer.len() {
+        return None;
+    }
+    let path = std::ffi::OsStr::from_bytes(&buffer[..n - 1]);
+    Some(PathBuf::from(path).components().collect())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn account_temp_dir() -> Option<PathBuf> {
+    None
 }
 
 #[cfg(unix)]
@@ -232,5 +257,8 @@ mod tests {
         let socket = at(&long).socket();
         assert!(socket.as_os_str().len() < 104, "{}", socket.display());
         assert_ne!(socket, at(&format!("{long}2")).socket());
+        // The same place for the service and a shell, whatever TMPDIR says.
+        #[cfg(not(target_os = "macos"))]
+        assert!(socket.starts_with("/tmp"), "{}", socket.display());
     }
 }

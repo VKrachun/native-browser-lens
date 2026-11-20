@@ -5,7 +5,7 @@ use crate::investigate::program;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use ts_rs::TS;
 
 pub const SKILL: &str = include_str!("../plugin/skills/sirv-lens/SKILL.md");
@@ -160,7 +160,8 @@ pub fn disconnect() -> Vec<AgentSetup> {
 }
 
 fn run(program: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new(program)
+    // npm's claude.cmd and codex.cmd on Windows: run their node script, not cmd.exe's quoting.
+    let output = crate::investigate::command(program)
         .args(args)
         .stdin(Stdio::null())
         .output()
