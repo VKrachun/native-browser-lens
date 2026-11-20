@@ -98,7 +98,13 @@ it('gives every full snapshot the offline policy and drops srcdoc', () => {
 });
 
 it('keeps quoted text outside image-set and makes a head when there is none', () => {
-  expect(offlineCss('see "https://x.test" here')).toBe('see "https://x.test" here');
+  // Page words stay as recorded; CSS loses every quoted address, also in an escaped image-set.
+  const [, words] = offlineEvents([
+    { type: 3, data: { source: 0, adds: [{ parentId: 1, node: { type: 3, id: 5, textContent: 'url(https://x.test) "https://x.test"' } }] } },
+    { type: 3, data: { source: 0, texts: [{ id: 5, value: 'see "https://x.test" here' }] } },
+  ]) as { data: { texts: { value: string }[] } }[];
+  expect(words!.data.texts[0]!.value).toBe('see "https://x.test" here');
+  expect(offlineCss('b{background:im\\61ge-set("https://x.test/a.png" 1x)}')).toBe('b{background:im\\61ge-set("" 1x)}');
   const started = Date.now();
   offlineCss('url("' + '\\'.repeat(50000) + 'x');
   offlineCss('image-set("' + '\\a'.repeat(50000));

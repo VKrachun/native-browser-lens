@@ -22,19 +22,19 @@ const LINKS = new Set(['a', 'area']);
 const FETCHED = new Set(['src', 'href', 'xlink:href', 'poster', 'data', 'background', 'rr_src']);
 
 /**
- * CSS without the addresses it would fetch: url(...) becomes none, every @import goes, and a quoted
- * address (image-set() takes plain strings) becomes empty. A regular expression cannot read every
- * CSS escape: the policy the replay's page gets (offlineEvents) is what makes this safe.
+ * CSS without the addresses it would fetch: url(...) becomes none, every @import goes, and every
+ * quoted address (image-set() takes plain strings, and its name can be escaped) becomes empty. A
+ * regular expression cannot read every CSS escape: the policy the replay's page gets
+ * (offlineEvents) is what makes this safe. Each pattern has one way to match (a backslash is only
+ * ever an escape), so recorded text cannot make it run for long.
  */
 export function offlineCss(text: string): string {
-  if (!/url\(|@import|image-set/i.test(text)) return text;
-  // Each pattern has one way to match (a backslash is only ever an escape), so page text cannot
-  // make it run for long.
+  if (!/url\(|@import|['"]/i.test(text)) return text;
   return text
     .replace(/@import[^;]*;?/gi, '')
     .replace(/url\(\s*(['"]?)((?:\\[\s\S]|(?!\1\s*\))[^\\])*?)\1\s*\)/gi, (whole, _q, inner: string) => (harmless(inner) ? whole : 'none'))
-    .replace(/image-set\(([^()]*)\)/gi, (_whole, inside: string) =>
-      `image-set(${inside.replace(/(['"])((?:\\[\s\S]|(?!\1)[^\\\n])*)\1/g, (quoted, _q, inner: string) => (harmless(inner) ? quoted : '""'))})`,
+    .replace(/(['"])((?:\\[\s\S]|(?!\1)[^\\\n])*)\1/g, (quoted, _q, inner: string) =>
+      /^\s*(?:[a-z][\w+.-]*:|\/\/|\\\\)/i.test(inner) && !harmless(inner) ? '""' : quoted,
     );
 }
 
@@ -90,22 +90,34 @@ function walkStrings(value: unknown, change: (text: string) => string): unknown 
 export function offlineEvents<T>(events: T[]): T[] {
   // Attribute changes name their element by id only: the tag comes from where it was added.
   const tags = new Map<number, string>();
-  const walk = (value: unknown): unknown => {
+  // Text nodes seen outside <style>: the page's words, which fetch nothing and stay exactly as
+  // recorded. Any other text (in a style, or of a node not seen) is read as CSS.
+  const words = new Set<number>();
+  const walk = (value: unknown, parent?: string): unknown => {
     if (typeof value === 'string') return offlineCss(value);
-    if (Array.isArray(value)) return value.map(walk);
+    if (Array.isArray(value)) return value.map((v) => walk(v, parent));
     if (!value || typeof value !== 'object') return value;
     const node = value as Record<string, unknown>;
     const snapshot = typeof node.tagName === 'string';
     if (snapshot && typeof node.id === 'number') tags.set(node.id, (node.tagName as string).toLowerCase());
     const tag = snapshot ? (node.tagName as string).toLowerCase() : typeof node.id === 'number' ? tags.get(node.id) : undefined;
+    const text = node.type === 3 && typeof node.textContent === 'string';
+    const style = node.isStyle === true || parent === 'style';
+    if (text && typeof node.id === 'number' && !style) words.add(node.id);
+    // An added node names its parent by id; a text change names only its own node.
+    const inside = typeof node.parentId === 'number' ? tags.get(node.parentId) : snapshot ? tag : parent;
     const out: Record<string, unknown> = {};
     for (const [key, inner] of Object.entries(node)) {
       if (key === 'attributes' && inner && typeof inner === 'object' && !Array.isArray(inner)) {
         out[key] = offlineAttributes(tag, inner as Attributes, snapshot);
       } else if (key === 'fontSource' && typeof inner === 'string' && REMOTE.test(inner)) {
         out[key] = 'local("none")';
+      } else if (key === 'textContent' && text && !style) {
+        out[key] = inner;
+      } else if (key === 'value' && typeof inner === 'string' && typeof node.id === 'number' && !snapshot && words.has(node.id) && !('index' in node)) {
+        out[key] = inner;
       } else {
-        out[key] = walk(inner);
+        out[key] = walk(inner, inside);
       }
     }
     return out;
@@ -123,8 +135,8 @@ export const OFFLINE_POLICY =
 let policyId = 2 ** 30;
 
 /**
- * A full snapshot (rrweb type 2) with the policy as the first element of the head of its root
- * <html>; a head is made when there is none. A snapshot without a root <html> is not replayed:
+ * A full snapshot (rrweb type 2) with the policy as the first element of the first child of its
+ * root <html>, the head (made when there is none). A snapshot without a root <html> is not replayed:
  * the policy would have no place, and its page would load freely.
  */
 function withPolicy(event: unknown): unknown {
@@ -138,11 +150,11 @@ function withPolicy(event: unknown): unknown {
     root.childNodes = [{ type: 2, tagName: 'html', attributes: {}, id: policyId++, childNodes: [{ type: 2, tagName: 'head', attributes: {}, id: policyId++, childNodes: [meta] }] }];
     return event;
   }
-  let head = (html.childNodes ?? []).find((n) => n.tagName?.toLowerCase() === 'head');
-  if (!head) {
-    head = { type: 2, tagName: 'head', attributes: {}, childNodes: [], id: policyId++ };
-    html.childNodes = [head, ...(html.childNodes ?? [])];
-  }
+  // The head goes first in <html>, and the policy first in the head: nothing in the page comes
+  // before it, so nothing loads before it holds.
+  const children = html.childNodes ?? [];
+  const head = children.find((n) => n.tagName?.toLowerCase() === 'head') ?? { type: 2, tagName: 'head', attributes: {}, childNodes: [], id: policyId++ };
+  html.childNodes = [head, ...children.filter((n) => n !== head)];
   head.childNodes = [meta, ...(head.childNodes ?? [])];
   return event;
 }
