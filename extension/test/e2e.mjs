@@ -441,14 +441,14 @@ try {
       await tab.bringToFront();
       const heading = await review.getByRole('heading', { level: 1 }).innerText();
       const titleField = tab.getByLabel('Title');
-      await titleField.press('Control+v');
+      await titleField.press('ControlOrMeta+v');
       if (await titleField.inputValue() !== heading) throw new Error('Basecamp title paste included other fields');
       await review.bringToFront();
       await review.getByRole('button', { name: 'Copy notes' }).click();
       await review.getByRole('status').filter({ hasText: 'Notes copied.' }).waitFor();
       await tab.bringToFront();
       const notesField = tab.getByLabel('Notes');
-      await notesField.press('Control+v');
+      await notesField.press('ControlOrMeta+v');
       await tab.waitForFunction(() => document.querySelector('[aria-label=Notes]').value.length > 0);
       const body = await notesField.inputValue();
       if (!body.includes(notes) || !body.includes('HTTP 500') || body.includes('```') || body.includes('written by Claude Haiku')) {
