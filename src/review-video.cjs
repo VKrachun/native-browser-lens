@@ -7,6 +7,8 @@ const { once } = require('node:events');
 const { pipeline } = require('node:stream/promises');
 
 const FRAME_MS = 100;
+// The daemon passes the FFmpeg it found: a service on macOS has no Homebrew folder on its PATH.
+const FFMPEG = process.env.LENS_FFMPEG || 'ffmpeg';
 const SAMPLES_PER_MS = 16; // Lens microphone WAVs are mono 16 kHz signed 16-bit PCM.
 
 // Compose the soundtrack on the same clock as frames(). Pad the last frame of each
@@ -66,7 +68,7 @@ async function render(tools, recording, ranges, output) {
   } catch {
     throw new Error('Install the optional video tools: npm install --prefix "' + tools + '" playwright-core@1.65.0 rrweb-player@2.2.2');
   }
-  if (spawnSync('ffmpeg', ['-version'], { stdio: 'ignore' }).status !== 0) throw new Error('Install FFmpeg to save an MP4.');
+  if (spawnSync(FFMPEG, ['-version'], { stdio: 'ignore' }).status !== 0) throw new Error('Install FFmpeg to save an MP4.');
   const events = JSON.parse(fs.readFileSync(recording, 'utf8'));
   if (!events.some(e => e.type === 2) || events.length < 2) throw new Error('The reviewed recording has no replayable snapshot.');
   const view = events.find(e => e.type === 4 && e.data.width > 0 && e.data.height > 0)?.data;
@@ -110,7 +112,8 @@ async function render(tools, recording, ranges, output) {
         }
       }
     }
-    const encoder = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'image2pipe',
+    // FFmpeg 9 no longer guesses the codec of a piped image stream.
+    const encoder = spawn(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'image2pipe', '-c:v', 'mjpeg',
       '-framerate', String(1000 / FRAME_MS), '-i', 'pipe:0',
       ...(hasVoice ? ['-f', 's16le', '-ar', '16000', '-ac', '1', '-i', pcm, '-map', '0:v:0', '-map', '1:a:0',
         '-c:a', 'aac', '-b:a', '64k'] : ['-an']), '-c:v', 'libx264', '-threads', '2', '-pix_fmt', 'yuv420p',

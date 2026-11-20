@@ -13,8 +13,8 @@ function installerFor(os: string) {
   return { system: 'Linux', file: 'the .deb, the Arch package or the AppImage', shell: 'a terminal', command: `curl -fsSL ${RELEASES}/install.sh | sh` };
 }
 
-/** The browser's "host not found" means the app is not installed; anything else, that it failed. */
-export const appMissing = (reason: string) => /not found/i.test(reason);
+/** A missing registration looks the same as a missing app to the browser. */
+export const hostNotFound = (reason: string) => /native messaging host not found|no such native application/i.test(reason);
 
 /**
  * Shown while the extension cannot reach the Lens app: the installer for this computer, and a wait
@@ -26,20 +26,19 @@ export function InstallApp({ reason }: { reason: string }) {
   useEffect(() => {
     void browser.runtime.getPlatformInfo().then((info) => setOs(info.os));
   }, []);
-  const missing = appMissing(reason);
+  const missing = hostNotFound(reason);
   const { system, file, shell, command } = installerFor(os);
   return (
     <section className="card onboarding" aria-label="Install the Lens app">
-      <h2>{missing ? 'Install the Lens app' : 'The Lens app did not start'}</h2>
+      <h2>{missing ? 'The browser could not find the Lens app' : 'The browser lost its connection to Lens'}</h2>
       {missing ? (
         <p className="muted">
-          Lens records what you do on a site, with your voice, and files it as a task an agent can repeat. The app keeps
-          the recordings on this computer. It installs for you only, without administrator rights.
+          If Sirv Lens is installed, open it from your applications to register it with this browser.
+          Otherwise, download it below.
         </p>
       ) : (
         <p className="muted">
-          It is installed, but the browser could not start it: <em>{reason}</em>. Open Sirv Lens from your applications
-          to repair it.
+          <em>{reason}</em>. Open Sirv Lens from your applications to reconnect.
         </p>
       )}
       <a className="btn btn-primary btn-block" href={`${REPO}/latest`} target="_blank" rel="noreferrer">

@@ -155,7 +155,8 @@ export default defineBackground(() => {
       // Setup's checklist learns from this that the extension is installed, connected and current.
       await client().request({ method: 'announce', params: await clientInfo() });
     } catch {
-      projects = [];
+      // The app restarts (an update) or is gone: keep the projects known so far. Emptying them
+      // would stop every tab's collection and end a running recording before its Stop.
     }
     await syncAll();
   }
@@ -337,15 +338,23 @@ export default defineBackground(() => {
         ? capture(message.tabId, message.observation)
         : message.kind === 'tabStatus'
           ? status(message.tabId)
-          : loadProjects();
+          : message.kind === 'lensReachable'
+            ? client()
+                .request({ method: 'hello' })
+                .then(() => true, () => false)
+            : loadProjects();
     work.then(reply, (error: Error) => reply({ ok: false, error: error.message }));
     return true;
   });
 
   browser.tabs.onUpdated.addListener((tabId, change, tab) => {
     if (change.url && buffer.mode(tabId) !== undefined) {
-      // Leaving the project's origins stops recording at once; sync then detaches.
-      if (projectFor(originOf(change.url))) {
+      // Leaving the project's origins stops recording at once; sync then detaches. Another
+      // project starts its own evidence, so an agent asking about one never gets the other's;
+      // a recording keeps going until its Stop.
+      const project = projectFor(originOf(change.url));
+      const moved = project?.id !== projectFor(originOf(urls.get(tabId)))?.id && !sessions.has(tabId);
+      if (project && !moved) {
         buffer.record(tabId, 'navigation', { url: change.url });
         const url = sanitizeUrl(change.url);
         actions.add(tabId, { timestamp: Date.now(), kind: 'navigate', url, target: null, value: null, masked: false });

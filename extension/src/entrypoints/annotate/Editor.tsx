@@ -136,7 +136,7 @@ export function Editor({ capture: captureId }: { capture: number }) {
           </span>
           {/* In the title row, so switching tools never moves the canvas under the pointer. */}
           {tool === 'mask' && (
-            <span className="small muted hint">Masks hide what is under them in every export and filing.</span>
+            <span className="small muted hint">Masks hide what is under them in every export and filing. A masked capture leaves without its replay.</span>
           )}
         </div>
         <div role="toolbar" aria-label="Tools" className="tools">

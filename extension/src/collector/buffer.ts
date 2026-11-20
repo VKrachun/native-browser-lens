@@ -206,9 +206,16 @@ export class ReplayBuffer {
     // Over budget: drop whole stretches up to the next full snapshot, so the rest still replays.
     let size = entry.events.slice(start).reduce((sum, e) => sum + e.size, 0);
     while (size > MAX_REPLAY_BYTES) {
-      const next = entry.events.findIndex((e, i) => i > start && e.event.type === FULL_SNAPSHOT);
+      // The next start must lie past this one: a meta event in front of the current snapshot would
+      // otherwise give the same start again, and the loop would never end.
+      let next = start;
+      let from = start;
+      while (from <= start) {
+        next = entry.events.findIndex((e, i) => i > next && e.event.type === FULL_SNAPSHOT);
+        if (next < 0) break;
+        from = entry.events[next - 1]?.event.type === META ? next - 1 : next;
+      }
       if (next < 0) break;
-      const from = entry.events[next - 1]?.event.type === META ? next - 1 : next;
       size -= entry.events.slice(start, from).reduce((sum, e) => sum + e.size, 0);
       start = from;
     }

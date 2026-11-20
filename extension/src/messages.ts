@@ -9,7 +9,9 @@ export type BackgroundRequest =
   | { kind: 'startSession'; tabId: number; voice?: boolean }
   | { kind: 'stopSession'; tabId: number }
   | { kind: 'tabStatus'; tabId: number }
-  | { kind: 'projectsChanged' };
+  | { kind: 'projectsChanged' }
+  /** Whether the background's own connection to the app answers: true or false. */
+  | { kind: 'lensReachable' };
 
 export type CaptureResult = { ok: true; capture: Capture } | { ok: false; error: string };
 

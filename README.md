@@ -92,7 +92,7 @@ Coding agents read the defects a person reviewed, reproduce them and prove the f
 | Resources | `lens://review/{id}` |
 
 Every tool only reads, except `verify_fix`, which runs the project's Playwright in a scratch
-folder (`.lens/verify`) and removes it. Page text in every answer is marked as untrusted data.
+folder (`.lens/verify-…`) and removes it. Page text in every answer is marked as untrusted data.
 
 ## Issue trackers
 

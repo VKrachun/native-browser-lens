@@ -110,9 +110,27 @@ pub fn build(
 }
 
 /// A recording's page at Stop adds nothing to its replay and the shots after each step: only a
-/// moment capture, whose screenshot is the capture, files it.
+/// moment capture, whose screenshot is the capture, files it. A recording without its replay
+/// (too large, or not kept) does not file it either: the review never shows it for checking.
 pub fn files_end_screenshot(item: &ReviewItem) -> bool {
-    !(item.kind == crate::protocol::CaptureKind::Session && item.recording.is_some())
+    item.kind != crate::protocol::CaptureKind::Session
+}
+
+/// Whether words spoken from `from` to `to` (Unix ms) leave with the review. Words in a trimmed or
+/// cut part of a recording do not, as its audio does not: each recording is (start, stop, kept).
+/// The middle of the words decides, because speech times are not exact to the millisecond.
+pub fn spoken_in_kept<'a>(
+    recordings: impl IntoIterator<Item = (i64, i64, &'a [crate::protocol::TimeRange])>,
+    from: i64,
+    to: i64,
+) -> bool {
+    let middle = from + (to - from) / 2;
+    recordings.into_iter().all(|(start, stop, kept)| {
+        kept.is_empty()
+            || middle < start
+            || middle >= stop
+            || kept.iter().any(|r| middle >= r.from && middle <= r.to)
+    })
 }
 
 /// Keeps at most `budget` shots across the items, evenly spaced within each, in proportion to
@@ -620,6 +638,40 @@ fn unescape(text: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod spoken {
+    use super::*;
+    use crate::protocol::TimeRange;
+
+    #[test]
+    fn words_in_a_cut_stay_out() {
+        let kept = [
+            TimeRange {
+                from: 1000,
+                to: 2000,
+            },
+            TimeRange {
+                from: 3000,
+                to: 4000,
+            },
+        ];
+        let rec = || [(500, 5000, &kept[..])];
+        assert!(spoken_in_kept(rec(), 1100, 1900));
+        assert!(!spoken_in_kept(rec(), 2100, 2900), "inside the cut");
+        assert!(!spoken_in_kept(rec(), 1900, 3100), "mostly in the cut");
+        assert!(
+            spoken_in_kept(rec(), 950, 1500),
+            "starts just before the kept part"
+        );
+        assert!(!spoken_in_kept(rec(), 600, 900), "trimmed start");
+        assert!(spoken_in_kept(rec(), 5100, 5200), "after the recording");
+        assert!(
+            spoken_in_kept([(500, 5000, &[][..])], 2100, 2900),
+            "nothing cut"
+        );
+    }
 }
 
 #[cfg(test)]

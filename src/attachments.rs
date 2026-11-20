@@ -34,8 +34,16 @@ pub fn save(
     tools: &Path,
 ) -> io::Result<PathBuf> {
     fs::create_dir_all(downloads)?;
-    let staging = tempfile::tempdir_in(downloads)?;
-    let file = tempfile::NamedTempFile::new_in(staging.path())?;
+    // The raw recording, voice and export folder never go to Downloads: they wait in the data
+    // folder, which the daemon empties at start (an update can end it in the middle of a render).
+    // Only the finished file is moved there, from a temporary file beside it.
+    let work = tools.with_file_name("attachments");
+    fs::create_dir_all(&work)?;
+    let staging = private_dir(&work)?;
+    let file = tempfile::Builder::new()
+        .prefix(".lens-")
+        .suffix(".part")
+        .tempfile_in(downloads)?;
     let (name, extension) =
         match capture {
             None => {
@@ -74,21 +82,19 @@ pub fn save(
                 )?;
                 let script = staging.path().join("render.cjs");
                 fs::write(&script, include_bytes!("review-video.cjs"))?;
-                let result = Command::new("node")
+                let node = crate::investigate::program("node")
+                    .ok_or_else(|| io::Error::other("Install Node.js to render MP4 files."))?;
+                let mut command = Command::new(node);
+                command
                     .arg(script)
                     .arg(tools)
                     .arg(source)
                     .arg(ranges)
-                    .arg(file.path())
-                    .output()
-                    .map_err(|e| {
-                        io::Error::other(format!("Install Node.js to render MP4 files: {e}"))
-                    })?;
-                if !result.status.success() {
-                    return Err(io::Error::other(
-                        String::from_utf8_lossy(&result.stderr).trim().to_owned(),
-                    ));
+                    .arg(file.path());
+                if let Some(ffmpeg) = crate::investigate::program("ffmpeg") {
+                    command.env("LENS_FFMPEG", ffmpeg);
                 }
+                render(command, staging.path())?;
                 (format!("lens-review-{}-capture-{id}", review.id), "mp4")
             }
         };
@@ -110,6 +116,59 @@ pub fn save(
     unreachable!()
 }
 
+/// A folder only this account can read.
+fn private_dir(parent: &Path) -> io::Result<tempfile::TempDir> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("lens-attachment-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(fs::Permissions::from_mode(0o700));
+    }
+    builder.tempdir_in(parent)
+}
+
+/// Runs the MP4 renderer and stops it after 20 minutes: a stuck browser or encoder must not hold
+/// the review page and the staging files forever.
+fn render(mut command: Command, staging: &Path) -> io::Result<()> {
+    let log = staging.join("render.log");
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(fs::File::create(&log)?);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|e| io::Error::other(format!("Install Node.js to render MP4 files: {e}")))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20 * 60);
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::other(
+                "The MP4 render took longer than 20 minutes and was stopped.",
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    };
+    if status.success() {
+        return Ok(());
+    }
+    let message = fs::read_to_string(&log).unwrap_or_default();
+    Err(io::Error::other(match message.trim() {
+        "" => "The MP4 render failed.".to_owned(),
+        text => text.to_owned(),
+    }))
+}
+
 /// One sequential transfer per native connection. Closing the port drops its temporary file.
 pub struct Transfer {
     file: fs::File,
@@ -126,14 +185,7 @@ impl Transfer {
         tools: &Path,
         voice: &[VoiceSource],
     ) -> io::Result<Self> {
-        let mut staging = tempfile::Builder::new();
-        staging.prefix("lens-attachment-");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            staging.permissions(fs::Permissions::from_mode(0o700));
-        }
-        let folder = staging.tempdir()?;
+        let folder = private_dir(&std::env::temp_dir())?;
         let path = save(review, capture, blobs, voice, folder.path(), tools)?;
         Ok(Self {
             file: fs::File::open(path)?,

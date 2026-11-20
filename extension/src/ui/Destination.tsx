@@ -25,6 +25,8 @@ async function migrateBrowserChoice(client: LensClient, settings: DestinationSet
   return migrated;
 }
 
+const OUTDATED = 'Update the Lens app to choose a default destination.';
+
 export function useDestination(client: LensClient) {
   const [settings, setSettings] = useState<DestinationSettings | null>(null);
   const [error, setError] = useState('');
@@ -36,7 +38,7 @@ export function useDestination(client: LensClient) {
       let hint = '';
       let next = await client.request({ method: 'getDestination' }).catch(async (e: Error) => {
         if (!e.message.includes('unknown variant `getDestination`')) throw e;
-        hint = 'Update the Lens app to choose a default destination.';
+        hint = OUTDATED;
         const account = await client.request({ method: 'getVibeQ' });
         const connected = Boolean(account.endpoint && account.hasToken);
         return { choice: connected ? { tracker: 'vibeq' as const, address: '' } : null, vibeqConnected: connected };
@@ -116,7 +118,8 @@ export function DestinationForm({ client, onboarding = false }: { client: LensCl
     <section className="card settings-section destination-settings" aria-label="Default destination">
       <h2>{onboarding ? 'Where do you track issues?' : 'Default destination'}</h2>
       <p className="small muted">Lens uses this destination for every review on this computer.</p>
-      {settings && !error && <form onSubmit={save}>
+      {/* A failed poll (the app restarts) keeps the form; only an app too old for it hides it. */}
+      {settings && error !== OUTDATED && <form onSubmit={save}>
         <label>Destination
           <select aria-label="Destination" className="select" value={selected} required onChange={(e) => {
             setTracker(e.target.value as Tracker);

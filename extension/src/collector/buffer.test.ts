@@ -66,5 +66,12 @@ describe('ReplayBuffer', () => {
     buffer.add(1, [step(now)]);
     expect(buffer.slice(1, 0)[0]).toEqual(meta(60_000));
   });
+
+  it('over budget, drops the oldest stretch even when it starts with a meta event', () => {
+    const buffer = new ReplayBuffer(() => 10);
+    const big = (t: number) => ({ type: 3, timestamp: t, data: 'x'.repeat(40 * 1024 * 1024) });
+    buffer.add(1, [meta(0), full(0), big(1), meta(5), full(5), big(6)]);
+    expect(buffer.slice(1, 0).map((e) => e.timestamp)).toEqual([5, 5, 6]);
+  });
 });
 

@@ -98,7 +98,11 @@ export class LensClient {
   private readonly pending = new Map<number, { resolve: (reply: Reply) => void; reject: (error: Error) => void }>();
 
   constructor(private readonly onClose: (error: LensError) => void = () => {}) {
-    this.open();
+    try {
+      this.open();
+    } catch {
+      // A page whose extension was replaced cannot connect: the first request reports it.
+    }
   }
 
   private open(): Browser.runtime.Port {
@@ -113,7 +117,9 @@ export class LensClient {
     port.onDisconnect.addListener(() => {
       if (this.port !== port) return;
       this.port = null;
-      const closed = new LensError('disconnected', browser.runtime.lastError?.message ?? 'Lens closed the connection');
+      // Firefox puts the cause on the port. Chromium exposes it through runtime.lastError.
+      const { error } = port as Browser.runtime.Port & { error?: { message: string } | null };
+      const closed = new LensError('disconnected', error?.message ?? browser.runtime.lastError?.message ?? 'Lens closed the connection');
       for (const waiter of this.pending.values()) waiter.reject(closed);
       this.pending.clear();
       this.onClose(closed);
@@ -123,12 +129,11 @@ export class LensClient {
   }
 
   request<M extends Request['method']>(request: Extract<Request, { method: M }>): Promise<ReplyData<M>> {
-    const port = this.port ?? this.open();
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve: (reply) => resolve((reply as { data?: unknown }).data as ReplyData<M>), reject });
       try {
-        port.postMessage({ id, ...request });
+        (this.port ?? this.open()).postMessage({ id, ...request });
       } catch (error) {
         this.pending.delete(id);
         this.port = null;

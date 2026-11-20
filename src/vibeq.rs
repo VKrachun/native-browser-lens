@@ -36,6 +36,13 @@ pub struct Receipt {
     pub missing_attachments: Vec<String>,
 }
 
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// 60 seconds, plus one second for each 64 KiB (an upload of at least 0.5 Mbit/s).
+fn upload_timeout(bytes: usize) -> Duration {
+    REQUEST_TIMEOUT + Duration::from_secs((bytes / (64 * 1024)) as u64)
+}
+
 pub struct Client {
     base: url::Url,
     token: String,
@@ -51,7 +58,7 @@ impl Client {
         let agent = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .max_redirects(0)
-            .timeout_global(Some(Duration::from_secs(60)))
+            .timeout_global(Some(REQUEST_TIMEOUT))
             .build()
             .into();
         Ok(Self {
@@ -76,7 +83,12 @@ impl Client {
     fn answer(
         result: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
     ) -> Result<(u16, Vec<u8>), String> {
-        let mut response = result.map_err(|e| format!("VibeQ is unreachable: {e}"))?;
+        let mut response = result.map_err(|e| match e {
+            ureq::Error::Timeout(ureq::Timeout::Global) => {
+                "VibeQ did not answer in time. Filing again is safe.".to_string()
+            }
+            _ => format!("The VibeQ request failed: {e}"),
+        })?;
         let status = response.status().as_u16();
         let body = response
             .body_mut()
@@ -94,10 +106,14 @@ impl Client {
         )
     }
 
+    /// The time limit grows with the body: a large recording on a slow upload link takes minutes.
     fn post(&self, path: &str, content_type: &str, body: &[u8]) -> Result<(u16, Vec<u8>), String> {
         Self::answer(
             self.agent
                 .post(&self.url(path)?)
+                .config()
+                .timeout_global(Some(upload_timeout(body.len())))
+                .build()
                 .header("Authorization", &format!("Bearer {}", self.token))
                 .content_type(content_type)
                 .send(body),
@@ -274,6 +290,15 @@ pub fn validate_endpoint(endpoint: &str) -> Result<url::Url, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn large_uploads_get_more_time() {
+        assert_eq!(upload_timeout(1000), REQUEST_TIMEOUT);
+        assert_eq!(
+            upload_timeout(64 * 1024 * 1024),
+            Duration::from_secs(60 + 1024)
+        );
+    }
 
     #[test]
     fn endpoints_must_be_https_or_local() {

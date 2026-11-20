@@ -145,7 +145,10 @@ pub fn deliver(
             attempt.endpoint
         ));
     }
-    let member = client.me()?.id;
+    let member = client
+        .me()
+        .map_err(|e| format!("Checking the VibeQ account failed. {e}"))?
+        .id;
     match &attempt.member_id {
         Some(original) if *original != member => {
             return Err("this filing belongs to another VibeQ member; nothing was sent".into());
@@ -157,7 +160,10 @@ pub fn deliver(
         }
     }
     let manifest = &attempt.submission.evidence_manifest;
-    let mut receipt = match client.receipt(&attempt.submission.submission_id)? {
+    let mut receipt = match client
+        .receipt(&attempt.submission.submission_id)
+        .map_err(|e| format!("Checking the filing receipt failed. {e}"))?
+    {
         Some(found) => Some(validate(found, &attempt.submission)?),
         None => None,
     };
@@ -172,7 +178,10 @@ pub fn deliver(
     if receipt.is_none() || !missing.is_empty() {
         let mut body = serde_json::to_value(&attempt.submission).expect("submissions serialize");
         body["stagedAttachments"] = staged.into();
-        receipt = Some(validate(client.submit(&body)?, &attempt.submission)?);
+        let submitted = client
+            .submit(&body)
+            .map_err(|e| format!("Lens could not confirm the submission. {e}"))?;
+        receipt = Some(validate(submitted, &attempt.submission)?);
     }
     attempt.receipt = receipt.clone();
     save(attempt)?;
@@ -230,7 +239,15 @@ fn stage_one(
             artifact.filename
         ));
     }
-    let key = client.stage(&artifact.filename, &artifact.content_type, &bytes)?;
+    let key = client
+        .stage(&artifact.filename, &artifact.content_type, &bytes)
+        .map_err(|e| {
+            format!(
+                "Uploading {} ({} bytes) failed. {e}",
+                artifact.filename,
+                bytes.len()
+            )
+        })?;
     Ok(json!({ "id": artifact.id, "key": key }))
 }
 
@@ -462,7 +479,8 @@ mod tests {
                 saved.push(a.clone());
                 Ok(())
             })
-            .is_err()
+            .unwrap_err()
+            .starts_with("Lens could not confirm the submission.")
         );
         assert_eq!(saved.last().unwrap().member_id.as_deref(), Some("member-1"));
 

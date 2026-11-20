@@ -80,7 +80,11 @@ pub fn verify(
     if !spec.contains("async ({ page }) => {") {
         return Err("Lens recorded no steps to repeat for this capture".into());
     }
-    let folder = project.join(".lens").join("verify");
+    // A folder of its own for each run: two runs at once, or files someone keeps in
+    // .lens/verify, are never overwritten or removed.
+    let folder = project
+        .join(".lens")
+        .join(format!("verify-{}", uuid::Uuid::new_v4().simple()));
     std::fs::create_dir_all(&folder).map_err(|e| format!("cannot write in the project: {e}"))?;
     let seen = folder.join(format!("{name}.json"));
     let config = folder.join("playwright.config.mjs");

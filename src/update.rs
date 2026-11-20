@@ -214,6 +214,15 @@ pub fn install(paths: &Paths, manifest: &Manifest) -> Result<(), String> {
         download(&agent, &format!("{}/{}", feed(), asset.file))?,
         asset,
     )?;
+    // Everything downloads before the first file changes: the daemon restarts on the new program
+    // within seconds of its replacement, and that would end a download still under way.
+    let extension = match &manifest.extension {
+        Some(extension) if paths.data.join("extension").is_dir() => Some(checked(
+            download(&agent, &format!("{}/{}", feed(), extension.file))?,
+            extension,
+        )?),
+        _ => None,
+    };
     let names: &[&str] = if cfg!(windows) {
         &["lens.exe", "lensw.exe"]
     } else {
@@ -232,16 +241,9 @@ pub fn install(paths: &Paths, manifest: &Manifest) -> Result<(), String> {
                 .map_err(|e| format!("cannot replace {name}: {e}"))?;
         }
     }
-    if let Some(extension) = &manifest.extension {
-        let folder = paths.data.join("extension");
-        if folder.is_dir() {
-            let package = checked(
-                download(&agent, &format!("{}/{}", feed(), extension.file))?,
-                extension,
-            )?;
-            unpack_extension(&package, &folder)
-                .map_err(|e| format!("cannot refresh the extension: {e}"))?;
-        }
+    if let Some(package) = extension {
+        unpack_extension(&package, &paths.data.join("extension"))
+            .map_err(|e| format!("cannot refresh the extension: {e}"))?;
     }
     Ok(())
 }
@@ -373,6 +375,10 @@ fn replace(target: &Path, bytes: &[u8]) -> io::Result<()> {
         let old = target.with_extension("old");
         let _ = std::fs::remove_file(&old);
         std::fs::rename(target, &old)?;
+        // The browsers start this file: put the working one back when the new one cannot go in.
+        return std::fs::rename(&fresh, target).inspect_err(|_| {
+            let _ = std::fs::rename(&old, target);
+        });
     }
     std::fs::rename(&fresh, target)
 }

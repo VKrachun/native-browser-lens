@@ -213,8 +213,8 @@ try {
   // continues by itself once the app is there.
   const panel = await context.newPage();
   await panel.goto(`chrome-extension://${extensionId}/sidepanel.html?tab=${tabId}`);
-  await panel.getByRole('heading', { name: 'Install the Lens app' }).waitFor({ timeout: 15_000 });
-  await panel.getByRole('status', { name: 'Connection' }).filter({ hasText: 'App not installed' }).waitFor();
+  await panel.getByRole('heading', { name: 'The browser could not find the Lens app' }).waitFor({ timeout: 15_000 });
+  await panel.getByRole('status', { name: 'Connection' }).filter({ hasText: 'App not found' }).waitFor();
   execFileSync(bin, ['register'], { env, stdio: 'inherit' });
   const status = panel.getByRole('status', { name: 'Connection' });
   const connected = await status
@@ -439,7 +439,9 @@ try {
     }
     await review.bringToFront();
     if (key !== 'basecamp') await context.route(target, route => route.fulfill({ body: 'Draft' }));
-    if (key === 'basecamp' && process.env.LENS_E2E_VIDEO_TOOLS) await review.getByRole('checkbox', { name: /Replay MP4/ }).check();
+    // The capture has a mask, so its replay stays out of the review: no MP4 to attach.
+    if (key === 'basecamp' && await review.getByRole('checkbox', { name: /Replay MP4/ }).count())
+      throw new Error('A masked capture offers its replay as an MP4');
     const [tab] = await Promise.all([context.waitForEvent('page'), review.getByRole('button', { name: button }).click()]);
     await tab.waitForURL(target);
     if (key === 'github' && !new URL(tab.url()).searchParams.get('body')?.includes('HTTP 500')) throw new Error('Missing issue body');
@@ -458,14 +460,10 @@ try {
       if (!/^lens-review-\d+-evidence\.zip$/.test(evidence.name) || evidence.type !== 'application/zip' ||
           !Buffer.from(evidence.bytes).includes('capture-1-evidence.json') || basecamp.submitted)
         throw new Error('The unsubmitted Basecamp draft did not receive the reviewed ZIP');
-      if (process.env.LENS_E2E_VIDEO_TOOLS) {
-        const header = await tab.evaluate(async () => {
-          const video = window.received.find(f => f.type === 'video/mp4');
-          return video?.slice(4, 8).text();
-        });
-        if (header !== 'ftyp') throw new Error('Basecamp did not receive the rendered MP4');
-        await review.getByRole('checkbox', { name: /Replay MP4/ }).uncheck();
-      }
+      if (await tab.evaluate(() => window.received.some(f => f.type === 'video/mp4')))
+        throw new Error('Basecamp received a replay of a masked capture');
+      if (Buffer.from(evidence.bytes).includes('capture-1.rrweb.json'))
+        throw new Error('The evidence ZIP has the replay of a masked capture');
       basecamp.editor = 'lexxy';
       await review.bringToFront();
       const [second] = await Promise.all([context.waitForEvent('page'), review.getByRole('button', { name: button }).click()]);
@@ -499,9 +497,11 @@ try {
   for (const expected of ['HTTP 500 from', '` Console error: total is NaN `', notes, '![Capture 1](capture-1.png)']) {
     if (!report.includes(expected)) throw new Error(`report.md lacks ${expected}:\n${report}`);
   }
-  for (const file of ['capture-1.lens.json', 'capture-1.png', 'capture-1-evidence.json', 'capture-1.rrweb.json', 'review.json', 'capture-1-timeline.txt', 'capture-1.spec.ts', 'capture-1.har']) {
+  for (const file of ['capture-1.lens.json', 'capture-1.png', 'capture-1-evidence.json', 'review.json', 'capture-1-timeline.txt', 'capture-1.spec.ts', 'capture-1.har']) {
     if (!existsSync(join(folder, file))) throw new Error(`the export lacks ${file}`);
   }
+  // The capture is masked: its replay, which would show what the mask hides, stays home.
+  if (existsSync(join(folder, 'capture-1.rrweb.json'))) throw new Error('the export has the replay of a masked capture');
   if (speech) {
     const said = readFileSync(join(folder, 'voice-1.txt'), 'utf8');
     if (!/fellow Americans/i.test(said) || !/^\[00:0\d\] /.test(said)) throw new Error(`voice-1.txt: ${said}`);
@@ -628,11 +628,12 @@ try {
   if (vibeq.staged !== submitted.body.evidenceManifest.length) {
     throw new Error(`${vibeq.staged} uploads for ${submitted.body.evidenceManifest.length} files`);
   }
-  // VibeQ gets lens-capture.v1: the record, the shots, the end screenshot and the recording.
+  // VibeQ gets lens-capture.v1: the record, the shots and the end screenshot. The capture is
+  // masked, so its recording stays home.
   const filed = submitted.body.evidenceManifest.map((a) => `${a.filename} ${a.contentType}`);
   if (
     !filed.includes('capture-1.lens.json application/vnd.sirv.lens-capture+json') ||
-    !filed.includes('capture-1.rrweb.json application/vnd.rrweb+json') ||
+    filed.some((f) => f.startsWith('capture-1.rrweb.json')) ||
     filed.some((f) => !/^capture-1(\.lens\.json|\.rrweb\.json|\.png|-shot-\d+\.webp) /.test(f))
   ) {
     throw new Error(`filed files: ${filed.join(', ')}`);
@@ -736,8 +737,10 @@ try {
     if (!(await (await fetch(`${wizard}/`, { headers: { Cookie: cookie } })).text()).includes('Set up Sirv Lens')) throw new Error('wizard page');
     const foreign = await fetch(`${wizard}/action`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json', Origin: 'https://evil.test' }, body: '{"action":"connectAgents"}' });
     if (foreign.status !== 403) throw new Error(`wizard accepted a foreign post: ${foreign.status}`);
-    const image = (await rpc('tools/call', { name: 'read_review_file', arguments: { review: latest.id, file: 'capture-1.png' } })).content[0];
-    if (image.type !== 'image' || image.mimeType !== 'image/png' || !image.data.startsWith('iVBORw0KGgo')) {
+    // A label marks the image as untrusted page content, then the image follows.
+    const [label, image] = (await rpc('tools/call', { name: 'read_review_file', arguments: { review: latest.id, file: 'capture-1.png' } })).content;
+    if (label?.type !== 'text' || !label.text.includes('UNTRUSTED')) throw new Error(`MCP image label: ${JSON.stringify(label).slice(0, 200)}`);
+    if (image?.type !== 'image' || image.mimeType !== 'image/png' || !image.data.startsWith('iVBORw0KGgo')) {
       throw new Error(`MCP image: ${JSON.stringify(image).slice(0, 200)}`);
     }
   } finally {

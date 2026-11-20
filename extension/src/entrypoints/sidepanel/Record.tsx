@@ -63,9 +63,11 @@ export function RecordControls({
   const [voice, setVoice] = useStored('lens.voice', true);
   const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(Date.now());
+  /** Firefox: the panel's one microphone, and the tab whose recording it belongs to. */
   const microphone = useRef<Recording | null>(null);
-  /** The voice of a Stop that the app did not take: the next Stop saves it. */
-  const keptVoice = useRef<{ wav: Blob; startedAt: number } | null>(null);
+  const microphoneTab = useRef<number | null>(null);
+  /** The voice of a Stop that the app did not take: the next Stop in that tab saves it. */
+  const keptVoice = useRef<{ wav: Blob; startedAt: number; tab: number } | null>(null);
   const running = site?.session ?? null;
   const screenAccess = useScreenAccess();
   // With the voice on, the speech model must be there to write it down: offer it here, once.
@@ -103,8 +105,12 @@ export function RecordControls({
     if (!(await screenAccess())) return onProblem(SCREEN_ACCESS_REFUSED);
     onProblem(null);
     if (voice && !inBackground) {
+      // One microphone: a recording with voice in another tab keeps it until its Stop.
+      if (microphone.current && microphoneTab.current !== tabId)
+        return onProblem('Stop the recording in the other tab first: it is using the microphone.');
       try {
         microphone.current = await record();
+        microphoneTab.current = tabId;
       } catch (error) {
         if (error instanceof MicrophoneBlocked) {
           await browser.tabs.create({ url: browser.runtime.getURL('/microphone.html') });
@@ -115,8 +121,10 @@ export function RecordControls({
     }
     const started = await send<SessionStart>({ kind: 'startSession', tabId, voice: voice && inBackground });
     if (!started.ok) {
-      microphone.current?.cancel();
-      microphone.current = null;
+      if (microphoneTab.current === tabId) {
+        microphone.current?.cancel();
+        microphone.current = microphoneTab.current = null;
+      }
       if (started.microphoneBlocked) {
         await browser.tabs.create({ url: browser.runtime.getURL('/microphone.html') });
         return onProblem('Allow the microphone in the tab that opened, then press Record again.');
@@ -130,10 +138,11 @@ export function RecordControls({
     if (tabId === null) return;
     if (!(await screenAccess())) return onProblem(SCREEN_ACCESS_REFUSED);
     setBusy(true);
-    const spoken = microphone.current;
-    microphone.current = null;
+    const mine = microphoneTab.current === tabId;
+    const spoken = mine ? microphone.current : null;
+    if (mine) microphone.current = microphoneTab.current = null;
     try {
-      const kept = keptVoice.current;
+      const kept = keptVoice.current?.tab === tabId ? keptVoice.current : null;
       const [result, wav] = await Promise.all([
         send<CaptureResult>({ kind: 'stopSession', tabId }),
         kept ? Promise.resolve(kept.wav) : spoken ? spoken.stop() : Promise.resolve(null),
@@ -141,10 +150,10 @@ export function RecordControls({
       const startedAt = kept?.startedAt ?? spoken?.startedAt;
       if (!result.ok) {
         // The background keeps the session; the voice waits here for Stop again.
-        if (wav && startedAt !== undefined) keptVoice.current = { wav, startedAt };
+        if (wav && startedAt !== undefined) keptVoice.current = { wav, startedAt, tab: tabId };
         return onProblem(`The recording was not saved: ${result.error}`);
       }
-      keptVoice.current = null;
+      if (kept) keptVoice.current = null;
       if (wav && startedAt !== undefined) {
         const audio = await client.upload(wav, 'audio/wav');
         await client.request({

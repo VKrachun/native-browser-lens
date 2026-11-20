@@ -199,15 +199,19 @@ export function RecordingEditor({
   // Edits save shortly after each change.
   useEffect(() => {
     if (saved) return;
+    const sent = edits;
     const timer = setTimeout(() => {
       client
-        .request({ method: 'saveEdits', params: { capture: capture.id, edits } })
-        .then(() => setSaved(true))
+        .request({ method: 'saveEdits', params: { capture: capture.id, edits: sent } })
+        // A newer edit made during this save stays unsaved, so its own save still runs.
+        .then(() => latestEdits.current === sent && setSaved(true))
         .catch((error: Error) => setProblem(`Not saved: ${error.message}`));
     }, 500);
     return () => clearTimeout(timer);
   }, [client, capture.id, edits, saved]);
 
+  const latestEdits = useRef(edits);
+  latestEdits.current = edits;
   const change = (next: Edits) => (setEdits(next), setSaved(false));
   const seek = useCallback(
     (at: number) => {

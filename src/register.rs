@@ -101,6 +101,14 @@ pub fn browsers(home: &Path, config: &Path) -> Vec<Browser> {
             family: Family::Firefox,
             root: home.join(".mozilla"),
         },
+        // Firefox 147 and later keep a new profile here (XDG) and read native manifests here too.
+        // Lens writes to each Mozilla folder that exists and never creates ~/.mozilla, which would
+        // move Firefox back to its old folder.
+        Browser {
+            name: "Firefox",
+            family: Family::Firefox,
+            root: config.join("mozilla"),
+        },
     ]
 }
 
@@ -161,10 +169,10 @@ impl Browser {
     /// reads native messaging hosts; registering creates that folder.
     pub fn installed(&self) -> bool {
         self.root.is_dir()
-            || (self.family == Family::Firefox
+            || (cfg!(target_os = "macos")
+                && self.family == Family::Firefox
                 && (self.root.with_file_name("Firefox").is_dir()
-                    || (cfg!(target_os = "macos")
-                        && Path::new("/Applications/Firefox.app").is_dir())))
+                    || Path::new("/Applications/Firefox.app").is_dir()))
     }
 }
 
@@ -303,7 +311,15 @@ pub fn check(_paths: &Paths, executable: &Path) -> Vec<BrowserCheck> {
                 problem,
             }
         })
-        .collect();
+        .fold(Vec::<BrowserCheck>::new(), |mut checks, check| {
+            // One browser can read more than one folder: it is registered when all of them are.
+            match checks.iter_mut().find(|c| c.name == check.name) {
+                Some(seen) if seen.problem.is_none() => *seen = check,
+                Some(_) => {}
+                None => checks.push(check),
+            }
+            checks
+        });
     // Sandboxed packages cannot start a program outside their sandbox through a plain manifest.
     #[cfg(not(target_os = "macos"))]
     for (name, folder) in [
@@ -386,7 +402,7 @@ fn write_atomically(path: &Path, body: &[u8]) -> io::Result<()> {
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[test]
     fn firefox_counts_as_installed_from_its_own_profile_folder() {
         let dir = tempfile::tempdir().unwrap();
@@ -406,6 +422,29 @@ mod tests {
             "Application Support/Firefox without Mozilla"
         );
         assert!(!chrome.installed());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn firefox_gets_a_manifest_in_each_mozilla_folder_and_never_a_new_one() {
+        let home = tempfile::tempdir().unwrap();
+        let config = home.path().join("custom-xdg-config");
+        std::fs::create_dir_all(config.join("mozilla/firefox")).unwrap();
+        let executable = Path::new("/opt/lens/lens");
+        register_unix(&browsers(home.path(), &config), executable).unwrap();
+        let xdg = config.join("mozilla/native-messaging-hosts/studio.sirv.lens.json");
+        assert_eq!(manifest_problem(&xdg, Family::Firefox, executable), None);
+        assert!(
+            !home.path().join(".mozilla").exists(),
+            "an XDG Firefox keeps its folder"
+        );
+
+        std::fs::create_dir_all(home.path().join(".mozilla/firefox")).unwrap();
+        register_unix(&browsers(home.path(), &config), executable).unwrap();
+        let legacy = home
+            .path()
+            .join(".mozilla/native-messaging-hosts/studio.sirv.lens.json");
+        assert_eq!(manifest_problem(&legacy, Family::Firefox, executable), None);
     }
 
     #[test]

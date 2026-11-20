@@ -11,7 +11,7 @@ import { Notes } from './Notes';
 import { VoiceNotes } from './Voice';
 import { RecordControls, SCREEN_ACCESS_REFUSED, useScreenAccess, useStored, type PanelMode } from './Record';
 import { DestinationForm } from '@/ui/Destination';
-import { InstallApp, SetupCard, appMissing } from './Onboarding';
+import { InstallApp, SetupCard, hostNotFound } from './Onboarding';
 
 type Connection = { state: 'connecting' } | { state: 'ready'; hello: Hello } | { state: 'failed'; message: string };
 
@@ -48,6 +48,18 @@ function SiteIcon({ origin }: { origin: string }) {
   return <img className="site-icon" src={src} alt="" onError={() => setFailed(true)} />;
 }
 
+/** Reloads this page at most once a minute, so a page that cannot heal does not reload forever. */
+function reloadOnce() {
+  try {
+    const last = Number(sessionStorage.getItem('lens.healedAt'));
+    if (Date.now() - last < 60_000) return;
+    sessionStorage.setItem('lens.healedAt', String(Date.now()));
+  } catch {
+    return;
+  }
+  location.reload();
+}
+
 export function App() {
   const [client, setClient] = useState<LensClient | null>(null);
   const [connection, setConnection] = useState<Connection>({ state: 'connecting' });
@@ -59,6 +71,11 @@ export function App() {
   const [problem, setProblem] = useState<string | null>(null);
   const screenAccess = useScreenAccess();
   const [attempt, setAttempt] = useState(0);
+  const wasReady = useRef(false);
+  const failures = useRef(0);
+  const [reconnecting, setReconnecting] = useState(false);
+  const session = useRef(false);
+  session.current = site?.session != null;
   const [panelMode, setPanelMode] = useStored<PanelMode>('lens.mode', 'record');
   const lastWebTab = useRef<number | null>(null);
 
@@ -84,16 +101,32 @@ export function App() {
     // Until the app answers, try again every few seconds: installing it continues this panel.
     let retry: ReturnType<typeof setTimeout> | undefined;
     let failed = false;
+    let alive = true;
     const fail = (error: LensError) => {
-      if (failed) return;
+      if (failed || !alive) return;
       failed = true;
-      setConnection({ state: 'failed', message: error.message });
+      failures.current += 1;
       retry = setTimeout(() => setAttempt((n) => n + 1), 3000);
+      // A connection that worked and dropped (the app restarts for an update) heals within a few
+      // tries: the panel stays as it was, so a recording and its microphone keep going.
+      if (wasReady.current && failures.current <= 4) setReconnecting(true);
+      else setConnection({ state: 'failed', message: error.message });
+      // The port itself still fails after a retry while the background reaches the app: this page
+      // outlived its extension (Firefox can keep a sidebar open across an add-on update), and a
+      // reload gives it a live one. Never during a recording: the reload would end its voice.
+      if (error.code !== 'disconnected' || failures.current < 2 || session.current) return;
+      void send<boolean>({ kind: 'lensReachable' })
+        .catch(() => true)
+        .then((reachable) => alive && reachable && reloadOnce());
     };
     const lens = new LensClient(fail);
     setClient(lens);
     Promise.all([lens.request({ method: 'hello' }), lens.request({ method: 'listObservations' })])
       .then(([hello, list]) => {
+        if (!alive) return;
+        wasReady.current = true;
+        failures.current = 0;
+        setReconnecting(false);
         setConnection({ state: 'ready', hello });
         setObservations(list);
         // The background script connects and announces too, now that the app exists.
@@ -110,6 +143,7 @@ export function App() {
     };
     browser.runtime.onMessage.addListener(listener);
     return () => {
+      alive = false;
       clearTimeout(retry);
       browser.runtime.onMessage.removeListener(listener);
       lens.disconnect();
@@ -176,8 +210,8 @@ export function App() {
           title={connection.state === 'failed' ? connection.message : undefined}
         >
           {connection.state === 'connecting' && 'Connecting…'}
-          {connection.state === 'ready' && `Connected · Lens ${connection.hello.version}`}
-          {connection.state === 'failed' && (appMissing(connection.message) ? 'App not installed' : 'App not running')}
+          {connection.state === 'ready' && (reconnecting ? 'Reconnecting…' : `Connected · Lens ${connection.hello.version}`)}
+          {connection.state === 'failed' && (hostNotFound(connection.message) ? 'App not found' : 'Disconnected')}
         </span>
         <button
           type="button"

@@ -423,14 +423,17 @@ impl LensMcp {
         };
         if kind == "png" || shot.is_some() {
             let data = base64::engine::general_purpose::STANDARD.encode(bytes);
-            return Ok(CallToolResult::success(vec![ContentBlock::image(
-                data,
-                if shot.is_some() {
-                    "image/webp"
-                } else {
-                    "image/png"
-                },
-            )]));
+            return Ok(CallToolResult::success(vec![
+                ContentBlock::text(format!("{file} is {UNTRUSTED}")),
+                ContentBlock::image(
+                    data,
+                    if shot.is_some() {
+                        "image/webp"
+                    } else {
+                        "image/png"
+                    },
+                ),
+            ]));
         }
         let bytes = if generated {
             crate::export::reproduction(&found, item, n, crate::repro::parse(&bytes).as_ref())

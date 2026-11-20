@@ -41,9 +41,22 @@ const TOKEN_ACCOUNT: &str = "vibeq-token";
 /// keyring runs. People use Settings.
 const TOKEN_ENV: &str = "LENS_VIBEQ_TOKEN";
 
+/// Whether a VibeQ token is saved. The keychain is read once and then after each change: the
+/// settings pages poll every few seconds while the store lock is held, and a keychain prompt
+/// would otherwise stall every browser.
+static HAS_TOKEN: Mutex<Option<bool>> = Mutex::new(None);
+
+fn has_token() -> bool {
+    let mut known = HAS_TOKEN.lock().unwrap_or_else(|e| e.into_inner());
+    *known.get_or_insert_with(|| saved_token().ok().flatten().is_some())
+}
+
+fn token_changed() {
+    *HAS_TOKEN.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
 fn vibeq_connected(store: &Store) -> Result<bool, ProtocolError> {
-    Ok(store.setting("vibeq.endpoint").map_err(storage)?.is_some()
-        && saved_token().ok().flatten().is_some())
+    Ok(store.setting("vibeq.endpoint").map_err(storage)?.is_some() && has_token())
 }
 
 fn destination_settings(store: &Store) -> Result<DestinationSettings, ProtocolError> {
@@ -63,7 +76,7 @@ fn destination_settings(store: &Store) -> Result<DestinationSettings, ProtocolEr
 }
 
 fn vibeq_settings(store: &Store) -> Result<VibeQSettings, ProtocolError> {
-    let has_token = saved_token().ok().flatten().is_some();
+    let has_token = has_token();
     Ok(VibeQSettings {
         endpoint: store.setting("vibeq.endpoint").map_err(storage)?,
         has_token,
@@ -141,7 +154,10 @@ pub fn run(paths: &Paths, service: bool) -> std::io::Result<()> {
     crate::update::clean_up();
     // Unfinished uploads cannot resume after a restart: the client starts them again.
     let _ = std::fs::remove_dir_all(paths.data.join("uploads"));
+    // Renders an earlier daemon did not finish (see attachments::save).
+    let _ = std::fs::remove_dir_all(paths.data.join("attachments"));
     start_transcription(daemon.clone());
+    std::thread::spawn(has_token);
     match crate::wizard::serve(daemon.clone(), paths) {
         Ok(wizard) => {
             let _ = daemon.setup_page.set(wizard);
@@ -154,6 +170,7 @@ pub fn run(paths: &Paths, service: bool) -> std::io::Result<()> {
         crate::tray::spawn(paths);
         watch_tray(paths);
         watch_program(paths);
+        watch_registration(paths);
     }
     let listener = ipc::listen(paths).map_err(|e| {
         std::io::Error::new(
@@ -680,6 +697,32 @@ impl Daemon {
                         started_at: capture.started_at,
                     });
                 }
+                // Transcribed notes only: one still waiting is not something the person has read.
+                let voice: Vec<ReviewVoice> = store
+                    .list_voice_notes(observation.id)
+                    .map_err(storage)?
+                    .into_iter()
+                    .filter(|v| v.state == VoiceState::Done)
+                    .map(|v| ReviewVoice {
+                        segments: v
+                            .segments
+                            .into_iter()
+                            .filter(|seg| {
+                                crate::record::spoken_in_kept(
+                                    items
+                                        .iter()
+                                        .filter(|i| i.kind == CaptureKind::Session)
+                                        .map(|i| (i.started_at, i.captured_at, i.kept.as_slice())),
+                                    v.started_at + seg.start_ms,
+                                    v.started_at + seg.end_ms,
+                                )
+                            })
+                            .collect(),
+                        started_at: v.started_at,
+                        duration_ms: v.duration_ms,
+                        language: v.language,
+                    })
+                    .collect();
                 let mut review = Review {
                     id: 0,
                     observation: observation.id,
@@ -689,19 +732,7 @@ impl Daemon {
                     notes: observation.notes,
                     tags: observation.tags,
                     items,
-                    // Transcribed notes only: one still waiting is not something the person has read.
-                    voice: store
-                        .list_voice_notes(observation.id)
-                        .map_err(storage)?
-                        .into_iter()
-                        .filter(|v| v.state == VoiceState::Done)
-                        .map(|v| ReviewVoice {
-                            started_at: v.started_at,
-                            duration_ms: v.duration_ms,
-                            language: v.language,
-                            segments: v.segments,
-                        })
-                        .collect(),
+                    voice,
                 };
                 // Checked now, so a filing never fails after the person's work.
                 self.fit_for_filing(&mut review)?;
@@ -997,9 +1028,17 @@ impl Daemon {
             }
             Request::GetVibeQ => Reply::VibeQ(vibeq_settings(&store)?),
             Request::SetVibeQ(input) => {
+                let saved = store.setting("vibeq.endpoint").map_err(storage)?;
                 drop(store);
                 let endpoint = vibeq::validate_endpoint(&input.endpoint).map_err(bad)?;
+                let moved = saved.as_deref() != Some(endpoint.as_str().trim_end_matches('/'));
                 let account = match input.token.as_deref().map(str::trim) {
+                    // A token belongs to its VibeQ: a new address without a new token signs out,
+                    // so the old token never goes to the new host.
+                    None if moved && saved.is_some() => {
+                        secrets::delete(TOKEN_ACCOUNT).map_err(storage)?;
+                        Some(String::new())
+                    }
                     None => None,
                     Some("") => {
                         secrets::delete(TOKEN_ACCOUNT).map_err(storage)?;
@@ -1024,6 +1063,7 @@ impl Daemon {
                         Some(me.name)
                     }
                 };
+                token_changed();
                 let store = self.lock_store();
                 let endpoint = endpoint.as_str().trim_end_matches('/');
                 store
@@ -2018,6 +2058,40 @@ fn watch_tray(paths: &Paths) {
             }
             log(&paths, "the tray was not running; starting it");
             crate::tray::spawn(&paths);
+        }
+    });
+}
+
+/// Every five minutes, repairs the browser registrations when one stops pointing at this program:
+/// a browser installed since, a manifest another Lens copy wrote, or one a cleanup removed. The
+/// extension then reconnects by itself. Sandboxed browsers ("(Flatpak)", "(Snap)") stay as they are:
+/// a manifest cannot fix them.
+fn watch_registration(paths: &Paths) {
+    let paths = paths.clone();
+    std::thread::spawn(move || {
+        let Ok(executable) = crate::paths::executable() else {
+            return;
+        };
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(300));
+            // A program that moved (an AppImage) is no longer the one to register: its new copy
+            // registers itself when it starts.
+            if !executable.is_file() {
+                return;
+            }
+            let broken = crate::register::check(&paths, &executable)
+                .into_iter()
+                .any(|b| b.installed && !b.registered && !b.name.contains('('));
+            if !broken {
+                continue;
+            }
+            match crate::register::register(&paths, &executable) {
+                Ok(_) => log(&paths, "repaired the browser registration"),
+                Err(e) => log(
+                    &paths,
+                    &format!("the browser registration repair failed: {e}"),
+                ),
+            }
         }
     });
 }

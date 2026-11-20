@@ -43,7 +43,7 @@ try {
   const tabId = await worker.evaluate(async (u) => (await chrome.tabs.query({ url: `${u}/*` }))[0]?.id, origin);
   const panel = await context.newPage();
   await panel.goto(`chrome-extension://${id}/sidepanel.html?tab=${tabId}`);
-  await panel.getByRole('heading', { name: 'Install the Lens app' }).waitFor({ timeout: 15_000 });
+  await panel.getByRole('heading', { name: 'The browser could not find the Lens app' }).waitFor({ timeout: 15_000 });
   await shot(panel, '1-app-missing', 400);
   execFileSync(bin, ['register'], { env, stdio: 'ignore' });
   await panel.getByRole('status', { name: 'Connection' }).filter({ hasText: /^Connected/ }).waitFor({ timeout: 20_000 });

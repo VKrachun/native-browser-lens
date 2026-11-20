@@ -183,10 +183,11 @@ export async function openBasecamp(address: string, review: Review, zip: boolean
         { name: stem + '-capture-' + capture + '.mp4', type: 'video/mp4' });
     }
     await send({ finish: true });
+    // Browsers slow timers and skip frames in a background tab, and Basecamp's editors need both.
+    await browser.tabs.update(tabId, { active: true });
     const [result] = await browser.scripting.executeScript({ target, world: 'MAIN', func: fill,
       args: [url, key, titleSelector, review.title.replace(/\s+/g, ' ').trim(), basecampNotes(review, zip)] });
     if (result?.result !== '') throw new Error(result?.result || 'Check the Notes and files in the open Basecamp draft.');
-    await browser.tabs.update(tabId, { active: true });
   } catch (error) {
     // Keep partial drafts accessible. An untouched sign-in tab can also be used for the retry.
     const message = (error as Error).message;

@@ -52,12 +52,15 @@ export function Notes({
   id,
   onSaved,
   appendRef,
+  flushRef,
 }: {
   client: LensClient;
   id: number;
   onSaved: () => void;
   /** Filled with a function that adds text at the end of the notes, for transcripts. */
   appendRef?: RefObject<((text: string) => void) | null>;
+  /** Filled with a function that saves the draft now, for a review that freezes the notes. */
+  flushRef?: RefObject<(() => Promise<void>) | null>;
 }) {
   const [record, setRecord] = useState<Observation | null>(null);
   const [title, setTitle] = useState('');
@@ -135,6 +138,16 @@ export function Notes({
       saving.current = false;
     }
   }, [client, id, record, dirty, title, notes, tags, onSaved]);
+  const latestSave = useRef(save);
+  latestSave.current = save;
+  if (flushRef) {
+    flushRef.current = async () => {
+      // A save in flight first; then the newest draft, with the revision that save returned.
+      for (let i = 0; i < 100 && saving.current; i++) await new Promise((done) => setTimeout(done, 50));
+      await new Promise((done) => setTimeout(done, 0));
+      await latestSave.current();
+    };
+  }
 
   useEffect(() => {
     if (!dirty || state.kind === 'conflict' || state.kind === 'saving') return;

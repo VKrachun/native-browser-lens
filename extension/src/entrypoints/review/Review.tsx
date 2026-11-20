@@ -94,6 +94,7 @@ export function Review({ observation: id }: { observation: number }) {
   >({ state: 'idle' });
   const [notesVersion, setNotesVersion] = useState(0);
   const summarized = useRef(false);
+  const flushNotes = useRef<(() => Promise<void>) | null>(null);
   const summarize = useCallback(async () => {
     setSummary({ state: 'running' });
     try {
@@ -153,7 +154,9 @@ export function Review({ observation: id }: { observation: number }) {
   async function freeze() {
     if (!observation) return;
     try {
-      // The title and notes are edited on this page: the review takes their latest revision.
+      // The title and notes are edited on this page: the review takes their latest revision,
+      // after the draft typed in the last moment is saved.
+      await flushNotes.current?.();
       const latest = await client.request({ method: 'getObservation', params: { id } });
       setObservation(latest);
       const frozen = await client.request({
@@ -161,9 +164,10 @@ export function Review({ observation: id }: { observation: number }) {
         params: {
           observation: observation.id,
           revision: latest.revision,
-          // Everything goes in: every capture with its recording.
+          // Every capture goes in, each with its recording unless it is masked.
           captures: captures.map((c) => c.id),
-          recordings: captures.filter((c) => c.recording).map((c) => c.id),
+          // A mask hides pixels only: the replay of that page would show the same text.
+          recordings: captures.filter((c) => c.recording && !c.annotations.some((s) => s.kind === 'mask')).map((c) => c.id),
           typedValues,
           screenshotsChecked: true,
         },
@@ -472,7 +476,7 @@ export function Review({ observation: id }: { observation: number }) {
       ) : (
         <>
           <section className="card summary" aria-label="Title and findings">
-            <Notes key={notesVersion} client={client} id={id} onSaved={() => {}} />
+            <Notes key={notesVersion} client={client} id={id} onSaved={() => {}} flushRef={flushNotes} />
             <p className="small muted summary-state" role="status" aria-label="Summary">
               {summary.state === 'running' && <Running text="Claude is writing a title and the findings…" />}
               {summary.state === 'idle' && waitingForWords && <>The title and findings follow once your words are written down.</>}

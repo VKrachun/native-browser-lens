@@ -264,7 +264,8 @@ export class ActionRecorder {
     if (!(target instanceof HTMLElement) || !this.pending.delete(target)) return;
     if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
       const value = target.value;
-      const masked = privateValue(facts(target), value);
+      // A part of the page marked private for the recording keeps its typed values out too.
+      const masked = target.closest('[data-lens-block]') !== null || privateValue(facts(target), value);
       this.record('fill', target, masked ? null : value, masked);
     } else {
       // Editable text is never recorded, as in the DOM recording.
