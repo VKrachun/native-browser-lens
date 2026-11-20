@@ -46,6 +46,11 @@ try {
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     $exe = Join-Path $dir 'lens.exe'
     if (Test-Path $exe) { & $exe stop 2>$null | Out-Null }
+    # The tray (lensw.exe and its lens.exe) keeps running after stop and holds the files.
+    Get-Process -Name lens, lensw -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -and $_.Path.StartsWith($dir, [StringComparison]::OrdinalIgnoreCase) } |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
     Copy-Item -Force "$work\sirv-lens-$version-$target\lens.exe" $exe
     Copy-Item -Force "$work\sirv-lens-$version-$target\lensw.exe" (Join-Path $dir 'lensw.exe')
     # The speech programs for voice notes, where the release builds them for this computer.

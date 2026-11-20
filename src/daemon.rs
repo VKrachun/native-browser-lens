@@ -418,9 +418,13 @@ impl Daemon {
                 match outcome {
                     Updated::Saved(copy) => {
                         // Both are the person's now: a later summary must not put every finding back.
-                        store
-                            .set_setting(&format!("title.auto.{observation}"), "")
-                            .map_err(storage)?;
+                        // The split is done: a failure here must not report it as failed.
+                        for id in [observation, copy.id] {
+                            if let Err(e) = store.set_setting(&format!("title.auto.{id}"), "") {
+                                log(&self.paths, &format!("split {observation}: {e}"));
+                            }
+                        }
+                        self.requeue_voice(&store);
                         Reply::Observation(copy)
                     }
                     Updated::Conflict(_) => {
@@ -589,7 +593,8 @@ impl Daemon {
                 let mut ids = request.captures.clone();
                 ids.sort_unstable();
                 ids.dedup();
-                if ids.is_empty() || ids.len() > 50 {
+                // Each capture once: a list with repeats would render one capture many times.
+                if ids.is_empty() || ids.len() > 50 || ids.len() != request.captures.len() {
                     return Err(bad("choose between 1 and 50 captures"));
                 }
                 let observation = store
@@ -657,8 +662,11 @@ impl Daemon {
                         before.saturating_sub(shared.actions.len() + shared.events.len()) as u32;
                     // Step shots show what was typed, as pixels: they leave only with typed values.
                     let mut shots = Vec::new();
+                    // Only a recording's shots are shown for checking (the editor's filmstrip); a
+                    // moment capture leaves with its own screenshot only.
                     for shot in capture.shots.iter().filter(|s| {
                         request.typed_values
+                            && capture.kind == CaptureKind::Session
                             && inside(s.at)
                             && !capture.edits.hidden_shots.contains(&s.at)
                     }) {
@@ -676,7 +684,15 @@ impl Daemon {
                             .put(&shared, "application/json")
                             .map_err(storage)?,
                         recording: match &capture.recording {
-                            Some(recording) if request.recordings.contains(id) => {
+                            // A mask hides pixels only: the replay would show the same text. The
+                            // stored marks decide, not the page that asked (it can be stale).
+                            Some(recording)
+                                if request.recordings.contains(id)
+                                    && !capture
+                                        .annotations
+                                        .iter()
+                                        .any(|s| matches!(s, Shape::Mask { .. })) =>
+                            {
                                 Some(self.kept_recording(recording, &kept)?)
                             }
                             _ => None,
@@ -795,6 +811,11 @@ impl Daemon {
             Request::UpdateNow => {
                 drop(store);
                 self.update(true)?;
+                Reply::Updates(self.update_state(&self.lock_store())?)
+            }
+            Request::CheckUpdates => {
+                drop(store);
+                self.update(false)?;
                 Reply::Updates(self.update_state(&self.lock_store())?)
             }
             Request::GetDestination => Reply::Destination(destination_settings(&store)?),
@@ -1187,7 +1208,10 @@ impl Daemon {
                     .split_into_tasks(observation, revision, &plans, now_ms())
                     .map_err(storage)?
                 {
-                    Ok(created) => Reply::Split(created),
+                    Ok(created) => {
+                        self.requeue_voice(&store);
+                        Reply::Split(created)
+                    }
                     Err(Updated::Missing) => return Err(not_found("no such observation")),
                     Err(_) => {
                         return Err(ProtocolError::new(
@@ -1286,6 +1310,18 @@ impl Daemon {
                     .ok_or_else(|| not_found("no such voice note"))?;
                 if segments.len() > 2000 || segments.iter().any(|s| s.text.len() > 4000) {
                     return Err(bad("the transcript is too long"));
+                }
+                // A note still being written down gets the machine's words over this edit.
+                if !matches!(note.state, VoiceState::Done | VoiceState::Failed) {
+                    return Err(ProtocolError::new(
+                        ErrorCode::Conflict,
+                        "the voice note is still being written down; correct it when it is done",
+                    ));
+                }
+                if segments.iter().any(|s| {
+                    s.start_ms < 0 || s.end_ms < s.start_ms || s.end_ms > note.duration_ms + 1000
+                }) {
+                    return Err(bad("a transcript line is outside the voice note"));
                 }
                 store
                     .set_voice_state(
@@ -1571,6 +1607,32 @@ impl Daemon {
             })
             .collect();
         drop(store);
+        // Words from cut or trimmed parts never reach the model, as they never leave in a review.
+        let recordings: Vec<(i64, i64, Vec<TimeRange>)> = captures
+            .iter()
+            .filter(|c| c.kind == CaptureKind::Session)
+            .map(|c| {
+                let kept = if c.edits == Edits::default() {
+                    Vec::new()
+                } else {
+                    c.edits.kept(c.started_at, c.created_at)
+                };
+                (c.started_at, c.created_at, kept)
+            })
+            .collect();
+        let voice: Vec<ReviewVoice> = voice
+            .into_iter()
+            .map(|mut v| {
+                v.segments.retain(|seg| {
+                    crate::record::spoken_in_kept(
+                        recordings.iter().map(|(a, b, k)| (*a, *b, k.as_slice())),
+                        v.started_at + seg.start_ms,
+                        v.started_at + seg.end_ms,
+                    )
+                });
+                v
+            })
+            .collect();
         let mut items = Vec::new();
         for capture in &captures {
             let Some(evidence) = self
@@ -1874,6 +1936,15 @@ impl Daemon {
         });
     }
 
+    /// Voice notes that a split copied while they were still being written down.
+    fn requeue_voice(&self, store: &Store) {
+        if let Ok(waiting) = store.untranscribed_voice_notes() {
+            for id in waiting {
+                self.queue_transcription(id);
+            }
+        }
+    }
+
     fn queue_transcription(&self, id: i64) {
         if let Some(queue) = self.speech_queue.get() {
             let _ = queue.send(id);
@@ -2129,7 +2200,10 @@ fn restart_soon(paths: &Paths, executable: &std::path::Path) {
     // A helper started by a service dies with it: systemd stops every process of the unit when
     // this one exits. So the service exits as failed once the reply is out, and systemd
     // (Restart=on-failure) or launchd (KeepAlive unless SuccessfulExit) starts the new program.
-    if cfg!(unix) && SERVICE.load(std::sync::atomic::Ordering::SeqCst) {
+    // Only a supervised daemon may exit to restart: launchd on macOS, systemd on Linux (it sets
+    // INVOCATION_ID). One from a desktop autostart entry restarts itself like a plain one.
+    let supervised = cfg!(target_os = "macos") || std::env::var_os("INVOCATION_ID").is_some();
+    if cfg!(unix) && supervised && SERVICE.load(std::sync::atomic::Ordering::SeqCst) {
         log(
             paths,
             "exiting so the service manager starts the new program",
@@ -2154,7 +2228,7 @@ fn restart_soon(paths: &Paths, executable: &std::path::Path) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0000_0008 | 0x0800_0000); // DETACHED_PROCESS | CREATE_NO_WINDOW
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: Windows ignores it with DETACHED_PROCESS
     }
     if let Err(e) = command.spawn() {
         log(paths, &format!("cannot restart after the update: {e}"));

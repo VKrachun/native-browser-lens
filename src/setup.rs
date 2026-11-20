@@ -349,7 +349,8 @@ pub fn open_url(url: &str) -> io::Result<()> {
     let (program, arguments): (&str, Vec<&str>) = if cfg!(target_os = "macos") {
         ("open", vec![url])
     } else if cfg!(windows) {
-        ("cmd", vec!["/C", "start", "", url])
+        // Not `cmd /C start`: cmd splits a URL at `&` (a deep link with two parameters).
+        ("rundll32", vec!["url.dll,FileProtocolHandler", url])
     } else {
         ("xdg-open", vec![url])
     };

@@ -423,7 +423,8 @@ function Observations({
           <span className="small muted num">{shown.length === list.length ? list.length : `${shown.length} of ${list.length}`}</span>
         )}
       </div>
-      {list.length > 5 && (
+      {/* Shown while a filter or search is on, so it can always be cleared. */}
+      {(list.length > 5 || show !== 'all' || words) && (
         <div className="obs-tools">
           <input
             className="input obs-search"

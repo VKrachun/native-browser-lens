@@ -377,12 +377,15 @@ impl Store {
     /// Deletes an observation; captures, voice notes and reviews go with it. Returns false when
     /// there is none. Blobs stay: other records may share them.
     pub fn delete_observation(&self, id: i64) -> rusqlite::Result<bool> {
-        self.db
-            .execute("DELETE FROM filings WHERE observation_id = ?1", [id])?;
-        Ok(self
-            .db
-            .execute("DELETE FROM observations WHERE id = ?1", [id])?
-            > 0)
+        // One transaction: a failure never leaves the observation without its filing receipt.
+        let tx = self.db.unchecked_transaction()?;
+        tx.execute("DELETE FROM filings WHERE observation_id = ?1", [id])?;
+        let deleted = tx.execute("DELETE FROM observations WHERE id = ?1", [id])? > 0;
+        for key in [format!("issues.{id}"), format!("title.auto.{id}")] {
+            tx.execute("DELETE FROM settings WHERE key = ?1", [key])?;
+        }
+        tx.commit()?;
+        Ok(deleted)
     }
 
     pub fn update_observation(

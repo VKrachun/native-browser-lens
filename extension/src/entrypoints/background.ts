@@ -1,7 +1,7 @@
 import { ActionLog, EvidenceBuffer, ReplayBuffer, ShotBuffer, WINDOW_MS } from '@/collector/buffer';
 import { DeepCollector } from '@/collector/deep';
 import { LimitedCollector, visibleShot } from '@/collector/limited';
-import { sanitize, sanitizeUrl } from '@/collector/sanitize';
+import { sanitize, sanitizeText, sanitizeUrl } from '@/collector/sanitize';
 import { LensClient } from '@/lens-client';
 import { clientInfo } from '@/identity';
 import {
@@ -84,11 +84,18 @@ export default defineBackground(() => {
 
   async function syncNow(tabId: number) {
     if (!(await allowed(tabId))) {
+      // A recording keeps what it has when the tab passes through another site (a sign-in or
+      // payment redirect); nothing is collected there, and collection resumes on the way back.
+      if (sessions.has(tabId) && !paused) {
+        buffer.gap(tabId, 'navigation', 'The tab left the project sites: nothing was recorded there');
+        await deep?.detach(tabId);
+        return;
+      }
       stop(tabId);
       await deep?.detach(tabId);
       return;
     }
-    if (buffer.mode(tabId) !== undefined && (!deep || deep.isAttached(tabId))) return;
+    if (buffer.mode(tabId) !== undefined && (!deep || deep.isAttached(tabId) || deep.isDeclined(tabId))) return;
     void injectRecorder(tabId);
     if (!deep) return buffer.start(tabId, 'limited');
     buffer.start(tabId, 'deep');
@@ -111,6 +118,7 @@ export default defineBackground(() => {
     shots.clear(tabId);
     clearTimeout(shotTimers.get(tabId));
     sessions.delete(tabId);
+    keptVoice.delete(tabId);
     void endMicrophone(tabId, 'mic-cancel');
   }
 
@@ -218,7 +226,7 @@ export default defineBackground(() => {
         params: {
           observation,
           pageUrl: sanitizeUrl(tab.url ?? ''),
-          pageTitle: tab.title ?? '',
+          pageTitle: sanitizeText(tab.title ?? ''),
           screenshot,
           evidence: { ...snapshot, page, actions: [...actions.snapshot(tabId, from), ...pending], elements },
           recording,
@@ -260,6 +268,12 @@ export default defineBackground(() => {
       const started = await microphone('mic-start').catch((error: Error) => ({ ok: false as const, error: error.message }));
       if (!started.ok) {
         return { ok: false, error: `The microphone did not start: ${started.error}`, microphoneBlocked: 'blocked' in started && started.blocked };
+      }
+      // The tab stopped collecting while the microphone asked for permission.
+      if (buffer.mode(tabId) === undefined) {
+        await microphone('mic-cancel').catch(() => {});
+        await browser.offscreen.closeDocument().catch(() => {});
+        return { ok: false, error: 'Lens stopped collecting on this site while the microphone started.' };
       }
       voiced.add(tabId);
     }
@@ -354,7 +368,7 @@ export default defineBackground(() => {
       // a recording keeps going until its Stop.
       const project = projectFor(originOf(change.url));
       const moved = project?.id !== projectFor(originOf(urls.get(tabId)))?.id && !sessions.has(tabId);
-      if (project && !moved) {
+      if ((project && !moved) || sessions.has(tabId)) {
         buffer.record(tabId, 'navigation', { url: change.url });
         const url = sanitizeUrl(change.url);
         actions.add(tabId, { timestamp: Date.now(), kind: 'navigate', url, target: null, value: null, masked: false });
@@ -372,7 +386,16 @@ export default defineBackground(() => {
   browser.tabs.onRemoved.addListener((tabId) => {
     stop(tabId);
     urls.delete(tabId);
+    queues.delete(tabId);
     void deep?.detach(tabId);
+  });
+  // A prerendered or discarded tab swapped in gets a new id: the old one's state goes.
+  browser.tabs.onReplaced.addListener((added, removed) => {
+    stop(removed);
+    urls.delete(removed);
+    queues.delete(removed);
+    void deep?.detach(removed);
+    void browser.tabs.get(added).then((tab) => sync(added, tab.url), () => {});
   });
   browser.permissions.onAdded.addListener(() => void loadProjects());
   browser.permissions.onRemoved.addListener(() => void loadProjects());
@@ -439,7 +462,7 @@ export default defineBackground(() => {
           if (!snapshot) continue;
           tabs.push({
             url: sanitizeUrl(tab.url ?? ''),
-            title: tab.title ?? '',
+            title: sanitizeText(tab.title ?? ''),
             evidence: { ...snapshot, page: null, actions: actions.snapshot(tab.id, from), elements: [] } as unknown as JsonValue,
           });
         }
@@ -464,6 +487,17 @@ export default defineBackground(() => {
   });
 
   void loadProjects();
+  // A restarted background has no sessions: a microphone page left from before records nothing
+  // anyone can save, and open panels must stop showing a recording.
+  if (!import.meta.env.FIREFOX) {
+    void browser.offscreen
+      .hasDocument()
+      .then((open) => {
+        if (open && voiced.size === 0) return browser.offscreen.closeDocument();
+      })
+      .catch(() => {});
+  }
+  void broadcast({ kind: 'tabChanged', tabId: -1 });
   // Pause and resume come from the Lens menu, outside the browser: check for them regularly.
   setInterval(() => {
     const before = paused;

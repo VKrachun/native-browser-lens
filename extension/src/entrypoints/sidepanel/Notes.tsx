@@ -140,6 +140,10 @@ export function Notes({
   }, [client, id, record, dirty, title, notes, tags, onSaved]);
   const latestSave = useRef(save);
   latestSave.current = save;
+  // Leaving (All recordings, closing the review) saves a draft typed in the last moment.
+  const pendingDraft = useRef(false);
+  pendingDraft.current = dirty && state.kind !== 'conflict';
+  useEffect(() => () => void (pendingDraft.current && latestSave.current()), []);
   if (flushRef) {
     flushRef.current = async () => {
       // A save in flight first; then the newest draft, with the revision that save returned.

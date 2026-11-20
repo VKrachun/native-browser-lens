@@ -1,4 +1,4 @@
-import { REDACTED, SENSITIVE, redactContent, sanitizeUrl } from './sanitize';
+import { PRIVATE_WORDS, REDACTED, SENSITIVE, redactContent, sanitizeUrl } from './sanitize';
 
 const META_TERMS = ['csrf', 'xsrf', 'token', 'secret', 'nonce', 'session', 'auth', 'password', 'credential', 'api-key', 'apikey'];
 const META_SENSITIVE = new RegExp(`${SENSITIVE.source}|nonce|auth|session`, 'i');
@@ -28,7 +28,13 @@ export function scrubRecording(value: unknown): unknown {
       const label = ['name', 'property', 'http-equiv', 'itemprop'].map((k) => String(attributes[k] ?? '')).join(' ');
       if (META_SENSITIVE.test(label) && 'content' in attributes) attributes.content = REDACTED;
     }
-    for (const key of Object.keys(node)) node[key] = SENSITIVE.test(key) ? REDACTED : scrubRecording(node[key]);
+    // A password field's value attribute (its HTML default) never leaves, empty or not.
+    if (typeof node.tagName === 'string' && node.tagName.toLowerCase() === 'input' && attributes &&
+        String(attributes.type ?? '').toLowerCase() === 'password' && 'value' in attributes) {
+      attributes.value = REDACTED;
+    }
+    // Attribute names count as field names: data-cvv, data-card-number.
+    for (const key of Object.keys(node)) node[key] = SENSITIVE.test(key) || PRIVATE_WORDS.test(key) ? REDACTED : scrubRecording(node[key]);
   }
   return value;
 }

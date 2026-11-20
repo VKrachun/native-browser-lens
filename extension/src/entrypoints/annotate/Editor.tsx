@@ -76,7 +76,8 @@ export function Editor({ capture: captureId }: { capture: number }) {
     const keys = (event: KeyboardEvent) => {
       const command = event.ctrlKey || event.metaKey;
       if (command && event.key.toLowerCase() === 'z') return event.preventDefault(), undo();
-      if (command && event.key.toLowerCase() === 's') return event.preventDefault(), void save();
+      // Only a changed drawing saves: an untouched tab must not replace marks saved elsewhere.
+      if (command && event.key.toLowerCase() === 's') return event.preventDefault(), void (dirty && save());
       const picked = !command && TOOLS.find((t) => t.key === event.key.toLowerCase());
       if (picked) setTool(picked.tool);
     };

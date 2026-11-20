@@ -174,7 +174,17 @@ pub fn verify(
         .map_err(io::Error::other)?;
     let mut out = io::stdout().lock();
     serde_json::to_writer_pretty(&mut out, &verdict)?;
-    writeln!(out)
+    writeln!(out)?;
+    // A script or CI job reads the exit status: the fix is proven only when the steps ran and no
+    // recorded failure came back.
+    let still = verdict["stillFailing"]
+        .as_array()
+        .is_some_and(|a| !a.is_empty());
+    if verdict["stepsRan"] != true || still {
+        drop(out);
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 /// `lens agents connect|disconnect`.

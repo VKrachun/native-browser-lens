@@ -7,7 +7,7 @@ export const PRIVATE_WORDS =
   /card|cc-?num|cvv|cvc|csc|iban|ssn|social.?security|passport|\bpin\b|account.?num|routing|one.?time|otp|2fa|mfa/i;
 const privateKey = (key: string) => SENSITIVE.test(key) || PRIVATE_WORDS.test(key);
 /** Query keys that carry credentials in signed or OAuth URLs, beyond the general list. */
-const SENSITIVE_QUERY = /^(code|state|sig|signature|key|auth|jwt|otp)$|^x-(amz|goog)-/i;
+const SENSITIVE_QUERY = /^(code|code_verifier|state|sig|signature|key|auth|jwt|otp|refresh_token|client_secret)$|^x-(amz|goog)-/i;
 export const REDACTED = '[REDACTED]';
 const MAX_TEXT = 16 * 1024;
 
@@ -18,7 +18,7 @@ export function sanitizeUrl(input: string): string {
     url.password = '';
     url.hash = '';
     for (const [key, value] of [...url.searchParams.entries()]) {
-      const clean = SENSITIVE.test(key) || SENSITIVE_QUERY.test(key) ? REDACTED : sanitizeText(value);
+      const clean = privateKey(key) || SENSITIVE_QUERY.test(key) ? REDACTED : sanitizeText(value);
       if (clean !== value) url.searchParams.set(key, clean);
     }
     // Content rules over the whole URL too: tokens also travel in paths.
@@ -40,6 +40,11 @@ export function sanitizeText(text: string): string {
 export function redactContent(text: string): string {
   return text
     .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/-]+=*/gi, `$1 ${REDACTED}`)
+    // A cookie header holds every cookie to the end of its line, not only the first pair.
+    .replace(/\b((?:set-)?cookie\s{0,8}:\s{0,8})[^\r\n]+/gi, `$1${REDACTED}`)
+    // A quoted secret may hold spaces: the whole quoted value goes.
+    .replace(/((?:password|passwd|secret|token|api[_-]?key)["']?\s{0,8}[:=]\s{0,8})"[^"\r\n]{0,512}"/gi, `$1"${REDACTED}"`)
+    .replace(/((?:password|passwd|secret|token|api[_-]?key)["']?\s{0,8}[:=]\s{0,8})'[^'\r\n]{0,512}'/gi, `$1'${REDACTED}'`)
     .replace(
       /((?:authorization|cookie|password|passwd|secret|\b[\w-]{0,64}?token|api[_-]?key|session[_-]?id|csrf|xsrf)\s{0,8}["']?\s{0,8}[:=]\s{0,8}["']?)[^\s"'&,;}]+/gi,
       `$1${REDACTED}`,
@@ -103,7 +108,8 @@ export function requestBody(body: unknown, contentType: string, url: string, pag
   }
   if (/x-www-form-urlencoded/i.test(contentType)) {
     const form = new URLSearchParams(body);
-    for (const [key, value] of [...form.entries()]) form.set(key, privateKey(key) ? REDACTED : sanitizeText(value));
+    // OAuth exchanges (code, code_verifier, refresh_token) are form bodies too.
+    for (const [key, value] of [...form.entries()]) form.set(key, privateKey(key) || SENSITIVE_QUERY.test(key) ? REDACTED : sanitizeText(value));
     return form.toString();
   }
   return /^text\//i.test(contentType) ? sanitizeText(body) : undefined;

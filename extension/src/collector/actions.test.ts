@@ -12,6 +12,11 @@ const field = (facts: Partial<FieldFacts>): FieldFacts => ({
 });
 
 describe('privateValue', () => {
+  it('reads every autocomplete token and the accessible name', () => {
+    expect(privateValue(field({ autocomplete: 'section-pay billing cc-csc' }), '000')).toBe(true);
+    expect(privateValue(field({ label: 'CVV' }), '000')).toBe(true);
+  });
+
   it('keeps ordinary values', () => {
     expect(privateValue(field({ name: 'coupon', label: 'Coupon' }), 'SAVE10')).toBe(false);
     expect(privateValue(field({ label: 'Search' }), 'red shoes')).toBe(false);

@@ -548,7 +548,8 @@ function Updates({ client }: { client: LensClient }) {
           <button
             type="button"
             className="btn btn-secondary btn-sm"
-            onClick={() => void act(client.request({ method: 'updateNow' }))}
+            // Check now only checks; the button installs only when it says so.
+            onClick={() => void act(client.request({ method: state.available ? 'updateNow' : 'checkUpdates' }))}
             disabled={busy}
           >
             {busy ? 'Checking…' : state.available ? 'Install now' : 'Check now'}

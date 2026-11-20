@@ -217,6 +217,12 @@ jobs:
       - name: Extension dependencies
         working-directory: extension
         run: pnpm install --frozen-lockfile
+      # A released Mac installer is always signed and notarized: the download page says so.
+      - name: Signing is set up (macOS release)
+        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v') && env.CAN_SIGN_APPLE != 'true'
+        run: |
+          echo "::error::The Apple signing secrets are missing; a release must not ship unsigned Mac installers."
+          exit 1
       - name: Signing keychain (macOS)
         if: runner.os == 'macOS' && env.CAN_SIGN_APPLE == 'true'
         env:

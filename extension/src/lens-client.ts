@@ -61,6 +61,7 @@ type ReplyTo = {
   getUpdates: 'updates';
   setAutomaticUpdates: 'updates';
   updateNow: 'updates';
+  checkUpdates: 'updates';
   setPaused: 'done';
   uploadChunk: 'uploaded';
   addVoiceNote: 'voiceNote';

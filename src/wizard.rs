@@ -468,6 +468,17 @@ fn open_in(launch: &Launch, url: &str) -> Result<(), String> {
         c
     } else if cfg!(windows) {
         let mut c = Command::new("cmd");
+        // The URL in quotes, so cmd never splits it at `&`; a URL has no `"` of its own.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            c.raw_arg(format!(
+                "/C start \"\" {} \"{}\"",
+                launch.windows,
+                url.replace('"', "%22")
+            ));
+        }
+        #[cfg(not(windows))]
         c.args(["/C", "start", "", launch.windows, url]);
         c
     } else if let Some(id) = launch.flatpak {

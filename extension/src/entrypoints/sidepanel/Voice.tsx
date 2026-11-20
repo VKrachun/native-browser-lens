@@ -145,10 +145,18 @@ export function VoiceNotes({
   live.current = recording;
   useEffect(() => () => live.current?.cancel(), []);
 
+  const starting = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => () => void (mounted.current = false), []);
   async function start() {
+    // One microphone at a time: a second click while the first one starts does nothing.
+    if (starting.current || live.current) return;
+    starting.current = true;
     setProblem(null);
     try {
-      setRecording(await record());
+      const started = await record();
+      if (!mounted.current) return started.cancel();
+      setRecording(started);
       setNow(Date.now());
     } catch (error) {
       if (error instanceof MicrophoneBlocked) {
@@ -157,6 +165,8 @@ export function VoiceNotes({
       } else {
         setProblem(`The microphone did not start: ${(error as Error).message}`);
       }
+    } finally {
+      starting.current = false;
     }
   }
 

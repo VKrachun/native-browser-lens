@@ -77,8 +77,16 @@ impl Blobs {
         } else {
             std::fs::create_dir_all(path.parent().expect("blob path has a folder"))?;
             if std::fs::rename(file, &path).is_err() {
-                // Another volume: copy, then remove.
-                std::fs::copy(file, &path)?;
+                // Another volume: copy beside the blob, then rename, so a full disk never leaves a
+                // partial file under the blob's name.
+                let partial = path.with_extension("partial");
+                if let Err(e) = std::fs::copy(file, &partial)
+                    .and_then(|_| std::fs::File::open(&partial)?.sync_all())
+                    .and_then(|()| std::fs::rename(&partial, &path))
+                {
+                    let _ = std::fs::remove_file(&partial);
+                    return Err(e);
+                }
                 std::fs::remove_file(file)?;
             }
         }

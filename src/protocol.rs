@@ -157,6 +157,8 @@ pub enum Request {
     },
     /// Checks the signed release feed now and installs a newer version; Lens restarts afterwards.
     UpdateNow,
+    /// Checks the signed release feed now and installs nothing.
+    CheckUpdates,
     /// Which agent CLIs are installed and signed in.
     ListAgents,
     /// The agent for titles, findings, splits and duplicate checks; null is automatic.

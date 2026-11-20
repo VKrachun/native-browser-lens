@@ -83,3 +83,18 @@ describe('requestBody', () => {
     expect(requestBody('x'.repeat(20_000), 'text/plain', 'https://a.test/api', page)).toBeUndefined();
   });
 });
+
+describe('second bug hunt', () => {
+  const page = 'https://a.test/checkout';
+  it('redacts a whole cookie line and quoted secrets with spaces', () => {
+    expect(sanitizeText('Cookie: theme=light; sid=DEMO')).not.toContain('DEMO');
+    expect(sanitizeText('{"password":"two words"}')).not.toContain('words');
+    expect(sanitizeText("password = 'two words'")).not.toContain('words');
+  });
+  it('redacts OAuth exchanges in form bodies and payment words in queries', () => {
+    const body = requestBody('code=DEMO_A&code_verifier=DEMO_B&grant_type=authorization_code', 'application/x-www-form-urlencoded', 'https://a.test/token', page);
+    expect(body).not.toMatch(/DEMO_[AB]/);
+    expect(body).toContain('grant_type=authorization_code');
+    expect(sanitizeUrl('https://a.test/pay?cvv=123&step=2')).not.toContain('123');
+  });
+});

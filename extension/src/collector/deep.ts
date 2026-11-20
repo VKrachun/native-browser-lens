@@ -17,6 +17,7 @@ interface Request {
  */
 export class DeepCollector {
   private readonly attached = new Set<number>();
+  private readonly declined = new Set<number>();
   private readonly requests = new Map<string, Request>();
   /** Requests left out as noise: their answers are left out too. */
   private readonly ignored = new Set<string>();
@@ -33,6 +34,12 @@ export class DeepCollector {
     browser.debugger.onDetach.addListener((source, reason) => {
       if (source.tabId === undefined || !this.attached.delete(source.tabId)) return;
       this.buffer.gap(source.tabId, 'debugger', `Debugger detached: ${reason}`);
+      // The person closed the browser's debugging bar: never attach again in this tab until it
+      // leaves the project, and collect without the debugger meanwhile.
+      if (reason === 'canceled_by_user') {
+        this.declined.add(source.tabId);
+        this.buffer.start(source.tabId, 'screenshotOnly');
+      }
     });
   }
 
@@ -42,6 +49,11 @@ export class DeepCollector {
 
   isAttached(tabId: number) {
     return this.attached.has(tabId);
+  }
+
+  /** The person refused the debugger in this tab. */
+  isDeclined(tabId: number) {
+    return this.declined.has(tabId);
   }
 
   async attach(tabId: number) {
@@ -85,6 +97,7 @@ export class DeepCollector {
   }
 
   async detach(tabId: number) {
+    this.declined.delete(tabId);
     if (!this.attached.delete(tabId)) return;
     for (const key of this.requests.keys()) if (key.startsWith(`${tabId}:`)) this.requests.delete(key);
     await browser.debugger.detach({ tabId }).catch(() => {});

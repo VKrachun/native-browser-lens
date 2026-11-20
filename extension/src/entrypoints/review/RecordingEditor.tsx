@@ -557,7 +557,15 @@ export function RecordingEditor({
     handle.setPointerCapture(event.pointerId);
     const move = (e: PointerEvent) => {
       const at = Math.round(timeAt(e.clientX));
-      setEdits((current) => ({ ...current, [which]: at }));
+      // A trim never passes the other one: at least a second stays, so the save is never refused
+      // and a review never takes the ranges saved before.
+      setEdits((current) => {
+        if (!span) return current;
+        const start = current.trimStart ?? span.start;
+        const end = current.trimEnd ?? span.end;
+        const value = which === 'trimStart' ? Math.min(at, end - 1000) : Math.max(at, start + 1000);
+        return { ...current, [which]: Math.min(Math.max(value, span.start), span.end) };
+      });
     };
     const up = () => {
       handle.removeEventListener('pointermove', move);

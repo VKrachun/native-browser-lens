@@ -57,7 +57,8 @@ export interface FieldFacts {
 /** Whether a typed value must stay on this computer. Pure, so it is tested without a page. */
 export function privateValue(field: FieldFacts, value: string): boolean {
   if (field.type === 'password' || field.type === 'hidden') return true;
-  if (PRIVATE_AUTOCOMPLETE.test(field.autocomplete.trim().toLowerCase())) return true;
+  // Any token counts: "section-pay billing cc-csc" is a card code.
+  if (field.autocomplete.toLowerCase().split(/\s+/).some((token) => PRIVATE_AUTOCOMPLETE.test(token))) return true;
   const words = [field.name, field.id, field.label, field.placeholder].join(' ');
   if (SENSITIVE.test(words) || PRIVATE_WORDS.test(words)) return true;
   // Twelve or more digits look like a card or account number, whatever the field is called.
@@ -315,13 +316,19 @@ export class ActionRecorder {
   }
 }
 
+/** The text of the elements aria-labelledby names, as a screen reader hears the field. */
+function ariaLabelledBy(el: Element): string {
+  const ids = (el.getAttribute('aria-labelledby') ?? '').split(/\s+/).filter(Boolean);
+  return ids.map((id) => el.ownerDocument.getElementById(id)?.textContent ?? '').join(' ');
+}
+
 function facts(el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement): FieldFacts {
   return {
     type: el instanceof HTMLInputElement ? el.type : el.tagName.toLowerCase(),
     autocomplete: el.getAttribute('autocomplete') ?? '',
     name: el.getAttribute('name') ?? '',
     id: el.id,
-    label: [...(el.labels ?? [])].map(labelText).join(' '),
+    label: [...[...(el.labels ?? [])].map(labelText), el.getAttribute('aria-label') ?? '', ariaLabelledBy(el)].join(' '),
     placeholder: el.getAttribute('placeholder') ?? '',
   };
 }

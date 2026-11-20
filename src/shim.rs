@@ -57,19 +57,19 @@ pub fn connect_or_start(paths: &Paths) -> io::Result<Stream> {
         && crate::service::state(paths) != crate::service::State::NotInstalled
         && crate::service::start(paths).is_ok();
     if !service {
-        spawn_daemon(paths)?;
+        spawn_daemon(paths, false)?;
     }
     wait_for_daemon(paths)
 }
 
-/// Starts a plain daemon when none answers, never through the service: how a service without a
-/// manager (Windows, Linux without systemd) starts Lens. Going through `connect_or_start` there
-/// would ask the service again, without end.
+/// Starts the daemon in service mode (tray, updates, registration repair) when none answers, never
+/// through a service manager: how a service without a manager (Windows, Linux without systemd)
+/// starts Lens. Going through `connect_or_start` there would ask the service again, without end.
 pub fn connect_or_spawn(paths: &Paths) -> io::Result<Stream> {
     if let Ok(stream) = ipc::connect(paths) {
         return Ok(stream);
     }
-    spawn_daemon(paths)?;
+    spawn_daemon(paths, true)?;
     wait_for_daemon(paths)
 }
 
@@ -91,12 +91,13 @@ fn wait_for_daemon(paths: &Paths) -> io::Result<Stream> {
 
 /// The daemon outlives the shim: its own process group (Unix), detached and out of the browser's
 /// job object (Windows). Its stderr goes to `lensd.log` in the log folder.
-fn spawn_daemon(paths: &Paths) -> io::Result<()> {
+fn spawn_daemon(paths: &Paths, service: bool) -> io::Result<()> {
     paths.ensure()?;
     let log = paths.log("lensd.log")?;
     let mut command = Command::new(crate::paths::executable()?);
     command
         .arg("daemon")
+        .args(service.then_some("--service"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(log);
@@ -126,17 +127,19 @@ fn spawn_daemon(paths: &Paths) -> io::Result<()> {
                 }
             }
         }
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        // A hidden console, not none (DETACHED_PROCESS): the programs the daemon starts (speech,
+        // agent CLIs, cmd) share it and open no window of their own.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
         const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
         command.creation_flags(
-            DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB,
+            CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB,
         );
         if command.spawn().is_ok() {
             return Ok(());
         }
         // The job forbids breakaway: the daemon then lives as long as the browser's job does.
-        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+        command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
     }
     command.spawn().map(drop)
 }
