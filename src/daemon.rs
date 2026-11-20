@@ -1319,7 +1319,7 @@ impl Daemon {
                     .ok_or_else(|| not_found("no such observation"))?;
                 let (header, size) = self
                     .blobs
-                    .read(&note.audio.sha256, 0, 44)
+                    .read(&note.audio.sha256, 0, speech::WAV_HEADER_BYTES)
                     .map_err(|_| not_found("upload the recording first"))?;
                 let duration = speech::wav_duration_ms(&header, size).map_err(bad)?;
                 let audio = BlobRef {

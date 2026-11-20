@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { writeVoice } = require('../src/review-video.cjs');
+const { writeVoice, wavData } = require('../src/review-video.cjs');
 
 test('voice follows kept frames, microphone offsets, overlapping notes and silent gaps', t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lens-voice-'));
@@ -35,4 +35,19 @@ test('voice follows kept frames, microphone offsets, overlapping notes and silen
       (source >= 1310 && source < 1322 ? 500 : 0);
     for (let i = 0; i < 16; i++) assert.equal(pcm.readInt16LE(ms * 32 + i * 2), sample);
   }
+});
+
+test('a WAV with a LIST chunk before its samples is read at its data chunk', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lens-wav-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const list = Buffer.from('LIST\x05\0\0\0INFOx\0', 'latin1');
+  const fmt = Buffer.alloc(24);
+  fmt.write('fmt '); fmt.writeUInt32LE(16, 4); fmt.writeUInt16LE(1, 8); fmt.writeUInt16LE(1, 10);
+  fmt.writeUInt32LE(16000, 12); fmt.writeUInt32LE(32000, 16); fmt.writeUInt16LE(2, 20); fmt.writeUInt16LE(16, 22);
+  const data = Buffer.from('data\0\0\0\0', 'latin1');
+  const file = path.join(dir, 'listed.wav');
+  fs.writeFileSync(file, Buffer.concat([Buffer.from('RIFF\0\0\0\0WAVE', 'latin1'), fmt, list, data, Buffer.alloc(64)]));
+  const fd = fs.openSync(file, 'r');
+  t.after(() => fs.closeSync(fd));
+  assert.equal(wavData(fd), 12 + 24 + 14 + 8);
 });
