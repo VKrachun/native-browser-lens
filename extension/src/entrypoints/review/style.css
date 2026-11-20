@@ -106,11 +106,6 @@
   color: var(--muted-foreground);
   overflow-wrap: anywhere;
 }
-.voice-review {
-  display: grid;
-  gap: 12px;
-  padding: 16px;
-}
 .voice-review-list ol {
   display: grid;
   gap: 10px;
@@ -131,13 +126,28 @@
   padding-left: 18px;
 }
 
-/* Wide enough on a large screen for the replay, its table and the task side by side. */
-.review {
-  max-width: 1840px;
+.page.review {
+  max-width: 960px;
+  grid-template-columns: minmax(0, 1fr);
+  overflow-wrap: anywhere;
 }
-.summary {
+.review .summary {
   display: grid;
-  gap: 8px;
+  gap: 12px;
+  padding: clamp(14px, 3vw, 26px);
+}
+.recording-link {
+  justify-self: start;
+}
+.shared-evidence {
+  padding: 14px;
+}
+.shared-evidence summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.shared-evidence[open] > * + * {
+  margin-top: 12px;
 }
 .summary .title-input {
   font: 600 22px var(--font-heading);
@@ -259,43 +269,16 @@ fieldset.split legend {
   font-size: 13px;
 }
 
-/* Not yet reviewed: the recording on the left, the task on the right. */
-.review-layout {
+.attachments {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 380px;
-  gap: 24px;
-  align-items: start;
+  gap: 8px;
+  padding: 14px;
 }
-.review-main {
-  display: grid;
-  gap: 20px;
-  min-width: 0;
-  container-type: inline-size;
+.attachment-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
-.review-task {
-  position: sticky;
-  top: 16px;
-  display: grid;
-  gap: 16px;
-  max-height: calc(100vh - 32px);
-  overflow: auto;
-  padding: 16px;
-  border-radius: var(--radius-card);
-  background: var(--card);
-  box-shadow: var(--app-shadow-hairline);
-}
-.review-task .summary .title-input {
-  font-size: 18px;
-}
-.review-create {
-  justify-self: stretch;
-}
-@media (max-width: 1100px) {
-  .review-layout {
-    grid-template-columns: minmax(0, 1fr);
-  }
-  .review-task {
-    position: static;
-    max-height: none;
-  }
+.attachments [role=status]:empty {
+  display: none;
 }

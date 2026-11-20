@@ -201,18 +201,24 @@
 }
 
 /* ---------- Observations ---------- */
+.observations {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  min-width: 0;
+}
 .section-head {
   display: flex;
   align-items: baseline;
   gap: 8px;
-  margin: 4px 0 8px;
+}
+.section-head .num {
+  margin-inline-start: auto;
+  white-space: nowrap;
 }
 .obs-day {
   display: grid;
-  gap: 2px;
-}
-.obs-day + .obs-day {
-  margin-top: 8px;
+  gap: 4px;
 }
 .obs-day .label {
   margin: 0;
@@ -324,12 +330,14 @@
 /* Search and filter above a long list. */
 .obs-tools {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
 }
 .obs-tools .segmented {
   justify-self: start;
 }
 .obs-search {
+  min-width: 0;
   height: 32px;
 }
 .empty {

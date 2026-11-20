@@ -1,4 +1,5 @@
 mod agents;
+mod attachments;
 mod blobs;
 mod bundle;
 mod cli;

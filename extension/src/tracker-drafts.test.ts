@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { draftTarget } from './tracker-drafts';
+import { basecampNotes, draftTarget } from './tracker-drafts';
 
 it.each([
   ['linear', '', 'https://linear.app/new', 'description'],
@@ -19,9 +19,9 @@ it.each([
   expect(new URL(long.url!).searchParams.has(field)).toBe(false);
 });
 
-it('keeps the Jira and Basecamp summaries on the clipboard for the user to paste', () => {
+it('copies only the Basecamp title and keeps the full Jira and clipboard summaries', () => {
   const list = 'https://app.basecamp.com/1/buckets/2/todolists/3';
-  expect(draftTarget('basecamp', list, 'Bug', 'Notes')).toEqual({ url: list + '/todos/new', copy: 'Bug\n\nNotes' });
+  expect(draftTarget('basecamp', list, 'Bug\n title', 'Notes')).toEqual({ url: list + '/todos/new', copy: 'Bug title' });
   expect(draftTarget('jira', 'https://team.atlassian.net/browse/BUG-1', 'Bug', 'Notes')).toEqual({
     url: 'https://team.atlassian.net/secure/CreateIssue!default.jspa', copy: 'Bug\n\nNotes',
   });
@@ -32,4 +32,11 @@ it('rejects lookalike destinations and non-tracker links', () => {
   expect(() => draftTarget('jira', 'https://x.atlassian.net.example.com', '', '')).toThrow();
   expect(() => draftTarget('basecamp', 'https://app.basecamp.com/1/buckets/2', '', '')).toThrow();
   expect(() => draftTarget('github', 'javascript:alert(1)', '', '')).toThrow();
+});
+
+it('copies readable Basecamp findings and preserves the author’s notes', () => {
+  expect(basecampNotes({
+    id: 1, observation: 1, revision: 1, createdAt: 0, title: 'Popover', tags: [], items: [], voice: [],
+    notes: 'Findings (written by Claude Haiku from the recording; check them):\n- Escape fails\\.\n- Ctrl\\+K fails\\.\n\nMy own notes.',
+  })).toBe('• Escape fails.\n• Ctrl+K fails.\n\nMy own notes.');
 });

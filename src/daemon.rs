@@ -825,6 +825,22 @@ impl Daemon {
                     folder: folder.display().to_string(),
                 })
             }
+            Request::ExportAttachment { review, capture } => {
+                let review = store
+                    .get_review(review)
+                    .map_err(storage)?
+                    .ok_or_else(|| not_found("no such review"))?;
+                drop(store);
+                let path = crate::attachments::save(
+                    &review,
+                    capture,
+                    &self.blobs,
+                    &self.downloads,
+                    &self.paths.data.join("video-tools"),
+                )
+                .map_err(storage)?;
+                Reply::Attachment(path.display().to_string())
+            }
             Request::RecentEvidence { site } => {
                 if store
                     .setting("collection.paused")

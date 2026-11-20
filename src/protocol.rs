@@ -181,6 +181,13 @@ pub enum Request {
         #[ts(type = "number")]
         review: i64,
     },
+    /// Save the frozen diagnostics ZIP, or the MP4 of one reviewed capture, in Downloads.
+    ExportAttachment {
+        #[ts(type = "number")]
+        review: i64,
+        #[ts(type = "number | null")]
+        capture: Option<i64>,
+    },
     /// An agent asks for the last ten minutes on a site (host, such as app.example.com; every
     /// collected tab when None). The browsers that allow it answer within a few seconds.
     RecentEvidence {
@@ -423,6 +430,7 @@ pub enum Reply {
     Review(Review),
     Reviews(Vec<ReviewSummary>),
     Exported(Exported),
+    Attachment(String),
     HandoffApps(Vec<crate::handoff::HandoffApp>),
     AgentSetup(Vec<crate::agents::AgentSetup>),
     SetupPage(String),

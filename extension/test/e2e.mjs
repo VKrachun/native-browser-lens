@@ -387,6 +387,7 @@ try {
     if (left.includes('coupon field accepts') || !left.includes('NaN after Pay')) throw new Error(`the split left: ${left}`);
   }
   await freeze.click();
+  await review.getByText(/^View shared evidence/).click();
   await review.getByRole('list', { name: 'Reviewed captures' }).getByRole('img').first().waitFor({ timeout: 15_000 });
   // Intercept the draft before it leaves the test browser. Opening a draft cannot file a task.
   if (await review.getByLabel('Destination', { exact: true }).count()) throw new Error('Review asks for the tracker again');
@@ -413,7 +414,7 @@ try {
   await context.grantPermissions(['clipboard-read'], { origin: site });
   for (const [key, label, address, button, target] of [
     ['jira', 'Jira Cloud site', 'https://lens-test.atlassian.net', 'Copy and open Jira Cloud', 'https://lens-test.atlassian.net/secure/CreateIssue!default.jspa'],
-    ['basecamp', 'Basecamp to-do list or form URL', 'https://app.basecamp.com/1/buckets/2/todolists/3', 'Copy and open Basecamp', 'https://app.basecamp.com/1/buckets/2/todolists/3/todos/new'],
+    ['basecamp', 'Basecamp to-do list or form URL', 'https://app.basecamp.com/1/buckets/2/todolists/3', 'Copy title and open Basecamp', 'https://app.basecamp.com/1/buckets/2/todolists/3/todos/new'],
     ['github', 'GitHub repository', 'https://github.com/lens-test/reviews', 'Open draft in GitHub Issues', 'https://github.com/lens-test/reviews/issues/new?**'],
   ]) {
     if (key === 'jira') {
@@ -434,8 +435,28 @@ try {
     const [tab] = await Promise.all([context.waitForEvent('page'), review.getByRole('button', { name: button }).click()]);
     await tab.waitForURL(target);
     if (key === 'github' && !new URL(tab.url()).searchParams.get('body')?.includes('HTTP 500')) throw new Error('Missing issue body');
+    if (key === 'basecamp') {
+      await tab.goto('about:blank');
+      await tab.setContent('<textarea aria-label="Title"></textarea><textarea aria-label="Notes"></textarea>');
+      await tab.bringToFront();
+      const heading = await review.getByRole('heading', { level: 1 }).innerText();
+      const titleField = tab.getByLabel('Title');
+      await titleField.press('Control+v');
+      if (await titleField.inputValue() !== heading) throw new Error('Basecamp title paste included other fields');
+      await review.bringToFront();
+      await review.getByRole('button', { name: 'Copy notes' }).click();
+      await review.getByRole('status').filter({ hasText: 'Notes copied.' }).waitFor();
+      await tab.bringToFront();
+      const notesField = tab.getByLabel('Notes');
+      await notesField.press('Control+v');
+      await tab.waitForFunction(() => document.querySelector('[aria-label=Notes]').value.length > 0);
+      const body = await notesField.inputValue();
+      if (!body.includes(notes) || !body.includes('HTTP 500') || body.includes('```') || body.includes('written by Claude Haiku')) {
+        throw new Error('Basecamp notes paste is missing content or includes Markdown formatting');
+      }
+    }
     await tab.close();
-    if (key !== 'github') {
+    if (key === 'jira') {
       await shop.bringToFront();
       if (!(await shop.evaluate(() => navigator.clipboard.readText())).includes('HTTP 500')) {
         throw new Error('Missing clipboard summary for ' + key);
@@ -521,6 +542,7 @@ try {
   await models.getByRole('alert').waitFor({ state: 'detached', timeout: 10_000 });
   await review.reload();
   await review.getByRole('button', { name: 'Create review' }).click();
+  await review.getByText(/^View shared evidence/).click();
   await review.getByRole('list', { name: 'Reviewed captures' }).getByRole('img').first().waitFor({ timeout: 15_000 });
   // Explicit tracker choices survive sign-in and reload. Connected teams can still select VibeQ.
   if (await destinations.inputValue() !== 'github') throw new Error('Lost preferred tracker');
@@ -711,7 +733,24 @@ try {
   await panel.waitForTimeout(11_500);
   await panel.goto(`chrome-extension://${extensionId}/sidepanel.html?tab=${tabId}`);
   await panel.getByRole('status', { name: 'Recording' }).filter({ hasText: 'Screen, steps and your voice' }).waitFor({ timeout: 15_000 });
-  const [studio] = await Promise.all([context.waitForEvent('page'), panel.getByRole('button', { name: /^Stop/ }).click()]);
+  const [sessionReview] = await Promise.all([context.waitForEvent('page'), panel.getByRole('button', { name: /^Stop/ }).click()]);
+  const reportForm = sessionReview.getByRole('region', { name: 'Title and findings' });
+  const replayLink = sessionReview.getByRole('link', { name: /^Open replay and transcript/ });
+  await reportForm.getByLabel('Title', { exact: true }).waitFor();
+  await replayLink.waitFor();
+  for (const width of [390, 1440]) {
+    await sessionReview.setViewportSize({ width, height: 900 });
+    const title = await reportForm.getByLabel('Title', { exact: true }).boundingBox();
+    const evidence = await replayLink.boundingBox();
+    if (title.width < Math.min(width * 0.65, 800) || title.y >= evidence.y || title.y >= 450) {
+      throw new Error(`Review title is not the main content at ${width}px: ${JSON.stringify(title)}`);
+    }
+    if (process.env.E2E_GALLERY) {
+      await sessionReview.screenshot({ path: join(process.env.E2E_GALLERY, `filing-report-${width}.png`) });
+    }
+  }
+  if (await sessionReview.locator('.editor, .happened').count()) throw new Error('Filing loaded the replay or transcript');
+  const [studio] = await Promise.all([context.waitForEvent('page'), replayLink.click()]);
   const editorRegion = studio.getByRole('region', { name: 'Recording editor' });
   await editorRegion.waitFor({ timeout: 30_000 });
   await studio.getByRole('status', { name: 'Edits' }).filter({ hasText: /kept/ }).waitFor({ timeout: 15_000 });
@@ -793,12 +832,22 @@ try {
   const removedOne = shotCount > 1;
   if (removedOne) await strip.getByRole('button', { name: /^Remove the shot/ }).first().click();
   await studio.getByRole('status', { name: 'Edits' }).filter({ hasText: /2 notes · Saved/ }).waitFor({ timeout: 15_000 });
-  await studio.getByRole('status', { name: 'Summary' }).filter({ hasText: summaries ? /wrote the title/ : /No title was written/ }).waitFor({ timeout: 30_000 });
-  await studio.getByRole('button', { name: 'Create review' }).click();
-  await studio.getByRole('button', { name: 'Export to Downloads' }).click();
-  const recorded = studio.getByRole('status', { name: 'Export' });
+  await sessionReview.getByRole('status', { name: 'Summary' }).filter({ hasText: summaries ? /wrote the title/ : /No title was written/ }).waitFor({ timeout: 30_000 });
+  await sessionReview.getByRole('button', { name: 'Create review' }).click();
+  await sessionReview.getByRole('button', { name: 'Export to Downloads' }).click();
+  const recorded = sessionReview.getByRole('status', { name: 'Export' });
   await recorded.waitFor({ timeout: 15_000 });
   const sessionFolder = (await recorded.textContent()).replace(/^Exported to /, '');
+  const attachments = sessionReview.getByRole('region', { name: 'Attachments' });
+  await attachments.getByRole('button', { name: 'Save replay as MP4' }).waitFor();
+  await attachments.getByRole('button', { name: 'Save evidence ZIP' }).click();
+  const archivePath = (await attachments.getByText(/^Saved to .+\.zip$/).innerText()).slice('Saved to '.length);
+  const archive = readFileSync(archivePath);
+  if (archive.readUInt32LE(0) !== 0x04034b50) throw new Error('Evidence attachment is not a ZIP');
+  for (const filename of readdirSync(sessionFolder)) {
+    if (!archive.includes(Buffer.from(filename))) throw new Error(`Missing reviewed attachment: ${filename}`);
+  }
+
   if (speech && !readFileSync(join(sessionFolder, 'voice-1.txt'), 'utf8').includes('my fellow testers, the total is wrong')) {
     throw new Error('the corrected transcript did not leave');
   }

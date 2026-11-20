@@ -3,7 +3,7 @@ members = [".", "speech"]
 
 [package]
 name = "lens"
-version = "0.12.13"
+version = "0.12.14"
 edition = "2024"
 
 [dependencies]
@@ -27,6 +27,7 @@ ts-rs = { version = "12.0.1", features = ["serde-json-impl"] }
 ureq = "3"
 url = "2.5.8"
 tiny_http = "0.12.0"
+tempfile = "3.27.0"
 uuid = { version = "1.29.2", features = ["v4", "v5"] }
 zip = { version = "9.5.1", default-features = false, features = ["deflate"] }
 
@@ -45,8 +46,6 @@ ksni = { version = "0.3.7", default-features = false, features = ["async-io", "b
 tao = "0.37.2"
 tray-icon = "0.26.1"
 
-[dev-dependencies]
-tempfile = "3.27.0"
 
 [profile.release]
 lto = true

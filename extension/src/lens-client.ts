@@ -37,6 +37,7 @@ type ReplyTo = {
   getReview: 'review';
   createReview: 'review';
   exportReview: 'exported';
+  exportAttachment: 'attachment';
   listHandoffApps: 'handoffApps';
   connectAgents: 'agentSetup';
   recentEvidence: 'liveEvidence';

@@ -105,3 +105,17 @@ to Downloads for the screenshots, recording and full report.
 For VibeQ, open **Settings → Other integrations** and sign in. The token stays in the system
 secret store; `LENS_VIBEQ_TOKEN` overrides it for CI and automation. Filing a review again after
 an error is always safe: Lens reconciles with VibeQ first and never creates a second task.
+
+### Attach a review to an issue
+
+After **Create review**, use **Save evidence ZIP** and attach the file from Downloads to the draft. The ZIP contains the same files as the reviewed folder export, including any kept rrweb recordings. In Basecamp, use the paperclip in Notes.
+
+**Save replay as MP4** renders a silent H.264 video on this computer. It needs Node.js, FFmpeg with libx264, and the optional video tools. Install the tools once in the Lens data directory shown by `lens status`. For example, on Linux:
+
+```sh
+video_tools="$HOME/.local/share/sirv-lens/video-tools"
+npm install --prefix "$video_tools" playwright-core@1.65.0 rrweb-player@2.2.2
+"$video_tools/node_modules/.bin/playwright-core" install chromium
+```
+
+The renderer uses a fresh, offline browser. Images and fonts that were only available on the original site can be missing. The recording contains the reviewed DOM replay. Masks drawn on individual screenshots apply to those images. Voice transcripts are included in the ZIP.

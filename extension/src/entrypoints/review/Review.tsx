@@ -15,8 +15,8 @@ import type { VoiceNote } from '@/protocol/VoiceNote';
 import type { ReviewVoice } from '@/protocol/ReviewVoice';
 import { AlertIcon, DoneIcon, DraftIcon, ExportIcon, FileIcon, MaskIcon } from '@/ui/icons';
 import { useDestination } from '@/ui/Destination';
+import { Attachments } from './Attachments';
 import { TrackerDraft } from './TrackerDraft';
-import { RecordingEditor } from './RecordingEditor';
 import { Handoff, handoffName, useHandoff } from './Handoff';
 import { Notes } from '../sidepanel/Notes';
 import { FINDINGS_HEADER, joinNotes, splitNotes } from '@/findings';
@@ -268,11 +268,8 @@ export function Review({ observation: id }: { observation: number }) {
   return (
     <main className="page review">
       <header className="page-head">
-        <span className="step-pill pill" data-tone={review ? 'success' : 'info'}>
-          {review ? 'Reviewed' : 'Review'}
-        </span>
-        {review && <h1>{observation.title}</h1>}
-        {review && (observation.notes ? <p className="notes-text">{observation.notes}</p> : <p className="muted">No notes.</p>)}
+        <h1>{review ? review.title : 'Review report'}</h1>
+        {review && <ReviewedNotes review={review} />}
       </header>
 
       {notice && (
@@ -284,58 +281,60 @@ export function Review({ observation: id }: { observation: number }) {
 
       {review ? (
         <>
-          <section className="section">
-            <h2>What leaves your computer</h2>
+          <details className="card shared-evidence">
+            <summary>View shared evidence ({review.items.length} {review.items.length === 1 ? 'capture' : 'captures'})</summary>
             <p className="muted small">
               {review.items.every((i) => i.kind === 'session')
                 ? 'The steps, your words and notes from the parts you kept, with a test that repeats them. Evidence is redacted.'
                 : 'The screenshots below are rendered with your marks, and masks are burned in. Evidence is redacted.'}
             </p>
-          </section>
-          <ol aria-label="Reviewed captures" className="review-list">
-            {review.items.map((item, index) => (
-              <li key={item.capture} className="card review-item" data-session={item.kind === 'session' || undefined}>
-                {item.kind !== 'session' && (
-                  <BlobImage client={client} blob={item.screenshot} alt={`Reviewed capture ${item.capture}`} />
-                )}
-                <div className="review-side">
-                  <a className="small url" href={item.pageUrl} target="_blank" rel="noreferrer">
-                    {item.pageUrl}
-                  </a>
-                  {item.findings.length > 0 ? (
-                    <ul aria-label={`Findings of capture ${item.capture}`} className="findings">
-                      {item.findings.map((finding, n) => (
-                        <li key={n}>
-                          <code>{finding}</code>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <p className="small muted">No failed requests, console errors or exceptions.</p>
+            <ol aria-label="Reviewed captures" className="review-list">
+              {review.items.map((item, index) => (
+                <li key={item.capture} className="card review-item" data-session={item.kind === 'session' || undefined}>
+                  {item.kind !== 'session' && (
+                    <BlobImage client={client} blob={item.screenshot} alt={`Reviewed capture ${item.capture}`} />
                   )}
-                  <Steps client={client} evidence={item.evidence} label={`Steps of capture ${index + 1}`} />
-                  {item.annotations.length > 0 && (
-                    <ul className="small notes-shared" aria-label={`Notes of capture ${index + 1}`}>
-                      {item.annotations.map((a) => (
-                        <li key={a.id}>
-                          {a.text || 'Drawing'}
-                          {a.elements.length > 0 && <span className="muted"> · {a.elements.map(describeTarget).join(', ')}</span>}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                  <p className="small muted" aria-label={`Files of capture ${item.capture}`}>
-                    Files: capture-{index + 1}.lens.json, capture-{index + 1}.png
-                    {item.shots.length > 0 && `, ${item.shots.length} shots`}
-                    {item.shotsDropped > 0 && ` (${item.shotsDropped} left out to fit the filing)`}
-                    {item.recording && `, capture-${index + 1}.rrweb.json`}
-                  </p>
-                </div>
-              </li>
-            ))}
-          </ol>
+                  <div className="review-side">
+                    <a className="small url" href={item.pageUrl} target="_blank" rel="noreferrer">
+                      {item.pageUrl}
+                    </a>
+                    {item.findings.length > 0 ? (
+                      <ul aria-label={`Findings of capture ${item.capture}`} className="findings">
+                        {item.findings.map((finding, n) => (
+                          <li key={n}>
+                            <code>{finding}</code>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="small muted">No failed requests, console errors or exceptions.</p>
+                    )}
+                    <Steps client={client} evidence={item.evidence} label={`Steps of capture ${index + 1}`} />
+                    {item.annotations.length > 0 && (
+                      <ul className="small notes-shared" aria-label={`Notes of capture ${index + 1}`}>
+                        {item.annotations.map((a) => (
+                          <li key={a.id}>
+                            {a.text || 'Drawing'}
+                            {a.elements.length > 0 && <span className="muted"> · {a.elements.map(describeTarget).join(', ')}</span>}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    <p className="small muted" aria-label={`Files of capture ${item.capture}`}>
+                      Files: capture-{index + 1}.lens.json, capture-{index + 1}.png
+                      {item.shots.length > 0 && `, ${item.shots.length} shots`}
+                      {item.shotsDropped > 0 && ` (${item.shotsDropped} left out to fit the filing)`}
+                      {item.recording && `, capture-${index + 1}.rrweb.json`}
+                    </p>
+                  </div>
+                </li>
+              ))}
+            </ol>
 
-          {review.voice.length > 0 && <VoiceList notes={review.voice} label="Reviewed voice notes" />}
+            {review.voice.length > 0 && <VoiceList notes={review.voice} label="Reviewed voice notes" />}
+          </details>
+
+          <Attachments key={review.id} client={client} review={review} basecamp={destination === 'basecamp'} />
 
           {suggestion && (
             <section aria-label="Draft report" className="card draft">
@@ -471,107 +470,122 @@ export function Review({ observation: id }: { observation: number }) {
         </>
       ) : (
         <>
-          <div className="review-layout">
-            <div className="review-main">
+          <section className="card summary" aria-label="Title and findings">
+            <Notes key={notesVersion} client={client} id={id} onSaved={() => {}} />
+            <p className="small muted summary-state" role="status" aria-label="Summary">
+              {summary.state === 'running' && <Running text="Claude is writing a title and the findings…" />}
+              {summary.state === 'idle' && waitingForWords && <>The title and findings follow once your words are written down.</>}
+              {summary.state === 'done' && <>{summary.agent === 'claude' ? 'Claude Haiku' : 'Codex'} wrote the title and the findings. Edit them as you like.</>}
+              {summary.state === 'failed' && <>No title was written: {summary.reason}</>}
+              {summary.state !== 'running' && (
+                <button type="button" className="btn btn-ghost btn-sm" onClick={() => void summarize()}>
+                  <DraftIcon /> {summary.state === 'done' ? 'Write them again' : 'Write a title and findings'}
+                </button>
+              )}
+            </p>
+            <Split client={client} id={id} onSplit={() => setNotesVersion((v) => v + 1)} />
+          </section>
+          <Issues client={client} id={id} refresh={notesVersion} />
+          {captures.filter((c) => c.kind === 'session' && c.recording).map((c) => (
+            <a key={c.id} className="recording-link" href={browser.runtime.getURL(`/replay.html?capture=${c.id}`)} target="_blank" rel="noreferrer">
+              Open replay and transcript · {c.pageTitle || c.pageUrl || `Recording ${c.id}`}
+            </a>
+          ))}
+          {captures.some((c) => c.kind !== 'session') && (
+            <ol aria-label="Captures to review" className="review-list">
               {captures
-                .filter((c) => c.kind === 'session' && c.recording)
+                .filter((c) => c.kind !== 'session')
                 .map((c) => (
-                  <RecordingEditor key={c.id} client={client} capture={c} voice={voice} onVoice={(note) => setVoice((all) => all.map((v) => (v.id === note.id ? note : v)))} />
+                  <li key={c.id} className="card review-item">
+                    <BlobImage client={client} blob={c.screenshot} alt={`Capture ${c.id} before review`} />
+                    <div className="review-side">
+                      <span className="small muted num">{c.eventCount} events</span>
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => void browser.tabs.create({ url: browser.runtime.getURL(`/annotate.html?capture=${c.id}`) })}
+                      >
+                        <MaskIcon />
+                        Mark up or mask
+                      </button>
+                      <Steps client={client} evidence={c.evidence} label={`Steps of capture ${c.id}`} hideValues={!typedValues} />
+                    </div>
+                  </li>
                 ))}
-              {/* Below the editor: it arrives when the summary does and must not move the replay. */}
-              <Issues client={client} id={id} refresh={notesVersion} />
-              {/* A recording's steps are in its editor's table; moment captures show here. */}
-              {captures.some((c) => c.kind !== 'session') && (
-                <ol aria-label="Captures to review" className="review-list">
-                  {captures
-                    .filter((c) => c.kind !== 'session')
-                    .map((c) => (
-                      <li key={c.id} className="card review-item">
-                        <BlobImage client={client} blob={c.screenshot} alt={`Capture ${c.id} before review`} />
-                        <div className="review-side">
-                          <span className="small muted num">{c.eventCount} events</span>
-                          <button
-                            type="button"
-                            className="btn btn-ghost btn-sm"
-                            onClick={() => void browser.tabs.create({ url: browser.runtime.getURL(`/annotate.html?capture=${c.id}`) })}
-                          >
-                            <MaskIcon />
-                            Mark up or mask
-                          </button>
-                          <Steps client={client} evidence={c.evidence} label={`Steps of capture ${c.id}`} hideValues={!typedValues} />
-                        </div>
-                      </li>
-                    ))}
-                </ol>
+            </ol>
+          )}
+          {voice.length > 0 && !captures.some((c) => c.kind === 'session') && (
+            <details className="card shared-evidence">
+              <summary>View voice notes</summary>
+              <VoiceList notes={voice.filter((v) => v.state === 'done')} label="Voice notes to share" />
+              {voice.some((v) => v.state !== 'done') && (
+                <p className="small muted">Voice notes that are not transcribed yet stay out of this review.</p>
               )}
-              {voice.length > 0 && !captures.some((c) => c.kind === 'session') && (
-                <section className="card voice-review">
-                  <VoiceList notes={voice.filter((v) => v.state === 'done')} label="Voice notes to share" />
-                  {voice.some((v) => v.state !== 'done') && (
-                    <p className="small muted">Voice notes that are not transcribed yet stay out of this review.</p>
-                  )}
-                  <p className="small muted">Only the transcripts leave; the recordings stay on this computer.</p>
-                </section>
-              )}
+              <p className="small muted">Only the transcripts leave; the recordings stay on this computer.</p>
+            </details>
+          )}
+          {filedTask?.startsWith('https://') && (
+            <div role="status" aria-label="Filed earlier" className="notice" data-tone="info">
+              <DoneIcon />
+              <span>
+                Filed earlier:{' '}
+                <a href={filedTask} target="_blank" rel="noreferrer">
+                  {filedTask}
+                </a>
+                . Filing again updates that task.
+              </span>
             </div>
-            <aside className="review-task" aria-label="Task">
-            <section className="summary" aria-label="Title and findings">
-              <Notes key={notesVersion} client={client} id={id} onSaved={() => {}} />
-              <p className="small muted summary-state" role="status" aria-label="Summary">
-                {summary.state === 'running' && <Running text="Claude is writing a title and the findings…" />}
-                {summary.state === 'idle' && waitingForWords && <>The title and findings follow once your words are written down.</>}
-                {summary.state === 'done' && <>{summary.agent === 'claude' ? 'Claude Haiku' : 'Codex'} wrote the title and the findings. Edit them as you like.</>}
-                {summary.state === 'failed' && <>No title was written: {summary.reason}</>}
-                {summary.state !== 'running' && (
-                  <button type="button" className="btn btn-ghost btn-sm" onClick={() => void summarize()}>
-                    <DraftIcon /> {summary.state === 'done' ? 'Write them again' : 'Write a title and findings'}
-                  </button>
-                )}
-              </p>
-              <Split client={client} id={id} onSplit={() => setNotesVersion((v) => v + 1)} />
-            </section>
-              {filedTask?.startsWith('https://') && (
-                <div role="status" aria-label="Filed earlier" className="notice" data-tone="info">
-                  <DoneIcon />
-                  <span>
-                    Filed earlier:{' '}
-                    <a href={filedTask} target="_blank" rel="noreferrer">
-                      {filedTask}
-                    </a>
-                    . Filing again updates that task.
-                  </span>
-                </div>
-              )}
-              <section className="section">
-                <h2>Choose what to share</h2>
-                <p className="muted small">
-                  Nothing leaves your computer until you create the review.
-                </p>
-                <label className="check">
-                  <input type="checkbox" checked={typedValues} onChange={(e) => setTypedValues(e.target.checked)} />
-                  <span>
-                    Include what I typed and the site’s API data
-                    <span className="small muted" style={{ display: 'block' }}>
-                      So an agent can repeat the steps and replay the server. Without it, only failed answers leave, and the
-                      shots after your steps stay here. Passwords, card numbers and private fields are always masked.
-                    </span>
-                  </span>
-                </label>
-              </section>
-              {problem && (
-                <div role="alert" className="notice">
-                  <AlertIcon />
-                  <span>{problem}</span>
-                </div>
-              )}
-              <button type="button" className="btn btn-primary review-create" onClick={freeze} disabled={captures.length === 0}>
-                Create review
-              </button>
-            </aside>
-          </div>
+          )}
+          <section className="section">
+            <h2>Choose what to share</h2>
+            <p className="muted small">
+              Nothing leaves your computer until you create the review.
+            </p>
+            <label className="check">
+              <input type="checkbox" checked={typedValues} onChange={(e) => setTypedValues(e.target.checked)} />
+              <span>
+                Include what I typed and the site’s API data
+                <span className="small muted" style={{ display: 'block' }}>
+                  So an agent can repeat the steps and replay the server. Without it, only failed answers leave, and the
+                  shots after your steps stay here. Passwords, card numbers and private fields are always masked.
+                </span>
+              </span>
+            </label>
+          </section>
+          {problem && (
+            <div role="alert" className="notice">
+              <AlertIcon />
+              <span>{problem}</span>
+            </div>
+          )}
+          <footer className="action-bar">
+            <button type="button" className="btn btn-primary" onClick={freeze} disabled={captures.length === 0}>
+              Create review
+            </button>
+          </footer>
         </>
       )}
     </main>
+  );
+}
+
+function ReviewedNotes({ review }: { review: FrozenReview }) {
+  const { findings, rest } = splitNotes(review.notes);
+  return (
+    <>
+      {review.tags.length > 0 && (
+        <div className="tag-chips" aria-label="Tags">
+          {review.tags.map((tag) => <span key={tag} className="tag-chip">{tag}</span>)}
+        </div>
+      )}
+      {findings && findings.length > 0 && (
+        <section className="section" aria-label="Report findings">
+          <h2>Findings</h2>
+          <ul>{findings.map((finding, i) => <li key={i}>{finding}</li>)}</ul>
+        </section>
+      )}
+      {rest && <p className="notes-text">{rest}</p>}
+    </>
   );
 }
 
