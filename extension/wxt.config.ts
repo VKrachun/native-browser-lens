@@ -29,6 +29,8 @@ export default defineConfig({
       // The end-to-end build pre-grants the local fixture origin: a test cannot click Chrome's prompt.
       // .test is reserved for testing: the product screenshots serve their demo site there.
       ...(process.env.LENS_E2E ? { host_permissions: ['http://127.0.0.1/*', 'http://*.test/*', 'https://app.basecamp.com/*'] } : {}),
+      // No img-src CSP for the extension pages: it would block "Show images from the site" too.
+      // Replays fetch nothing by default because replay-offline.ts takes the addresses out first.
       action: { default_title: 'Open Lens' },
       commands: {
         capture: {

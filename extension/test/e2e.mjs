@@ -147,7 +147,15 @@ mkdirSync(profile, { recursive: true });
 
 // The fixture: a checkout whose price request fails with a body that holds a secret.
 const priceRequests = [];
+// Requests for the page's image: a replay must make none until the person asks for the site's images.
+let logoRequests = 0;
 const fixture = createServer((request, response) => {
+  if (request.url === '/logo.gif') {
+    logoRequests++;
+    response.writeHead(200, { 'content-type': 'image/gif' });
+    response.end(Buffer.from('R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==', 'base64'));
+    return;
+  }
   if (request.url === '/api/price') {
     const chunks = [];
     request.on('data', (chunk) => chunks.push(chunk));
@@ -162,6 +170,7 @@ const fixture = createServer((request, response) => {
   response.end(`<!doctype html><title>Checkout</title>
     <meta name="csrf-token" content="meta-csrf-555">
     <h1>Checkout</h1>
+    <img src="/logo.gif" alt="" width="1" height="1">
     <input type="hidden" name="csrf" value="hidden-csrf-777">
     <a href="/next?access_token=link-token-888">Next</a>
     <div contenteditable>draft-secret-999</div>
@@ -314,6 +323,7 @@ try {
   await capture.getByText('Mark up · 2').waitFor({ timeout: 15_000 });
 
   // The capture's recording opens in the editor, the same one Record mode uses.
+  const logoBefore = logoRequests;
   const [replay] = await Promise.all([
     context.waitForEvent('page'),
     capture.getByRole('button', { name: 'Open in editor' }).click(),
@@ -321,6 +331,13 @@ try {
   await replay.getByRole('region', { name: 'Recording editor' }).waitFor({ timeout: 15_000 });
   const replayed = replay.frameLocator('.stage iframe').getByRole('heading', { name: 'Checkout' });
   await replayed.waitFor({ state: 'attached', timeout: 15_000 });
+  await replay.waitForTimeout(500);
+  if (logoRequests !== logoBefore) throw new Error('the replay loaded an image from the recorded site');
+  // Asked for, the site's images load: the replay starts again with the recorded addresses.
+  await replay.getByRole('checkbox', { name: /Show images from the site/ }).check();
+  await replay.frameLocator('.stage iframe').getByRole('heading', { name: 'Checkout' }).waitFor({ state: 'attached', timeout: 15_000 });
+  for (let i = 0; i < 50 && logoRequests === logoBefore; i++) await replay.waitForTimeout(100);
+  if (logoRequests === logoBefore) throw new Error('the replay did not load the site image after the person asked for it');
 
   // Notes: autosave, then still there after the panel reloads (a new shim, the same daemon).
   const notes = 'Coupon SAVE10 applied, then Pay: total shows NaN.';

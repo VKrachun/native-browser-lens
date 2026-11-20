@@ -17,6 +17,7 @@ import type { TimeRange } from '@/protocol/TimeRange';
 import type { VoiceNote } from '@/protocol/VoiceNote';
 import { AddNoteIcon, CutIcon, DeleteIcon, MaskIcon, PenIcon, TargetIcon } from '@/ui/icons';
 import { VoiceProgress } from '../sidepanel/Voice';
+import { offlineEvents } from '@/replay-offline';
 
 type Player = InstanceType<typeof rrwebPlayer>;
 type Mark = { at: number; kind: 'step' | 'error' | 'note'; label: string };
@@ -69,15 +70,29 @@ export function RecordingEditor({
   const [pointer, setPointer] = useState<number | null>(null);
   const [cutting, setCutting] = useState(false);
   const audio = useRef<Map<number, HTMLAudioElement>>(new Map());
+  // The replay fetches nothing from the recorded site unless the person asks for it, for this
+  // capture: then the site sees the visit, and its images can differ from what was recorded.
+  const imagesKey = `lens.replay.siteImages.${capture.id}`;
+  const [siteImages, setSiteImages] = useState<boolean | null>(null);
+  useEffect(() => {
+    void browser.storage.local
+      .get(imagesKey)
+      .then((found) => setSiteImages(found[imagesKey] === true), () => setSiteImages(false));
+  }, [imagesKey]);
+  const chooseSiteImages = (on: boolean) => {
+    setSiteImages(on);
+    void browser.storage.local.set({ [imagesKey]: on }).catch(() => {});
+  };
 
   // The replay and the steps.
   useEffect(() => {
-    if (!capture.recording || !stage.current) return;
+    if (!capture.recording || !stage.current || siteImages === null) return;
     let cancelled = false;
     const target = stage.current;
     void (async () => {
       try {
-        const events = JSON.parse(await (await client.readBlob(capture.recording!)).text());
+        const recorded = JSON.parse(await (await client.readBlob(capture.recording!)).text());
+        const events = siteImages ? recorded : offlineEvents(recorded);
         const evidence = JSON.parse(await (await client.readBlob(capture.evidence)).text()) as {
           actions?: Action[];
           events?: { timestamp: number; kind: string; data: Record<string, unknown> }[];
@@ -133,7 +148,7 @@ export function RecordingEditor({
       player.current = null;
       target.replaceChildren();
     };
-  }, [client, capture.recording, capture.evidence]);
+  }, [client, capture.recording, capture.evidence, siteImages]);
 
   // One clock: the replay's time drives the voice and the drawings.
   useEffect(() => {
@@ -607,6 +622,15 @@ export function RecordingEditor({
           />
           {caption && <p className="caption">{caption}</p>}
         </div>
+        {capture.recording && siteImages !== null && (
+          <label className="check small">
+            <input type="checkbox" checked={siteImages} onChange={(e) => chooseSiteImages(e.target.checked)} />
+            <span>
+              Show images from the site
+              <span className="muted"> (this replay then loads them from the site, so the site sees the visit)</span>
+            </span>
+          </label>
+        )}
 
         <div className="controls" role="toolbar" aria-label="Playback">
           <button type="button" className="play" aria-label={playing ? 'Pause' : 'Play'} onClick={toggle} disabled={!span}>
