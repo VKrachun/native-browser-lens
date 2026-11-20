@@ -5,8 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sirv Lens: record the bug, say what's wrong, hand it to an agent</title>
 <meta name="description" content="Lens records your browser session with your voice and turns it into a task with the exact steps, network failures, console errors and a replay, ready to file and for a coding agent to reproduce.">
+<meta name="theme-color" content="#f9fafc" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#11141c" media="(prefers-color-scheme: dark)">
 <link rel="icon" href="/favicon.png">
 <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
+<link rel="preload" href="/assets/libre-franklin-latin-wght.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/assets/site.css">
 <meta property="og:title" content="Sirv Lens">
 <meta property="og:description" content="Record the bug, say what's wrong, hand it to an agent.">
@@ -15,6 +18,7 @@
 <meta name="twitter:card" content="summary_large_image">
 </head>
 <body>
+<a class="skip" href="#main">Skip to the content</a>
 <header class="top">
   <div class="wrap">
     <a class="brand" href="/"><img src="/assets/icon.svg" alt="" width="28" height="28">Sirv Lens</a>
@@ -28,186 +32,205 @@
   </div>
 </header>
 
-<main>
+<main id="main">
   <section class="hero">
-    <div class="wrap">
+    <div class="wrap hero-grid">
       <div class="hero-copy">
-        <h1>Show the bug. Say what's wrong. <em>Hand it to an agent.</em></h1>
-        <p class="lede">Lens records your browser session with your voice, then turns it into a task with the exact steps, the failed requests, the console errors and a replay. You file it; a coding agent can reproduce it.</p>
+        <h1>Show the bug. Say what's wrong. Hand it to an&nbsp;agent.</h1>
+        <p class="lede">Lens records your browser session with your voice. It keeps what you did, what the page did and what you said on one clock, and turns it into a task with the steps, the failed requests, the console errors and a replay.</p>
         <div class="actions">
-          <a class="btn btn-primary" href="#download" data-download>Download Lens</a>
-          <a class="btn btn-ghost" href="#how">See how it works</a>
+          <a class="btn btn-primary btn-lg" href="#download" data-download>Download Lens</a>
+          <a class="btn btn-line btn-lg" href="#how">How it works</a>
         </div>
-        <p class="fine">Free. For Chrome, Edge, Brave and Firefox. Recordings stay on your computer until you file them.</p>
+        <p class="fine">Free. For Chrome, Edge, Brave and Firefox, on macOS, Windows and Linux. Recordings stay on your computer until you file them.</p>
       </div>
 
-      <figure class="timeline" aria-label="Example: one recording as Lens sees it">
-        <div class="timeline-head">
-          <strong>One recording, one timeline</strong>
-          <span class="label">Example recording</span>
+      <figure class="sheet" aria-labelledby="sheet-title">
+        <div class="caption">
+          <p class="caption-case" id="sheet-title">Checkout: total shows NaN after the SAVE20 coupon</p>
+          <p class="caption-meta">shop.juniper.test · 0:21 · with your voice</p>
         </div>
-        <div class="track">
-          <div class="event"><time>0:03</time><span class="kind k-step">navigate</span><span>Checkout <span class="label">· page showed "Checkout", "Coupon", "Pay"</span></span></div>
-          <div class="event"><time>0:06</time><span class="kind k-step">fill</span><span>textbox <strong>Coupon</strong> ← <code>SAVE20</code></span></div>
-          <div class="event"><time>0:06</time><span class="kind k-step">click</span><span>button <strong>Pay</strong></span></div>
-          <div class="event"><time>0:06</time><span class="kind k-fail">500</span><span><code>POST /api/price</code> → <code>{"error":"price is NaN"}</code></span></div>
-          <div class="event"><time>0:07</time><span class="kind k-screen">screen</span><span>appeared: <q>Total: NaN</q></span></div>
-          <div class="event"><time>0:09</time><span class="kind k-say">you said</span><span><q>The total is wrong after I apply the coupon.</q></span></div>
-        </div>
+        <ol class="lines">
+          <li><time>0:01</time><span class="who who-say">You said</span><span class="what"><q>Okay. I apply the coupon, SAVE20.</q></span></li>
+          <li><time>0:03</time><span class="who">Step</span><span class="what">Type <b>“SAVE20”</b> into textbox <b>“Coupon”</b></span></li>
+          <li><time>0:04</time><span class="who">Step</span><span class="what">Click button <b>“Apply”</b></span></li>
+          <li class="fail"><time>0:04</time><span class="who">HTTP 500</span><span class="what"><code>POST /api/price</code> → <code>{"error":"price is NaN"}</code></span></li>
+          <li><time>0:05</time><span class="who">Screen</span><span class="what">Appeared: <b>“$NaN”</b></span></li>
+          <li><time>0:06</time><span class="who who-say">You said</span><span class="what"><q>And now the total is broken. It should be 108 dollars.</q></span></li>
+          <li><time>0:12</time><span class="who">Step</span><span class="what">Type a private value into textbox <b>“Card number”</b> <span class="bar" role="img" aria-label="masked"></span></span></li>
+        </ol>
+        <a class="exhibit exhibit-link" href="#exhibit-a"><span>See it in</span> Exhibit <b>A</b></a>
       </figure>
     </div>
   </section>
 
-  <section class="block" id="how">
+  <section class="station" id="how" aria-labelledby="how-title">
     <div class="wrap">
-      <div class="block-head">
-        <h2>From "this looks broken" to a task, in one take</h2>
-        <p>No screenshots to annotate, no steps to type out. Use the site as you normally do and talk.</p>
-      </div>
-      <div class="steps">
-        <div class="step">
-          <div class="step-text">
-            <span class="step-no">01 Record</span>
-            <h3>Press Record and talk</h3>
-            <p>Open the Lens side panel on the site you test and press Record. Lens keeps every click, key and page change, the network and the console, and your voice. In Chrome you can close the panel: the recording and your voice continue.</p>
-          </div>
-          <div class="shot"><img src="/assets/shot-record.webp" alt="A site with the Lens side panel open: the site collects, and a recording runs with Stop" width="2400" height="1454" loading="lazy"></div>
+      <h2 class="section-title" id="how-title">From “this looks broken” to a task, in one take</h2>
+      <p class="section-lede">No steps to type out and no screenshots to crop. Use the site as you normally do and talk. These are the real screens, recorded on a demo store.</p>
+
+      <article class="step">
+        <div class="step-text">
+          <h3>Press Record and talk</h3>
+          <p>Open the Lens side panel on the site you test and press Record. Lens keeps every click, key and page change, the network and the console, and your voice.</p>
+          <p>In Chrome you can close the panel: the recording and your voice continue.</p>
         </div>
-        <div class="step">
-          <div class="step-text">
-            <span class="step-no">02 Review</span>
-            <h3>Watch it back with your words</h3>
-            <p>Press Stop and Lens opens the recording: a replay of the page with your voice and a transcript written on your computer.</p>
-            <ul>
-              <li>Trim and cut what does not belong, draw on the page or highlight an element.</li>
-              <li>Black out anything private in a screenshot before it leaves.</li>
-              <li>A long recording with several problems becomes one task each.</li>
-            </ul>
-          </div>
-          <div class="shot"><img src="/assets/shot-review.webp" alt="The recording editor: the replay with your words as captions, the transcript, and the steps with an HTTP 500" width="2400" height="1662" loading="lazy"></div>
+        <div class="exhibits">
+          <figure class="shot" id="exhibit-a">
+            <img src="/assets/shot-record.webp" alt="A demo store checkout with the total showing $NaN, and the Lens side panel beside it recording for 0:14 with screen, steps and voice" width="2762" height="1520" loading="lazy" decoding="async">
+            <figcaption><span class="exhibit">Exhibit <b>A</b></span>The side panel records the session on the store.</figcaption>
+          </figure>
         </div>
-        <div class="step">
-          <div class="step-text">
-            <span class="step-no">03 File</span>
-            <h3>File it, or put an agent on it</h3>
-            <p>Take the reviewed title and findings to Linear, Jira Cloud, Basecamp or GitHub Issues. You choose when to submit the task.</p>
-            <ul>
-              <li>Hand the review to Claude Code, Codex, T3 Code or Zeron in your project’s folder.</li>
-              <li>Prefer files? Export it to a folder with a Playwright test.</li>
-            </ul>
-          </div>
-          <div class="shot"><img src="/assets/shot-file.webp" alt="The review page before filing: the findings, a likely duplicate in VibeQ, and the hand-off to a coding agent in your project folder" width="2400" height="1535" loading="lazy"></div>
+      </article>
+
+      <article class="step">
+        <div class="step-text">
+          <h3>Watch it back with your words</h3>
+          <p>Press Stop and Lens opens the recording: a replay of the page, your voice as captions, and a transcript written on your computer next to the steps and errors of the same second.</p>
+          <ul>
+            <li>Cut what does not belong, draw on the page or point at an element, and add a note.</li>
+            <li>Mark up a screenshot and black out anything private before it leaves.</li>
+            <li>A long recording with several problems becomes one task each.</li>
+          </ul>
         </div>
-      </div>
+        <div class="exhibits">
+          <figure class="shot">
+            <img src="/assets/shot-replay.webp" alt="The recording editor: the replay of the store with a caption of what was said, a table of time, what you said and what happened on the page with an HTTP 500 and a console error, and a note on the total" width="2784" height="1880" loading="lazy" decoding="async">
+            <figcaption><span class="exhibit">Exhibit <b>B</b></span>The replay, your words and the steps on one clock.</figcaption>
+          </figure>
+          <figure class="shot shot-inset">
+            <img src="/assets/shot-annotate.webp" alt="The annotate editor on a capture of the store: a red rectangle around the $NaN total and a black mask over the card number" width="2560" height="1640" loading="lazy" decoding="async">
+            <figcaption><span class="exhibit">Exhibit <b>C</b></span>A mark on the total, a mask on the card number.</figcaption>
+          </figure>
+        </div>
+      </article>
+
+      <article class="step">
+        <div class="step-text">
+          <h3>File it, or put an agent on it</h3>
+          <p>Lens writes a title and findings with your Claude Code or Codex, if you have one. Edit them, then take the review to Linear, Jira Cloud, Basecamp, or GitHub Issues. You choose when to submit the task.</p>
+          <ul>
+            <li>Hand the review to Claude Code, Codex, T3 Code or Zeron in your project’s folder.</li>
+            <li>Prefer files? Export it to a folder with a Playwright test.</li>
+          </ul>
+        </div>
+        <div class="exhibits">
+          <figure class="shot shot-inset shot-left">
+            <img src="/assets/shot-review.webp" alt="The review report: the title, the tags checkout and bug, two findings about the $NaN total and the failed price request, and a field for your notes" width="2000" height="1583" loading="lazy" decoding="async">
+            <figcaption><span class="exhibit">Exhibit <b>D</b></span>The title and findings, ready to check.</figcaption>
+          </figure>
+          <figure class="shot">
+            <img src="/assets/shot-file.webp" alt="The created review: findings, attachments, a hand-off to a coding agent in the project folder ~/projects/juniper-store, and Open draft in Linear" width="2000" height="1313" loading="lazy" decoding="async">
+            <figcaption><span class="exhibit">Exhibit <b>E</b></span>Open the draft in your tracker, or hand it off.</figcaption>
+          </figure>
+        </div>
+      </article>
     </div>
   </section>
 
-  <section class="block agent" id="agents">
+  <section class="agent" id="agents" aria-labelledby="agents-title">
     <div class="wrap agent-grid">
       <div>
-        <div class="block-head">
-          <h2>What a coding agent gets</h2>
-          <p>Each exported capture has a structured record. An agent reads it the way you would read the bug, and can repeat it.</p>
-        </div>
-        <ul>
-          <li><strong>Steps with real locators</strong><span>Role, name, test ID and CSS for each click and field, so a test can find the element again.</span></li>
-          <li><strong>What the screen did</strong><span>The text that appeared and went away after each click.</span></li>
-          <li><strong>The failures that matter</strong><span>Failed requests with their bodies, linked to the step that caused them, and the console errors.</span></li>
-          <li><strong>Your words, on the same clock</strong><span>What you said, where you said it, corrected if Whisper misheard.</span></li>
-          <li><strong>A replay and screenshots</strong><span>The DOM recording and a shot after each step, with your masks burned in.</span></li>
-        </ul>
-        <p class="mcp">Working locally? One click in Settings, or <code>lens agents connect</code>, gives Claude Code, Codex, Cursor and Gemini CLI the Lens skill and MCP server: they can find a review and read it straight from Lens. No MCP? <code>lens review &lt;id&gt;</code> and <code>lens export &lt;id&gt;</code> work from any shell.</p>
+        <h2 class="section-title" id="agents-title">What a coding agent gets</h2>
+        <p class="section-lede">Each exported capture has a structured record. An agent reads it the way you would read the bug, and can repeat it.</p>
+        <dl class="gets">
+          <dt>Steps with real locators</dt><dd>Role, name, test ID and CSS for each click and field, so a test can find the element again.</dd>
+          <dt>What the screen did</dt><dd>The text that appeared and went away after each click.</dd>
+          <dt>The failures that matter</dt><dd>Failed requests with their bodies, linked to the step that caused them, and the console errors.</dd>
+          <dt>Your words, on the same clock</dt><dd>What you said, where you said it, corrected if Whisper misheard.</dd>
+          <dt>A replay and screenshots</dt><dd>The DOM recording and a shot after each step, with your masks burned in.</dd>
+        </dl>
+        <p class="mcp">Working locally? One click in Settings, or <code>lens agents connect</code>, gives Claude Code, Codex, Cursor and Gemini CLI the Lens skill and MCP server: they find a review and read it straight from Lens. No MCP? <code>lens review &lt;id&gt;</code> and <code>lens export &lt;id&gt;</code> work from any shell.</p>
       </div>
-<pre class="record" aria-label="An excerpt of a Lens record"><code><span class="cmt">// capture-1.lens.json (excerpt)</span>
+<pre class="record" tabindex="0" aria-label="An excerpt of a Lens record"><code><span class="cmt">// capture-1.lens.json (excerpt)</span>
 {
   <span class="key">"findings"</span>: { <span class="key">"items"</span>: [
-    { <span class="key">"kind"</span>: <span class="str">"defect"</span>, <span class="key">"text"</span>: <span class="str">"The total shows NaN after Pay"</span> } ] },
+    { <span class="key">"kind"</span>: <span class="str">"defect"</span>, <span class="key">"text"</span>: <span class="str">"After the coupon SAVE20, the total shows $NaN"</span> } ] },
   <span class="key">"steps"</span>: [
-    { <span class="key">"seq"</span>: <span class="num">2</span>, <span class="key">"atMs"</span>: <span class="num">6212</span>, <span class="key">"kind"</span>: <span class="str">"fill"</span>, <span class="key">"value"</span>: <span class="str">"SAVE20"</span>,
-      <span class="key">"target"</span>: { <span class="key">"role"</span>: <span class="str">"textbox"</span>, <span class="key">"name"</span>: <span class="str">"Coupon"</span>, <span class="key">"css"</span>: <span class="str">"input[name=coupon]"</span> } },
-    { <span class="key">"seq"</span>: <span class="num">3</span>, <span class="key">"atMs"</span>: <span class="num">6240</span>, <span class="key">"kind"</span>: <span class="str">"click"</span>,
-      <span class="key">"target"</span>: { <span class="key">"role"</span>: <span class="str">"button"</span>, <span class="key">"name"</span>: <span class="str">"Pay"</span> },
-      <span class="key">"requests"</span>: [<span class="str">"s3r1"</span>], <span class="key">"shot"</span>: <span class="str">"shot-1"</span>,
-      <span class="key">"screen"</span>: { <span class="key">"appeared"</span>: [<span class="str">"Total: NaN"</span>] } },
-    { <span class="key">"seq"</span>: <span class="num">4</span>, <span class="key">"atMs"</span>: <span class="num">9100</span>, <span class="key">"kind"</span>: <span class="str">"say"</span>,
-      <span class="key">"value"</span>: <span class="str">"The total is wrong after I apply the coupon."</span> } ],
+    { <span class="key">"seq"</span>: <span class="num">1</span>, <span class="key">"atMs"</span>: <span class="num">3120</span>, <span class="key">"kind"</span>: <span class="str">"fill"</span>, <span class="key">"value"</span>: <span class="str">"SAVE20"</span>,
+      <span class="key">"target"</span>: { <span class="key">"role"</span>: <span class="str">"textbox"</span>, <span class="key">"name"</span>: <span class="str">"Coupon"</span>, <span class="key">"css"</span>: <span class="str">"#coupon"</span> } },
+    { <span class="key">"seq"</span>: <span class="num">2</span>, <span class="key">"atMs"</span>: <span class="num">4010</span>, <span class="key">"kind"</span>: <span class="str">"click"</span>,
+      <span class="key">"target"</span>: { <span class="key">"role"</span>: <span class="str">"button"</span>, <span class="key">"name"</span>: <span class="str">"Apply"</span> },
+      <span class="key">"requests"</span>: [<span class="str">"s2r1"</span>], <span class="key">"shot"</span>: <span class="str">"shot-1"</span>,
+      <span class="key">"screen"</span>: { <span class="key">"appeared"</span>: [<span class="str">"$NaN"</span>] } },
+    { <span class="key">"seq"</span>: <span class="num">3</span>, <span class="key">"atMs"</span>: <span class="num">6300</span>, <span class="key">"kind"</span>: <span class="str">"say"</span>,
+      <span class="key">"value"</span>: <span class="str">"And now the total is broken."</span> } ],
   <span class="key">"network"</span>: [
-    { <span class="key">"id"</span>: <span class="str">"s3r1"</span>, <span class="key">"method"</span>: <span class="str">"POST"</span>, <span class="key">"url"</span>: <span class="str">"/api/price"</span>, <span class="key">"status"</span>: <span class="num">500</span>,
+    { <span class="key">"id"</span>: <span class="str">"s2r1"</span>, <span class="key">"method"</span>: <span class="str">"POST"</span>, <span class="key">"url"</span>: <span class="str">"/api/price"</span>, <span class="key">"status"</span>: <span class="num">500</span>,
       <span class="key">"responseBody"</span>: <span class="str">"{\"error\":\"price is NaN\"}"</span> } ]
 }</code></pre>
     </div>
   </section>
 
-  <section class="block" id="privacy">
+  <section class="station" id="privacy" aria-labelledby="privacy-title">
     <div class="wrap">
-      <div class="block-head">
-        <h2>Private by default</h2>
-        <p>Lens is an app on your computer, not a cloud service. Nothing is uploaded to us, because there is no "us" in the loop.</p>
-      </div>
-      <div class="points">
-        <div class="point"><h3>You choose the sites</h3><p>Lens reads a site only after you allow it, one site at a time. Everywhere else it does nothing.</p></div>
-        <div class="point"><h3>Local transcription</h3><p>Whisper transcribes your voice on your computer. You choose whether to include microphone audio in a replay video you share.</p></div>
-        <div class="point"><h3>Secrets are left out</h3><p>Passwords, card numbers and private fields are masked. Cookies, headers and tokens are never recorded.</p></div>
-        <div class="point"><h3>Nothing leaves until you file</h3><p>Recordings stay on your computer. They go only where you send them: your tracker, or a folder.</p></div>
-        <div class="point"><h3>Your own AI, if you want it</h3><p>Titles and findings come from your Claude Code or Codex subscription, as text only. Turn it off by not installing either.</p></div>
-        <div class="point"><h3>No tracking</h3><p>No analytics, no telemetry, no ads. This website does not use cookies either.</p></div>
-      </div>
+      <h2 class="section-title" id="privacy-title">Private by default</h2>
+      <p class="section-lede">Lens is an app on your computer, not a cloud service. Nothing goes to Sirv: there is no Sirv server in the loop.</p>
+      <dl class="points">
+        <div><dt>You choose the sites</dt><dd>Lens reads a site only after you allow it, one site at a time. Everywhere else it does nothing.</dd></div>
+        <div><dt>Local transcription</dt><dd>Whisper transcribes your voice on your computer. You choose whether to include microphone audio in a replay video you share.</dd></div>
+        <div><dt>Secrets are left out</dt><dd>Passwords, card numbers and private fields are masked. Cookies, headers and tokens are never recorded.</dd></div>
+        <div><dt>Replays stay offline</dt><dd>A replay loads nothing from the recorded site unless you ask it to show the site’s images.</dd></div>
+        <div><dt>Nothing leaves until you file</dt><dd>Recordings stay on your computer. They go only where you send them: your tracker, an agent or a folder.</dd></div>
+        <div><dt>No tracking</dt><dd>No analytics, no telemetry, no ads. This website does not use cookies either.</dd></div>
+      </dl>
       <p class="fine more">The details: <a href="/privacy">privacy policy</a> and <a href="/permissions">why Lens asks for each permission</a>.</p>
     </div>
   </section>
 
-  <section class="block" id="download">
+  <section class="station download" id="download" aria-labelledby="download-title">
     <div class="wrap">
-      <div class="block-head">
-        <h2>Download Lens</h2>
-        <p>Install the app, open it once, and it walks you through adding the browser extension. It installs for you only, without administrator rights.</p>
-      </div>
+      <h2 class="section-title" id="download-title">Download Lens</h2>
+      <p class="section-lede">Install the app and open it once. It walks you through adding the browser extension, and installs for you only, without administrator rights.</p>
       <div class="downloads" data-downloads>
         <div class="dl" data-os="mac">
           <h3>macOS</h3>
           <p class="meta">Apple silicon and Intel. Signed and notarized by Apple.</p>
           <div class="files" data-files="mac"></div>
         </div>
+        <div class="dl" data-os="windows">
+          <h3>Windows</h3>
+          <p class="meta">Windows 10 and 11, x64. Installs for you only, without administrator rights.</p>
+          <div class="files" data-files="windows"></div>
+          <p class="note">The installer is not code-signed yet. If Windows shows “Windows protected your PC”, choose <strong>More info</strong>, then <strong>Run anyway</strong>.</p>
+        </div>
         <div class="dl" data-os="linux">
           <h3>Linux</h3>
           <p class="meta">x86-64. AppImage for any distribution, or a package.</p>
           <div class="files" data-files="linux"></div>
         </div>
-        <div class="dl" data-os="windows">
-          <h3>Windows</h3>
-          <p class="meta">Windows 10 and 11, x64. Installs for you only, without administrator rights.</p>
-          <div class="files" data-files="windows"></div>
-          <p class="soon">The installer is not code-signed yet. If Windows shows "Windows protected your PC", choose <strong>More info</strong>, then <strong>Run anyway</strong>.</p>
-        </div>
       </div>
+      <p class="fine more">Every file and its SHA-256 sum is also on <a href="https://github.com/sirv/native-browser-lens/releases/latest">GitHub Releases</a>.</p>
       <div class="extension-note">
         <h3>The browser extension</h3>
-        <p>Chrome, Edge and Brave: <a href="https://chromewebstore.google.com/detail/sirv-lens/lihjnfpbomppjmdlnchkookggmefanbg">add Sirv Lens from the Chrome Web Store</a>. Firefox: <a href="https://addons.mozilla.org/firefox/addon/sirv-lens/">add Sirv Lens from Firefox Add-ons</a>.</p>
+        <p>Chrome, Edge and Brave: <a href="https://chromewebstore.google.com/detail/sirv-lens/lihjnfpbomppjmdlnchkookggmefanbg">add Sirv Lens from the Chrome Web Store</a>. Firefox: <a href="https://addons.mozilla.org/firefox/addon/sirv-lens/">add Sirv Lens from Firefox Add-ons</a>. The app opens these links for you after you install it.</p>
       </div>
     </div>
   </section>
 
-  <section class="block" id="faq">
-    <div class="narrow faq">
-      <div class="block-head"><h2>Questions</h2></div>
-      <details><summary>Is Lens free?</summary><p>Yes.</p></details>
-      <details><summary>Why is there an app and an extension?</summary><p>The extension records the page. The app keeps the recordings on your computer, writes down your voice with Whisper, files tasks and serves recordings to coding agents. Browsers do not let an extension do all of that on its own.</p></details>
-      <details><summary>Which browsers work?</summary><p>Chrome, Edge, Brave and Chromium, with network bodies and screenshots after each step. Firefox works too, with request details limited by what Firefox lets extensions see.</p></details>
-      <details><summary>Where do tasks go?</summary><p>Open a draft in Linear or GitHub Issues, or copy the summary into a Jira Cloud issue or Basecamp to-do. Use Clipboard for another tracker. Export to Downloads gives you the full evidence to attach.</p></details>
-      <details><summary>Do I need an AI subscription?</summary><p>No. With Claude Code or Codex installed and signed in, Lens writes titles and findings, splits long recordings and checks for duplicates. Without them you write the title yourself; everything else works.</p></details>
-      <details><summary>Does anything go to Sirv?</summary><p>No. Lens has no server of its own. See the <a href="/privacy">privacy policy</a>.</p></details>
+  <section class="station" id="faq" aria-labelledby="faq-title">
+    <div class="wrap faq">
+      <h2 class="section-title" id="faq-title">Questions</h2>
+      <details><summary><span class="qa">Q.</span>Is Lens free?</summary><p><span class="qa">A.</span>Yes.</p></details>
+      <details><summary><span class="qa">Q.</span>Why is there an app and an extension?</summary><p><span class="qa">A.</span>The extension records the page. The app keeps the recordings on your computer, writes down your voice with Whisper, files tasks and serves recordings to coding agents. Browsers do not let an extension do all of that on its own.</p></details>
+      <details><summary><span class="qa">Q.</span>Which browsers work?</summary><p><span class="qa">A.</span>Chrome, Edge, Brave and Chromium, with network bodies and screenshots after each step. Firefox works too, with request details limited by what Firefox lets extensions see.</p></details>
+      <details><summary><span class="qa">Q.</span>Where do tasks go?</summary><p><span class="qa">A.</span>Open a draft in Linear or GitHub Issues, or copy the summary into a Jira Cloud issue or Basecamp to-do. Use Clipboard for another tracker. Export to Downloads gives you the full evidence to attach.</p></details>
+      <details><summary><span class="qa">Q.</span>Do I need an AI subscription?</summary><p><span class="qa">A.</span>No. With Claude Code or Codex installed and signed in, Lens writes titles and findings, splits long recordings and checks for duplicates. Without them you write the title yourself; everything else works.</p></details>
+      <details><summary><span class="qa">Q.</span>Does anything go to Sirv?</summary><p><span class="qa">A.</span>No. Lens has no server of its own. See the <a href="/privacy">privacy policy</a>.</p></details>
     </div>
   </section>
 </main>
 
 <footer class="foot">
   <div class="wrap">
-    <span>© 2026 Igor Varyvoda. Sirv Lens.</span>
+    <a class="brand brand-sm" href="/"><img src="/assets/icon.svg" alt="" width="22" height="22">Sirv Lens</a>
+    <span>© 2026 Igor Varyvoda.</span>
     <nav aria-label="Footer">
       <a href="/privacy">Privacy</a>
       <a href="/permissions">Permissions</a>
       <a href="/terms">Terms</a>
       <a href="/support">Support</a>
+      <a href="https://github.com/sirv/native-browser-lens">GitHub</a>
     </nav>
   </div>
 </footer>
