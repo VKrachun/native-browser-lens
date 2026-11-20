@@ -32,6 +32,7 @@ import type { Duplicate } from '@/protocol/Duplicate';
  */
 export function Review({ observation: id }: { observation: number }) {
   const [client] = useState(() => new LensClient());
+  const [includeVoice, setIncludeVoice] = useState(true);
   const [observation, setObservation] = useState<Observation | null>(null);
   const [captures, setCaptures] = useState<Capture[]>([]);
   const [typedValues, setTypedValues] = useState(true);
@@ -334,7 +335,7 @@ export function Review({ observation: id }: { observation: number }) {
             {review.voice.length > 0 && <VoiceList notes={review.voice} label="Reviewed voice notes" />}
           </details>
 
-          <Attachments key={review.id} client={client} review={review} basecamp={destination === 'basecamp'} />
+          <Attachments includeVoice={includeVoice} setIncludeVoice={setIncludeVoice} key={review.id} client={client} review={review} />
 
           {suggestion && (
             <section aria-label="Draft report" className="card draft">
@@ -462,7 +463,7 @@ export function Review({ observation: id }: { observation: number }) {
                 {sending ? 'Filing…' : filing ? 'Filed' : 'File to VibeQ'}
               </button>
             </> : destination && defaultChoice ? (
-              <TrackerDraft key={destination + defaultChoice.address + review.id} tracker={destination} address={defaultChoice.address} review={review} />
+              <TrackerDraft includeVoice={includeVoice} key={destination + defaultChoice.address + review.id} tracker={destination} address={defaultChoice.address} review={review} />
             ) : destinationError ? <span role="alert">{destinationError}</span> : destinations ? (
               <button type="button" className="btn btn-primary" onClick={() => void browser.runtime.openOptionsPage()}>Choose default destination</button>
             ) : null}
@@ -521,7 +522,7 @@ export function Review({ observation: id }: { observation: number }) {
               {voice.some((v) => v.state !== 'done') && (
                 <p className="small muted">Voice notes that are not transcribed yet stay out of this review.</p>
               )}
-              <p className="small muted">Only the transcripts leave; the recordings stay on this computer.</p>
+              <p className="small muted">The review includes transcripts. MP4 exports can also include your recorded voice.</p>
             </details>
           )}
           {filedTask?.startsWith('https://') && (

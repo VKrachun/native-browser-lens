@@ -7,6 +7,7 @@
 // <user-data-dir>/NativeMessagingHosts, and the profile is the folder `lens register` writes into.
 // Windows reads hosts from HKCU, so there the test registers for the current user and unregisters
 // at the end; run it on CI or a disposable account.
+import { basecampFixture } from './basecamp.mjs';
 import { chromium } from 'playwright-core';
 import { execFileSync, spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
@@ -15,7 +16,7 @@ import { createServer } from 'node:http';
 /** The findings a page shows, one per line, as the person reads them. */
 const findingsOn = (page) =>
   page.getByRole('region', { name: 'Findings', exact: true }).getByRole('textbox').evaluateAll((fields) => fields.map((f) => f.value));
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
@@ -138,6 +139,10 @@ const profile = {
   darwin: () => join(env.HOME, 'Library', 'Application Support', 'Chromium'),
   win32: () => join(work, 'profile'),
 }[process.platform]();
+if (process.env.LENS_E2E_VIDEO_TOOLS) {
+  mkdirSync(env.LENS_HOME, { recursive: true });
+  symlinkSync(resolve(process.env.LENS_E2E_VIDEO_TOOLS), join(env.LENS_HOME, 'video-tools'), 'junction');
+}
 mkdirSync(profile, { recursive: true });
 
 // The fixture: a checkout whose price request fails with a body that holds a secret.
@@ -170,12 +175,14 @@ const site = `http://127.0.0.1:${fixture.address().port}`;
 
 const systemChromium = '/usr/bin/chromium';
 const executablePath = process.env.CHROMIUM_PATH ?? (existsSync(systemChromium) ? systemChromium : undefined);
+const basecamp = await basecampFixture();
 const context = await chromium.launchPersistentContext(profile, {
   // The `chromium` channel is the full browser in new headless mode; the headless shell cannot load extensions.
   ...(executablePath ? { executablePath } : { channel: 'chromium' }),
   headless: true,
   env,
   args: [
+    ...basecamp.flags,
     `--disable-extensions-except=${extension}`,
     `--load-extension=${extension}`,
     // A WAV file stands in for the microphone, and its prompt answers itself.
@@ -414,7 +421,7 @@ try {
   await context.grantPermissions(['clipboard-read'], { origin: site });
   for (const [key, label, address, button, target] of [
     ['jira', 'Jira Cloud site', 'https://lens-test.atlassian.net', 'Copy and open Jira Cloud', 'https://lens-test.atlassian.net/secure/CreateIssue!default.jspa'],
-    ['basecamp', 'Basecamp to-do list or form URL', 'https://app.basecamp.com/1/buckets/2/todolists/3', 'Copy title and open Basecamp', 'https://app.basecamp.com/1/buckets/2/todolists/3/todos/new'],
+    ['basecamp', 'Basecamp to-do list or form URL', 'https://app.basecamp.com/1/buckets/2/todolists/3', 'Open Basecamp draft', 'https://app.basecamp.com/1/buckets/2/todolists/3/todos/new'],
     ['github', 'GitHub repository', 'https://github.com/lens-test/reviews', 'Open draft in GitHub Issues', 'https://github.com/lens-test/reviews/issues/new?**'],
   ]) {
     if (key === 'jira') {
@@ -431,29 +438,48 @@ try {
       await settings.getByText('Default saved.').waitFor();
     }
     await review.bringToFront();
-    await context.route(target, (route) => route.fulfill({ body: 'Draft' }));
+    if (key !== 'basecamp') await context.route(target, route => route.fulfill({ body: 'Draft' }));
+    if (key === 'basecamp' && process.env.LENS_E2E_VIDEO_TOOLS) await review.getByRole('checkbox', { name: /Replay MP4/ }).check();
     const [tab] = await Promise.all([context.waitForEvent('page'), review.getByRole('button', { name: button }).click()]);
     await tab.waitForURL(target);
     if (key === 'github' && !new URL(tab.url()).searchParams.get('body')?.includes('HTTP 500')) throw new Error('Missing issue body');
     if (key === 'basecamp') {
-      await tab.goto('about:blank');
-      await tab.setContent('<textarea aria-label="Title"></textarea><textarea aria-label="Notes"></textarea>');
-      await tab.bringToFront();
+      await review.getByText(/^Draft filled/).waitFor({ timeout: process.env.LENS_E2E_VIDEO_TOOLS ? 90000 : 25000 });
       const heading = await review.getByRole('heading', { level: 1 }).innerText();
-      const titleField = tab.getByLabel('Title');
-      await titleField.press('ControlOrMeta+v');
-      if (await titleField.inputValue() !== heading) throw new Error('Basecamp title paste included other fields');
-      await review.bringToFront();
-      await review.getByRole('button', { name: 'Copy notes' }).click();
-      await review.getByRole('status').filter({ hasText: 'Notes copied.' }).waitFor();
-      await tab.bringToFront();
-      const notesField = tab.getByLabel('Notes');
-      await notesField.press('ControlOrMeta+v');
-      await tab.waitForFunction(() => document.querySelector('[aria-label=Notes]').value.length > 0);
-      const body = await notesField.inputValue();
-      if (!body.includes(notes) || !body.includes('HTTP 500') || body.includes('```') || body.includes('written by Claude Haiku')) {
-        throw new Error('Basecamp notes paste is missing content or includes Markdown formatting');
+      if (await tab.getByLabel('Title').inputValue() !== heading) throw new Error('Basecamp title differs from the review');
+      const body = await tab.locator('trix-editor').innerText();
+      if (!body.includes(notes) || !body.includes('evidence ZIP') || body.includes('written by Claude Haiku'))
+        throw new Error('Basecamp Notes are missing the reviewed summary');
+      const evidence = await tab.evaluate(async () => {
+        const file = window.received.find(f => f.type === 'application/zip');
+        return { name: file.name, type: file.type, bytes: Array.from(new Uint8Array(await file.arrayBuffer())),
+           };
+      });
+      if (!/^lens-review-\d+-evidence\.zip$/.test(evidence.name) || evidence.type !== 'application/zip' ||
+          !Buffer.from(evidence.bytes).includes('capture-1-evidence.json') || basecamp.submitted)
+        throw new Error('The unsubmitted Basecamp draft did not receive the reviewed ZIP');
+      if (process.env.LENS_E2E_VIDEO_TOOLS) {
+        const header = await tab.evaluate(async () => {
+          const video = window.received.find(f => f.type === 'video/mp4');
+          return video?.slice(4, 8).text();
+        });
+        if (header !== 'ftyp') throw new Error('Basecamp did not receive the rendered MP4');
+        await review.getByRole('checkbox', { name: /Replay MP4/ }).uncheck();
       }
+      basecamp.editor = 'lexxy';
+      await review.bringToFront();
+      const [second] = await Promise.all([context.waitForEvent('page'), review.getByRole('button', { name: button }).click()]);
+      await second.locator('lexxy-editor figure').filter({ hasText: evidence.name }).waitFor();
+      if (!(await second.locator('lexxy-editor [contenteditable=true]').innerText()).includes(notes) || basecamp.submitted)
+        throw new Error('Lexxy did not keep the notes and attachment in its draft');
+      await second.close();
+      basecamp.restored = true;
+      await review.bringToFront();
+      const [existing] = await Promise.all([context.waitForEvent('page'), review.getByRole('button', { name: button }).click()]);
+      await review.getByRole('alert').filter({ hasText: 'already has content' }).waitFor();
+      if (await existing.getByLabel('Title').inputValue() !== 'My existing draft' ||
+          await existing.locator('figure').count() || basecamp.submitted) throw new Error('Lens changed a restored Basecamp draft');
+      await existing.close();
     }
     await tab.close();
     if (key === 'jira') {
@@ -840,6 +866,14 @@ try {
   const sessionFolder = (await recorded.textContent()).replace(/^Exported to /, '');
   const attachments = sessionReview.getByRole('region', { name: 'Attachments' });
   await attachments.getByRole('button', { name: 'Save replay as MP4' }).waitFor();
+  if (process.env.LENS_E2E_VIDEO_TOOLS) {
+    await attachments.getByRole('button', { name: 'Save replay as MP4' }).click();
+    const savedVideo = await attachments.getByText(/^Saved to .+\.mp4$/).innerText({ timeout: 120000 });
+    const videoPath = savedVideo.slice('Saved to '.length);
+    const audio = execFileSync('ffmpeg', ['-v', 'error', '-i', videoPath, '-map', '0:a:0', '-ac', '1',
+      '-ar', '16000', '-f', 's16le', 'pipe:1']);
+    if (!audio.some(byte => byte !== 0)) throw new Error('The exported session MP4 has no microphone sound');
+  }
   await attachments.getByRole('button', { name: 'Save evidence ZIP' }).click();
   const archivePath = (await attachments.getByText(/^Saved to .+\.zip$/).innerText()).slice('Saved to '.length);
   const archive = readFileSync(archivePath);
@@ -944,6 +978,7 @@ try {
 } finally {
   // Cleanup must not hide the failure above, and must not hang the job.
   await Promise.race([context.close(), new Promise((done) => setTimeout(done, 20_000))]).catch(() => {});
+  basecamp.server.close();
   fixture.close();
   fakeVibeq.close();
   for (const command of [['stop'], ...(isolated ? [] : [['unregister']])]) {

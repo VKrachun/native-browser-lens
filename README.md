@@ -98,7 +98,7 @@ folder (`.lens/verify`) and removes it. Page text in every answer is marked as u
 
 Choose your default destination during setup or in Lens Settings. Every review uses it. Linear and GitHub Issues open a draft with the
 reviewed title and summary. Jira Cloud opens its create form with the summary on the clipboard.
-For Basecamp, paste a to-do list or new to-do form URL, then paste the summary into the to-do.
+For Basecamp, save a to-do list or new-to-do URL once. **Open Basecamp draft** fills the title and Notes in your signed-in browser and adds the selected files. Review the draft and click **Add to-do** in Basecamp to post it.
 The Lens app shares your choice across browsers on this computer. Use Clipboard for another tracker, or Export
 to Downloads for the screenshots, recording and full report.
 
@@ -108,9 +108,9 @@ an error is always safe: Lens reconciles with VibeQ first and never creates a se
 
 ### Attach a review to an issue
 
-After **Create review**, use **Save evidence ZIP** and attach the file from Downloads to the draft. The ZIP contains the same files as the reviewed folder export, including any kept rrweb recordings. In Basecamp, use the paperclip in Notes.
+After **Create review**, use **Save evidence ZIP** and attach the file from Downloads to the draft. The ZIP contains the same files as the reviewed folder export, including any kept rrweb recordings. Basecamp drafts include this ZIP by default. Select **Replay MP4** to upload a playable video as well.
 
-**Save replay as MP4** renders a silent H.264 video on this computer. It needs Node.js, FFmpeg with libx264, and the optional video tools. Install the tools once in the Lens data directory shown by `lens status`. For example, on Linux:
+**Save replay as MP4** renders an H.264 video on this computer. Recorded microphone audio is included as AAC and follows the same cuts as the picture. Clear **Include recorded microphone audio in MP4s** for a muted export or Basecamp attachment. It needs Node.js, FFmpeg with libx264, and the optional video tools. Install the tools once in the Lens data directory shown by `lens status`. For example, on Linux:
 
 ```sh
 video_tools="$HOME/.local/share/sirv-lens/video-tools"

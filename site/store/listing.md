@@ -21,16 +21,16 @@ Open the Lens side panel on the site you test, press Record and talk. Lens keeps
 
 - Trim and cut, draw on the page, highlight an element, and black out anything private.
 - With your own Claude Code or Codex (optional), Lens writes the title and findings and splits a long recording into one task per problem.
-- Prepare an issue in Linear or GitHub Issues, or copy the review summary into Jira Cloud or Basecamp. Export the screenshots, replay and Playwright test when you need attachments.
+- Open a draft in Linear or GitHub Issues, or copy a summary into Jira Cloud. In Basecamp, Lens fills the title and Notes and attaches your selected evidence ZIP or replay MP4. The video can include your recorded microphone audio. You post the to-do when ready.
 - Coding agents read reviewed recordings from Lens over MCP.
 
 Private by default
 - Lens reads a site only after you allow it, one site at a time.
-- Recordings and your voice stay on your computer until you file or export them. Audio never leaves your computer.
+- Recordings and your voice stay on your computer until you file or export them. You can include recorded microphone audio in a replay video you share.
 - Passwords, card numbers and private fields are masked. Cookies, request headers and tokens are never recorded.
 - No analytics, no tracking, and no server of ours.
 
-Lens needs its free companion app for macOS, Windows or Linux: https://lens.sirv.studio. The app stores the recordings, writes down your voice with Whisper and files the tasks. The extension talks only to that app, on your computer.
+Lens needs its free companion app for macOS, Windows or Linux: https://lens.sirv.studio. The app stores the recordings, writes down your voice with Whisper and files the tasks.
 
 Why each permission: https://lens.sirv.studio/permissions
 Privacy policy: https://lens.sirv.studio/privacy
@@ -49,11 +49,11 @@ Permission justifications:
 - storage: To keep the user's settings, such as the recording mode and whether to record the voice.
 - offscreen: To keep recording the user's voice while the side panel is closed during a recording.
 - favicon: To show each site's icon in the side panel.
-- Host permissions (optional, http/https): requested for one site at a time when the user chooses "Collect evidence on this site"; no site access until then.
+- Host permissions (optional, http/https): requested for sites you choose to record and for the saved Basecamp destination when you choose to fill its draft.
 
 Remote code: No. All code is in the package.
 
-Data usage (handled on the user's computer, sent only where the user files): Website content, User activity, Web history. Certify: not sold to third parties; not used or transferred for purposes unrelated to the single purpose; not used for creditworthiness or lending.
+Data usage (handled on the user's computer, sent only where the user files): Website content, User activity, Web history, Personally identifiable information (optional recorded voice). Certify: not sold to third parties; not used or transferred for purposes unrelated to the single purpose; not used for creditworthiness or lending.
 
 ## Firefox: notes for reviewers
 
@@ -61,4 +61,4 @@ The extension needs its companion app (native messaging host studio.sirv.lens). 
 1. Download the app from https://lens.sirv.studio (Linux AppImage or deb, or the notarized macOS DMG) and open it once. It registers the native messaging host for Firefox and opens a welcome page.
 2. Load the add-on, open its sidebar on any http(s) site, choose "Collect evidence on this site", then Record and Stop. The recording opens for review.
 
-Source: the package is built with WXT (Vite) from the attached source archive; see BUILD.md in it (`pnpm install --frozen-lockfile && pnpm zip:firefox`). The `<all_urls>` optional permission is requested only because Firefox allows tab screenshots (tabs.captureVisibleTab) only with it; Lens still records only the sites the user adds. data_collection_permissions is "none": the extension sends nothing to any server; the app sends data only when the user files to a destination they configured.
+Source: the package is built with WXT (Vite) from the attached source archive; see BUILD.md in it (`pnpm install --frozen-lockfile && pnpm zip:firefox`). The `<all_urls>` optional permission is requested only because Firefox allows tab screenshots (tabs.captureVisibleTab) only with it; Lens still records only the sites the user adds. Basecamp draft sharing requests optional Firefox data permissions for the selected review content and URLs, recorded interactions in attachments, and microphone audio when included.

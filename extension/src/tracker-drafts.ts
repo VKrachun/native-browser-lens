@@ -31,13 +31,13 @@ export function draftDescription(review: Review): string {
 }
 
 /** Basecamp's Notes field accepts plain text. Keep full request URLs in the exported evidence. */
-export function basecampNotes(review: Review): string {
+export function basecampNotes(review: Review, includesZip = false): string {
   const { findings, rest } = splitNotes(review.notes);
   const sections = [findings?.map((finding) => `• ${finding}`).join('\n'), rest.trim()];
   for (const item of review.items) {
     const evidence = [
       item.pageUrl && `Page: ${item.pageUrl.split(/[?#]/, 1)[0]}`,
-      ...item.findings.map((text) => text.replace(/(https?:\/\/[^\s?#]+)[?#]\S*/g, '$1')),
+      ...(includesZip && item.findings.length ? [`Browser findings: ${item.findings.length} (details in the evidence ZIP).`] : item.findings.map((text) => text.replace(/(https?:\/\/[^\s?#]+)[?#]\S*/g, '$1'))),
       ...item.annotations.map((note) => note.text),
     ].filter(Boolean);
     if (evidence.length) sections.push([...new Set(evidence)].join('\n'));
@@ -73,7 +73,7 @@ export function draftTarget(tracker: DraftTracker, address: string, title: strin
         url.search = '';
         url.hash = '';
       }
-      return { url: url.href, copy: title.replace(/\s+/g, ' ').trim() };
+      return { url: url.href, copy: null };
     case 'github': {
       const repo = url.pathname.match(/^\/([\w.-]+\/[\w.-]+)(?:\/issues(?:\/new)?)?\/?$/);
       if (url.hostname !== 'github.com' || !repo) throw new Error('Paste the GitHub repository URL.');

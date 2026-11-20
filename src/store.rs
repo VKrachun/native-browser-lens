@@ -514,18 +514,63 @@ impl Store {
     }
 
     /// Stores a review; `review.id` is replaced by the new row's ID.
-    pub fn create_review(&self, mut review: Review) -> rusqlite::Result<Review> {
-        self.db.execute(
+    pub fn create_review(&mut self, mut review: Review) -> rusqlite::Result<Review> {
+        let voice: Vec<crate::attachments::VoiceSource> = self
+            .list_voice_notes(review.observation)?
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        let tx = self.db.transaction()?;
+        tx.execute(
             "INSERT INTO reviews (observation_id, body) VALUES (?1, '')",
             [review.observation],
         )?;
-        review.id = self.db.last_insert_rowid();
-        let body = serde_json::to_string(&review).expect("reviews serialize");
-        self.db.execute(
+        review.id = tx.last_insert_rowid();
+        let mut local = serde_json::to_value(&review).expect("reviews serialize");
+        local["mp4Voice"] = serde_json::to_value(voice).expect("voice sources serialize");
+        let body = local.to_string();
+        tx.execute(
             "UPDATE reviews SET body = ?2 WHERE id = ?1",
             params![review.id, body],
         )?;
+        tx.commit()?;
         Ok(review)
+    }
+
+    pub fn mp4_voice(
+        &self,
+        review: &Review,
+        include: bool,
+    ) -> rusqlite::Result<Vec<crate::attachments::VoiceSource>> {
+        if !include {
+            return Ok(Vec::new());
+        }
+        let sources: Option<String> = self.db.query_row(
+            "SELECT json_extract(body, '$.mp4Voice') FROM reviews WHERE id = ?1",
+            [review.id],
+            |row| row.get(0),
+        )?;
+        if let Some(json) = sources {
+            return serde_json::from_str(&json).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            });
+        }
+        // Older snapshots identify each reviewed transcript by its original clock and length.
+        Ok(self
+            .list_voice_notes(review.observation)?
+            .into_iter()
+            .filter(|note| {
+                review
+                    .voice
+                    .iter()
+                    .any(|v| v.started_at == note.started_at && v.duration_ms == note.duration_ms)
+            })
+            .map(Into::into)
+            .collect())
     }
 
     pub fn get_review(&self, id: i64) -> rusqlite::Result<Option<Review>> {
@@ -928,6 +973,58 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mp4_voice_is_local_and_frozen_independently_of_transcription() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("lens.sqlite")).unwrap();
+        let obs = store.create_observation("A replay", None, 100).unwrap();
+        let audio = BlobRef {
+            sha256: "a".repeat(64),
+            size: 32044,
+            media_type: "audio/wav".into(),
+        };
+        let first = store.add_voice_note(obs.id, 100, 1000, &audio).unwrap();
+        let review = store
+            .create_review(Review {
+                id: 0,
+                observation: obs.id,
+                revision: 1,
+                created_at: 2000,
+                title: obs.title,
+                notes: String::new(),
+                tags: vec![],
+                items: vec![],
+                voice: vec![],
+            })
+            .unwrap();
+        store.add_voice_note(obs.id, 3000, 1000, &audio).unwrap();
+        let public = serde_json::to_string(&store.get_review(review.id).unwrap().unwrap()).unwrap();
+        assert!(!public.contains(&audio.sha256) && !public.contains("mp4Voice"));
+        assert!(store.mp4_voice(&review, false).unwrap().is_empty());
+        let frozen = store.mp4_voice(&review, true).unwrap();
+        assert_eq!(frozen.len(), 1);
+        assert_eq!(frozen[0].start, first.started_at);
+
+        // A pre-audio review can recover its own transcribed source by its frozen timestamps.
+        let mut old = review.clone();
+        old.voice.push(crate::protocol::ReviewVoice {
+            started_at: 100,
+            duration_ms: 1000,
+            language: None,
+            segments: vec![],
+        });
+        store
+            .db
+            .execute(
+                "UPDATE reviews SET body=?1 WHERE id=?2",
+                params![serde_json::to_string(&old).unwrap(), old.id],
+            )
+            .unwrap();
+        assert_eq!(store.mp4_voice(&old, true).unwrap().len(), 1);
+        store.delete_voice_note(first.id).unwrap();
+        assert!(store.mp4_voice(&old, true).unwrap().is_empty());
+    }
 
     #[test]
     fn migrates_once_and_keeps_observations() {

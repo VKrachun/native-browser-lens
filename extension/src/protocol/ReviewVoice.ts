@@ -2,6 +2,6 @@
 import type { VoiceSegment } from "./VoiceSegment";
 
 /**
- * A voice note as a review shares it: the transcript only. The recording stays on this computer.
+ * The transcript shared in a review. Optional MP4 narration uses separate local audio references.
  */
 export type ReviewVoice = { startedAt: number, durationMs: number, language: string | null, segments: Array<VoiceSegment>, };

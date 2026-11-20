@@ -24,7 +24,7 @@ export default defineConfig({
       optional_host_permissions: ['http://*/*', 'https://*/*', ...(firefox ? ['<all_urls>'] : [])],
       // The end-to-end build pre-grants the local fixture origin: a test cannot click Chrome's prompt.
       // .test is reserved for testing: the product screenshots serve their demo site there.
-      ...(process.env.LENS_E2E ? { host_permissions: ['http://127.0.0.1/*', 'http://*.test/*'] } : {}),
+      ...(process.env.LENS_E2E ? { host_permissions: ['http://127.0.0.1/*', 'http://*.test/*', 'https://app.basecamp.com/*'] } : {}),
       action: { default_title: 'Open Lens' },
       commands: {
         capture: {
@@ -39,7 +39,10 @@ export default defineConfig({
               gecko: {
                 id: 'lens@sirv.studio',
                 strict_min_version: '140.0',
-                data_collection_permissions: { required: ['none'] },
+                data_collection_permissions: {
+                  required: ['none'],
+                  optional: ['websiteContent', 'websiteActivity', 'browsingActivity', 'personallyIdentifyingInfo'],
+                },
               },
             },
           }

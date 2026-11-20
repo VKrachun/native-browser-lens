@@ -1,6 +1,6 @@
 {
   "name": "sirv-lens-extension",
-  "version": "0.12.14",
+  "version": "0.12.15",
   "private": true,
   "description": "Sirv Lens browser extension",
   "type": "module",
@@ -29,11 +29,15 @@
     "rrweb-player": "2.2.2"
   },
   "devDependencies": {
+    "@37signals/lexxy": "1.0.4",
     "@playwright/test": "1.65.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@wxt-dev/module-react": "^1.1.5",
     "playwright-core": "^1.65.0",
+    "rolldown": "1.2.19",
+    "selfsigned": "^5.5.0",
+    "trix": "2.1.19",
     "typescript": "^5.9.3",
     "vitest": "^5.1.0",
     "web-ext": "^10.5.0",

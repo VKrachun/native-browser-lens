@@ -19,9 +19,9 @@ it.each([
   expect(new URL(long.url!).searchParams.has(field)).toBe(false);
 });
 
-it('copies only the Basecamp title and keeps the full Jira and clipboard summaries', () => {
+it('opens the Basecamp form and keeps the full Jira and clipboard summaries', () => {
   const list = 'https://app.basecamp.com/1/buckets/2/todolists/3';
-  expect(draftTarget('basecamp', list, 'Bug\n title', 'Notes')).toEqual({ url: list + '/todos/new', copy: 'Bug title' });
+  expect(draftTarget('basecamp', list, 'Bug\n title', 'Notes')).toEqual({ url: list + '/todos/new', copy: null });
   expect(draftTarget('jira', 'https://team.atlassian.net/browse/BUG-1', 'Bug', 'Notes')).toEqual({
     url: 'https://team.atlassian.net/secure/CreateIssue!default.jspa', copy: 'Bug\n\nNotes',
   });

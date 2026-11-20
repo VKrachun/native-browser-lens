@@ -187,6 +187,19 @@ pub enum Request {
         review: i64,
         #[ts(type = "number | null")]
         capture: Option<i64>,
+        #[serde(default, rename = "includeVoice")]
+        include_voice: bool,
+    },
+    /// Stream a reviewed export on this connection. Offset zero starts a new transfer.
+    ReadAttachment {
+        #[ts(type = "number")]
+        review: i64,
+        #[ts(type = "number | null")]
+        capture: Option<i64>,
+        #[ts(type = "number")]
+        offset: u64,
+        #[serde(default, rename = "includeVoice")]
+        include_voice: bool,
     },
     /// An agent asks for the last ten minutes on a site (host, such as app.example.com; every
     /// collected tab when None). The browsers that allow it answer within a few seconds.
@@ -383,7 +396,7 @@ pub enum ModelState {
     },
 }
 
-/// A voice note as a review shares it: the transcript only. The recording stays on this computer.
+/// The transcript shared in a review. Optional MP4 narration uses separate local audio references.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]

@@ -184,8 +184,9 @@ pub fn run(paths: &Paths, service: bool) -> std::io::Result<()> {
 
 fn serve(daemon: &Daemon, stream: Stream) -> std::io::Result<()> {
     let mut stream = &stream;
+    let mut transfer = None;
     while let Some(frame) = read_frame(&mut stream, MAX_REQUEST_BYTES)? {
-        let (reply, stop) = daemon.answer(&frame);
+        let (reply, stop) = daemon.answer(&frame, &mut transfer);
         write_frame(&mut stream, &reply)?;
         if stop {
             std::process::exit(0);
@@ -197,14 +198,18 @@ fn serve(daemon: &Daemon, stream: Stream) -> std::io::Result<()> {
 impl Daemon {
     /// One request frame in, one reply frame out, and whether the daemon stops after sending it.
     /// Never fails: a broken request gets an error reply.
-    pub fn answer(&self, frame: &[u8]) -> (Vec<u8>, bool) {
+    fn answer(
+        &self,
+        frame: &[u8],
+        transfer: &mut Option<crate::attachments::Transfer>,
+    ) -> (Vec<u8>, bool) {
         let mut stop = false;
         let reply = match serde_json::from_slice::<RequestFrame>(frame) {
             Ok(request) => {
                 stop = matches!(request.request, Request::Shutdown);
                 ReplyFrame {
                     id: request.id,
-                    outcome: self.handle(request.request),
+                    outcome: self.handle_with_transfer(request.request, transfer),
                 }
             }
             Err(e) => ReplyFrame {
@@ -256,7 +261,15 @@ impl Daemon {
     }
 
     pub(crate) fn handle(&self, request: Request) -> Outcome {
-        match self.reply(request) {
+        self.handle_with_transfer(request, &mut None)
+    }
+
+    fn handle_with_transfer(
+        &self,
+        request: Request,
+        transfer: &mut Option<crate::attachments::Transfer>,
+    ) -> Outcome {
+        match self.reply(request, transfer) {
             Ok(result) => Outcome::Ok {
                 result: Box::new(result),
             },
@@ -264,7 +277,11 @@ impl Daemon {
         }
     }
 
-    fn reply(&self, request: Request) -> Result<Reply, ProtocolError> {
+    fn reply(
+        &self,
+        request: Request,
+        transfer: &mut Option<crate::attachments::Transfer>,
+    ) -> Result<Reply, ProtocolError> {
         let mut store = self
             .store
             .lock()
@@ -825,16 +842,66 @@ impl Daemon {
                     folder: folder.display().to_string(),
                 })
             }
-            Request::ExportAttachment { review, capture } => {
+            Request::ReadAttachment {
+                review,
+                capture,
+                offset,
+                include_voice,
+            } => {
+                if offset == 0 {
+                    *transfer = None;
+                    let frozen = store
+                        .get_review(review)
+                        .map_err(storage)?
+                        .ok_or_else(|| not_found("no such review"))?;
+                    let voice = store
+                        .mp4_voice(&frozen, capture.is_some() && include_voice)
+                        .map_err(storage)?;
+                    drop(store);
+                    *transfer = Some(
+                        crate::attachments::Transfer::open(
+                            &frozen,
+                            capture,
+                            &self.blobs,
+                            &self.paths.data.join("video-tools"),
+                            &voice,
+                        )
+                        .map_err(storage)?,
+                    );
+                } else {
+                    drop(store);
+                }
+                let reader = transfer
+                    .as_mut()
+                    .filter(|t| t.review == review && t.capture == capture)
+                    .ok_or_else(|| bad("No matching attachment transfer on this connection."))?;
+                let (bytes, total_size) = reader.read(offset).map_err(storage)?;
+                if offset + bytes.len() as u64 == total_size {
+                    *transfer = None;
+                }
+                Reply::Blob(BlobChunk {
+                    data: BASE64.encode(bytes),
+                    total_size,
+                })
+            }
+            Request::ExportAttachment {
+                review,
+                capture,
+                include_voice,
+            } => {
                 let review = store
                     .get_review(review)
                     .map_err(storage)?
                     .ok_or_else(|| not_found("no such review"))?;
+                let voice = store
+                    .mp4_voice(&review, capture.is_some() && include_voice)
+                    .map_err(storage)?;
                 drop(store);
                 let path = crate::attachments::save(
                     &review,
                     capture,
                     &self.blobs,
+                    &voice,
                     &self.downloads,
                     &self.paths.data.join("video-tools"),
                 )
@@ -2268,7 +2335,7 @@ mod tests {
     }
 
     fn ask(daemon: &Daemon, json: &str) -> serde_json::Value {
-        serde_json::from_slice(&daemon.answer(json.as_bytes()).0).unwrap()
+        serde_json::from_slice(&daemon.answer(json.as_bytes(), &mut None).0).unwrap()
     }
 
     #[test]
@@ -2328,8 +2395,12 @@ mod tests {
             (Some(10), Some("error"))
         );
 
-        assert!(daemon.answer(br#"{"id":11,"method":"shutdown"}"#).1);
-        assert!(!daemon.answer(br#"{"id":12,"method":"hello"}"#).1);
+        assert!(
+            daemon
+                .answer(br#"{"id":11,"method":"shutdown"}"#, &mut None)
+                .1
+        );
+        assert!(!daemon.answer(br#"{"id":12,"method":"hello"}"#, &mut None).1);
     }
 
     #[test]

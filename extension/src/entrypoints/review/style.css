@@ -282,3 +282,21 @@ fieldset.split legend {
 .attachments [role=status]:empty {
   display: none;
 }
+
+.basecamp-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 0;
+  margin: 0;
+  border: 0;
+}
+.basecamp-files legend {
+  color: var(--muted-foreground);
+  font-size: .8rem;
+}
+.basecamp-files label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}

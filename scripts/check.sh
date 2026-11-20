@@ -5,6 +5,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+node --test scripts/review-video.test.cjs
 cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
 scripts/cross-clippy.sh
