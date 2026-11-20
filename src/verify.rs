@@ -132,17 +132,14 @@ pub fn verify(
         .and_then(|()| run(&project, &config, &seen));
     let _ = std::fs::remove_dir_all(&folder);
     let _ = std::fs::remove_dir(project.join(".lens"));
-    let (report, watched) = result?;
-
-    // Private values the agent's environment gives the test never come back in its messages.
+    // Private values the agent's environment gives the test never come back, in any part of the
+    // answer: errors, console text, request URLs, or Playwright's own output on a failure.
     let private: Vec<String> = std::env::vars()
         .filter(|(k, v)| k.starts_with("LENS_PRIVATE_") && !v.is_empty())
         .map(|(_, v)| v)
         .collect();
-    let errors: Vec<String> = errors(&report)
-        .into_iter()
-        .map(|e| private.iter().fold(e, |e, v| e.replace(v, "[PRIVATE]")))
-        .collect();
+    let (report, watched) = result.map_err(|e| scrub(&e, &private))?;
+    let errors = errors(&report);
     let passed = report["stats"]["unexpected"].as_u64() == Some(0)
         && report["stats"]["expected"].as_u64().unwrap_or(0) > 0;
     let recorded = crate::export::findings(raw_evidence);
@@ -197,7 +194,7 @@ pub fn verify(
     } else {
         "The steps ran on the dev server, and none of the failures the person recorded happened again."
     };
-    Ok(json!({
+    let answer = json!({
         "review": review.id,
         "capture": n,
         "baseUrl": base_url,
@@ -212,7 +209,29 @@ pub fn verify(
         "notCompared": unknown,
         "failedRequestsNow": requests,
         "consoleErrorsNow": console,
-    }))
+    });
+    // In the JSON text, where a value appears with its escapes.
+    let escaped: Vec<String> = private
+        .iter()
+        .map(|v| {
+            serde_json::to_string(v)
+                .expect("strings serialize")
+                .trim_matches('"')
+                .to_string()
+        })
+        .collect();
+    serde_json::from_str(&scrub(&answer.to_string(), &escaped))
+        .map_err(|e| format!("the verdict could not be built: {e}"))
+}
+
+/// The text with each private value replaced.
+fn scrub(text: &str, private: &[String]) -> String {
+    private
+        .iter()
+        .filter(|v| !v.is_empty())
+        .fold(text.to_string(), |text, v| {
+            text.replace(v.as_str(), "[PRIVATE]")
+        })
 }
 
 /// The steps the test does not really take: ones Lens could not write (a file upload, a private
@@ -386,6 +405,10 @@ mod tests {
             key_of_finding("Request failed: net::ERR_FAILED https://app.example.com/api/x")
                 .as_deref(),
             Some("0 /api/x")
+        );
+        assert_eq!(
+            scrub("fill(\"hunter2\") failed", &["hunter2".into()]),
+            "fill(\"[PRIVATE]\") failed"
         );
         assert_eq!(
             without_queries("GET https://a.test/x?id=REDACTED failed"),
