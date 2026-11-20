@@ -19,9 +19,14 @@ export interface Prepared {
   pending: Action[];
   elements: PageElement[];
 }
-export type RecorderMessage = { kind: 'lens-action'; action: Action } | { kind: 'lens-replay'; events: eventWithTime[] };
+export type RecorderMessage =
+  | { kind: 'lens-action'; action: Action }
+  | { kind: 'lens-replay'; events: eventWithTime[] }
+  | { kind: 'lens-should-record' };
 
-// Injected by the background only into tabs Lens collects on (registration: 'runtime').
+// Started by the background (registration: 'runtime'): registered for the granted project sites at
+// document_start, and injected into tabs that were open before. Started with the page, it records
+// nothing until the background says the tab collects; on a no, it ends and forgets what it held.
 export default defineContentScript({
   registration: 'runtime',
   main() {
@@ -29,6 +34,9 @@ export default defineContentScript({
     if (scope.__lensRecorder) return;
     scope.__lensRecorder = true;
 
+    /** Undefined while the background has not answered: everything waits in this page. */
+    let allowed: boolean | undefined;
+    let held: Action[] = [];
     let unsent: eventWithTime[] = [];
     const stopRecording = record({
       emit(event) {
@@ -43,12 +51,15 @@ export default defineContentScript({
       blockSelector: BLOCK_SELECTOR,
       recordCanvas: false,
       collectFonts: false,
+      // Started at document_start: the first copy of the page as soon as its HTML is parsed.
+      recordAfter: 'DOMContentLoaded',
     });
 
     // Steps go to the background as they happen, so they outlive this document.
     let collecting: Action[] | null = null;
     const steps = new ActionRecorder(document, (action) => {
       if (collecting) return void collecting.push(action);
+      if (allowed === undefined) return void held.push(action);
       send({ kind: 'lens-action', action });
     });
     steps.start();
@@ -63,7 +74,7 @@ export default defineContentScript({
       }
     };
     const sendReplay = () => {
-      if (!unsent.length) return;
+      if (allowed !== true || !unsent.length) return;
       const events = unsent;
       unsent = [];
       send({ kind: 'lens-replay', events });
@@ -79,28 +90,60 @@ export default defineContentScript({
     addEventListener('pagehide', leave);
     document.addEventListener('visibilitychange', hidden);
     function retire() {
+      retired = true;
+      browser.runtime.onMessage.removeListener(listen);
       clearInterval(timer);
       removeEventListener('pagehide', leave);
       document.removeEventListener('visibilitychange', hidden);
       steps.stop();
       stopRecording?.();
       unsent = [];
+      held = [];
     }
+    let retired = false;
 
-    browser.runtime.onMessage.addListener((message: RecorderRequest, _sender, reply) => {
+    function listen(message: RecorderRequest, _sender: unknown, reply: (prepared: Prepared) => void) {
+      if (retired) return;
       if (message?.kind === 'lens-snapshot') {
         // A session starts: its replay begins with a fresh copy of the page.
-        record.takeFullSnapshot(true);
+        // Before DOMContentLoaded rrweb has no copy yet, and its first one is fresh anyway.
+        try {
+          record.takeFullSnapshot(true);
+        } catch {
+          // Not recording yet.
+        }
         return;
       }
       if (message?.kind !== 'lens-prepare') return;
       collecting = [];
       steps.flushAll();
-      const pending = collecting;
+      // Asked for a capture: the background collects here, so the steps held for its answer go too.
+      const pending = [...held, ...collecting];
+      held = [];
       collecting = null;
       const recording = unsent;
       unsent = [];
       reply({ recording, pending, elements: elementMap(document, MAX_ELEMENTS) } satisfies Prepared);
-    });
+    }
+    browser.runtime.onMessage.addListener(listen);
+
+    const answer = (yes: unknown) => {
+      if (retired) return;
+      if (yes !== true) {
+        // Not a page Lens collects on: nothing it held leaves, and a later start can run again.
+        retire();
+        scope.__lensRecorder = false;
+        return;
+      }
+      allowed = true;
+      for (const action of held) send({ kind: 'lens-action', action });
+      held = [];
+      sendReplay();
+    };
+    try {
+      void browser.runtime.sendMessage({ kind: 'lens-should-record' } satisfies RecorderMessage).then(answer, () => answer(false));
+    } catch {
+      answer(false);
+    }
   },
 });

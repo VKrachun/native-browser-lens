@@ -27,6 +27,8 @@ interface Entry {
 /** The last ten minutes of evidence for each collected tab, within count and byte budgets. */
 export class EvidenceBuffer {
   private readonly tabs = new Map<number, Entry>();
+  /** Hears each new event: the background spools a recording's evidence with it. */
+  onAdd?: (tabId: number, items: EvidenceEvent[]) => void;
 
   constructor(private readonly now: () => number = Date.now) {}
 
@@ -61,6 +63,19 @@ export class EvidenceBuffer {
     }
     entry.events.push({ event, size });
     entry.size += size;
+    this.onAdd?.(tabId, [event]);
+    this.prune(tabId, entry);
+  }
+
+  /** What an earlier worker spooled goes in front of what this one collected since. */
+  restore(tabId: number, events: EvidenceEvent[], gaps: CoverageGap[], dropped: Record<string, number>) {
+    const entry = this.tabs.get(tabId);
+    if (!entry) return;
+    const older = events.map((event) => ({ event, size: bytes(event) }));
+    entry.events = [...older, ...entry.events];
+    entry.size += older.reduce((sum, e) => sum + e.size, 0);
+    entry.gaps = [...gaps, ...entry.gaps].slice(-MAX_GAPS);
+    for (const [reason, count] of Object.entries(dropped)) entry.dropped[reason] = (entry.dropped[reason] ?? 0) + count;
     this.prune(tabId, entry);
   }
 
@@ -79,12 +94,12 @@ export class EvidenceBuffer {
     if (entry) entry.dropped[reason] = (entry.dropped[reason] ?? 0) + 1;
   }
 
-  /** Keeps everything from `from` on, past the window, until released with null. */
   /** The tab became another tab (a prerendered page swapped in): its record goes along. */
   move(from: number, to: number) {
     for (const map of [this.tabs] as Map<number, unknown>[]) moveKey(map, from, to);
   }
 
+  /** Keeps everything from `from` on, past the window, until released with null. */
   hold(tabId: number, from: number | null) {
     const entry = this.tabs.get(tabId);
     if (entry) entry.hold = from ?? undefined;
@@ -123,6 +138,8 @@ export const MAX_ACTIONS = 300;
 export class ActionLog {
   private readonly tabs = new Map<number, Action[]>();
   private readonly holds = new Map<number, number>();
+  /** Hears each new step: the background spools a recording's steps with it. */
+  onAdd?: (tabId: number, items: Action[]) => void;
 
   constructor(private readonly now: () => number = Date.now) {}
 
@@ -136,6 +153,12 @@ export class ActionLog {
     const cutoff = this.cutoff(tabId);
     while (list.length && (list.length > MAX_ACTIONS || list[0]!.timestamp < cutoff)) list.shift();
     this.tabs.set(tabId, list);
+    this.onAdd?.(tabId, [action]);
+  }
+
+  /** Spooled steps of an earlier worker, in front of the newer ones; the newest MAX_ACTIONS stay. */
+  restore(tabId: number, older: Action[]) {
+    this.tabs.set(tabId, [...older, ...(this.tabs.get(tabId) ?? [])].slice(-MAX_ACTIONS));
   }
 
   /** The tab became another tab (a prerendered page swapped in): its record goes along. */
@@ -165,7 +188,7 @@ const FULL_SNAPSHOT = 2;
 /** One tab's replay may hold this much; beyond it the oldest stretch goes, with a gap. */
 export const MAX_REPLAY_BYTES = 64 * 1024 * 1024;
 
-interface ReplayEvent {
+export interface ReplayEvent {
   type: number;
   timestamp: number;
 }
@@ -176,6 +199,8 @@ interface ReplayEvent {
  */
 export class ReplayBuffer {
   private readonly tabs = new Map<number, { events: { event: ReplayEvent; size: number }[]; size: number; hold?: number }>();
+  /** Hears each batch of new events: the background spools a recording's replay with it. */
+  onAdd?: (tabId: number, items: ReplayEvent[]) => void;
 
   constructor(private readonly now: () => number = Date.now) {}
 
@@ -186,6 +211,17 @@ export class ReplayBuffer {
       entry.events.push({ event, size });
       entry.size += size;
     }
+    this.tabs.set(tabId, entry);
+    if (events.length) this.onAdd?.(tabId, events);
+    this.prune(entry);
+  }
+
+  /** Spooled events of an earlier worker, in front of the newer ones. */
+  restore(tabId: number, events: ReplayEvent[]) {
+    const entry = this.tabs.get(tabId) ?? { events: [], size: 0 };
+    const older = events.map((event) => ({ event, size: JSON.stringify(event).length }));
+    entry.events = [...older, ...entry.events];
+    entry.size += older.reduce((sum, e) => sum + e.size, 0);
     this.tabs.set(tabId, entry);
     this.prune(entry);
   }
@@ -268,6 +304,8 @@ export const MAX_SHOTS = 60;
 
 export class ShotBuffer {
   private readonly tabs = new Map<number, { shots: { at: number; data: string }[]; hold?: number }>();
+  /** Hears each kept shot: the background spools a recording's shots with it. */
+  onAdd?: (tabId: number, items: { at: number; data: string }[]) => void;
 
   constructor(private readonly now: () => number = Date.now) {}
 
@@ -279,7 +317,15 @@ export class ShotBuffer {
     entry.shots.push({ at, data });
     const cutoff = Math.min(this.now() - WINDOW_MS, entry.hold ?? Infinity);
     while (entry.shots.length && (entry.shots[0]!.at < cutoff || entry.shots.length > MAX_SHOTS)) entry.shots.shift();
+    this.onAdd?.(tabId, [{ at, data }]);
     return true;
+  }
+
+  /** Spooled shots of an earlier worker, in front of the newer ones; the newest MAX_SHOTS stay. */
+  restore(tabId: number, older: { at: number; data: string }[]) {
+    const entry = this.tabs.get(tabId) ?? { shots: [] };
+    entry.shots = [...older, ...entry.shots].slice(-MAX_SHOTS);
+    this.tabs.set(tabId, entry);
   }
 
   /** The tab became another tab (a prerendered page swapped in): its record goes along. */
