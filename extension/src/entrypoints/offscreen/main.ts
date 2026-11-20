@@ -5,7 +5,8 @@ import { MicrophoneBlocked, record, type Recording } from '@/voice';
 
 let current: Recording | null = null;
 /** The WAV of the last Stop, until the background has read all of its parts. */
-let stopped: { startedAt: number; wav: Uint8Array } | null = null;
+let stopped: { id: number; startedAt: number; wav: Uint8Array } | null = null;
+let stops = 0;
 
 browser.runtime.onMessage.addListener((message: OffscreenRequest, _sender, reply) => {
   if (message?.target !== 'offscreen') return;
@@ -28,11 +29,12 @@ async function handle(message: OffscreenRequest): Promise<OffscreenReply> {
       const spoken = current;
       current = null;
       if (!spoken) return { ok: false, error: 'No microphone runs.' };
-      stopped = { startedAt: spoken.startedAt, wav: new Uint8Array(await (await spoken.stop()).arrayBuffer()) };
-      return { ok: true, startedAt: spoken.startedAt, size: stopped.wav.length };
+      stopped = { id: ++stops, startedAt: spoken.startedAt, wav: new Uint8Array(await (await spoken.stop()).arrayBuffer()) };
+      return { ok: true, startedAt: spoken.startedAt, size: stopped.wav.length, id: stopped.id };
     }
     case 'mic-part': {
-      if (!stopped) return { ok: false, error: 'No stopped microphone.' };
+      // Parts of another WAV would make one broken file of two recordings.
+      if (!stopped || stopped.id !== message.id) return { ok: false, error: 'The voice is no longer here.' };
       // Extension messages carry JSON only, and at most 64 MiB: a long note goes in parts.
       const part = stopped.wav.subarray(message.offset, message.offset + OFFSCREEN_PART_BYTES);
       let binary = '';

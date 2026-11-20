@@ -1,5 +1,6 @@
 import type { EvidenceBuffer } from './buffer';
 import { noiseReason } from './noise';
+import { originOf } from '@/messages';
 
 /**
  * Network metadata from webRequest, for browsers without the debugger API (Firefox). It observes
@@ -45,17 +46,44 @@ export class LimitedCollector {
   }
 }
 
+export type View = { windowId: number; active: boolean; url?: string; document: string | null };
+
+/**
+ * Whether the window still showed the same tab and page after a shot as before it. A tab moved to
+ * another window, or another tab in front, fails. A hash or pushState change keeps the document,
+ * so it passes; without a document mark (a page that refuses scripts), the origin decides.
+ */
+export function sameView(before: View, after: View): boolean {
+  if (!before.active || !after.active || after.windowId !== before.windowId) return false;
+  if (before.document && after.document) return before.document === after.document;
+  return originOf(before.url) !== null && originOf(before.url) === originOf(after.url);
+}
+
+/** A mark of the tab's current document: the same until the tab loads another page. */
+async function documentOf(tabId: number): Promise<string | null> {
+  return browser.scripting
+    .executeScript({
+      target: { tabId },
+      func: () => ((globalThis as { lensDocument?: string }).lensDocument ??= crypto.randomUUID()),
+    })
+    .then((results) => (typeof results[0]?.result === 'string' ? results[0].result : null), () => null);
+}
+
+async function viewOf(tabId: number): Promise<View> {
+  const [tab, document] = await Promise.all([browser.tabs.get(tabId), documentOf(tabId)]);
+  return { windowId: tab.windowId, active: tab.active, url: tab.url, document };
+}
+
 /**
  * The visible part of the window, as a PNG data URL, when it shows `tabId`; null when another tab
  * or page came to the front during the shot. captureVisibleTab shoots the window, not the tab: a
  * switch at that moment would put another tab's pixels in this tab's record.
  */
 export async function captureTab(tabId: number): Promise<string | null> {
-  const before = await browser.tabs.get(tabId);
+  const before = await viewOf(tabId);
   if (!before.active) return null;
   const png = await browser.tabs.captureVisibleTab(before.windowId, { format: 'png' });
-  const after = await browser.tabs.get(tabId);
-  return after.active && after.url === before.url ? png : null;
+  return sameView(before, await viewOf(tabId)) ? png : null;
 }
 
 /**
