@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { offlineCss, offlineEvents } from './replay-offline';
+import { OFFLINE_POLICY, offlineCss, offlineEvents } from './replay-offline';
 
 const BLANK = /^data:image\/gif;base64,/;
 
@@ -8,7 +8,12 @@ it('takes the remote addresses out of CSS and keeps the rest', () => {
   expect(offlineCss("b{background:url( 'http://x.test/b.png' )}")).toBe('b{background:none}');
   expect(offlineCss('c{background:url(//cdn.test/c.png)}')).toBe('c{background:none}');
   expect(offlineCss('@import "https://x.test/more.css" screen;\nd{color:red}')).toBe('\nd{color:red}');
-  expect(offlineCss('@import url(https://x.test/more.css);')).toBe('@import none;');
+  expect(offlineCss('@import url(https://x.test/more.css);')).toBe('');
+  // What the URL parser reads as remote, and the plain strings of image-set(), go too.
+  expect(offlineCss('b{background:url("ht\\ntps://x.test/a.png")}')).toBe('b{background:none}');
+  expect(offlineCss('b{background:url(\\\\x.test/a.png)}')).toBe('b{background:none}');
+  expect(offlineCss('b{background:image-set("https://x.test/a.png" 1x)}')).toBe('b{background:image-set("" 1x)}');
+  expect(offlineCss('b{content:"hi"; background:url(data:image/png;base64,AA)}')).toBe('b{content:"hi"; background:url(data:image/png;base64,AA)}');
   expect(offlineCss('e{background:url(data:image/png;base64,AAAA)}')).toBe('e{background:url(data:image/png;base64,AAAA)}');
   expect(offlineCss('f{background:url(blob:chrome-extension://a/b)}')).toBe('f{background:url(blob:chrome-extension://a/b)}');
 });
@@ -77,4 +82,15 @@ it('rewrites later changes: added nodes, attribute changes by id, text, rules an
   expect(rule!.data.adds[0].rule).toBe('j{background:none}');
   expect(declaration!.data.set.value).toBe('none');
   expect(font!.data.fontSource).toBe('local("none")');
+});
+
+it('gives every full snapshot the offline policy and drops srcdoc', () => {
+  const snapshot = {
+    type: 2,
+    data: { node: { type: 0, childNodes: [{ type: 2, tagName: 'html', childNodes: [{ type: 2, tagName: 'head', attributes: {}, childNodes: [] }, { type: 2, tagName: 'body', attributes: {}, childNodes: [{ type: 2, tagName: 'iframe', id: 9, attributes: { srcdoc: '<img src=https://x.test/a.png>', src: '\thttps://x.test/f' }, childNodes: [] }] }] }] } },
+  };
+  const out = (offlineEvents([snapshot]) as typeof snapshot[])[0]!;
+  const html = out.data.node.childNodes[0] as { childNodes: { tagName: string; childNodes: { tagName: string; attributes: Record<string, string> }[] }[] };
+  expect(html.childNodes[0]!.childNodes[0]!.attributes).toEqual({ 'http-equiv': 'Content-Security-Policy', content: OFFLINE_POLICY });
+  expect(html.childNodes[1]!.childNodes[0]!.attributes).toEqual({ src: 'about:blank' });
 });

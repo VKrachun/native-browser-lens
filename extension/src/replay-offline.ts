@@ -3,8 +3,16 @@
 // what it serves then (not what the person saw) is what the reviewer sees. So, unless the person
 // asks for the site's images, every address the replay would fetch is taken out of the events.
 
-/** Absolute and protocol-relative web addresses; data: and blob: stay, they fetch nothing. */
-const REMOTE = /^\s*(?:https?:)?\/\//i;
+/**
+ * Whether an address fetches nothing: data:, blob:, about: or a fragment. The URL parser drops
+ * tabs and line breaks and reads a backslash as a slash, so the test does too; anything else, a
+ * relative path included, counts as remote. A content security policy backs this up (below).
+ */
+function harmless(value: string): boolean {
+  const url = value.replace(/[\t\n\r]/g, '').replace(/\\/g, '/').trim();
+  return url === '' || url.startsWith('#') || /^(?:data|blob|about):/i.test(url);
+}
+const REMOTE = { test: (value: string) => !harmless(value) };
 /** A transparent pixel: an image keeps its box, so the layout does not move. */
 const BLANK = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==';
 /** Elements whose src or href only shows a picture: they get the blank one. */
@@ -13,12 +21,17 @@ const PICTURES = new Set(['img', 'input', 'image']);
 const LINKS = new Set(['a', 'area']);
 const FETCHED = new Set(['src', 'href', 'xlink:href', 'poster', 'data', 'background', 'rr_src']);
 
-/** CSS without the remote addresses it would fetch: url(...) becomes none, @import goes. */
+/**
+ * CSS without the addresses it would fetch: url(...) becomes none, every @import goes, and a quoted
+ * address (image-set() takes plain strings) becomes empty. A regular expression cannot read every
+ * CSS escape: the policy the replay's page gets (offlineEvents) is what makes this safe.
+ */
 export function offlineCss(text: string): string {
-  if (!/url\(|@import/i.test(text)) return text;
+  if (!/url\(|@import|image-set|['"]/i.test(text)) return text;
   return text
-    .replace(/url\(\s*(['"]?)\s*(?:https?:)?\/\/(?:\\.|(?!\1\s*\)).)*?\1\s*\)/gi, 'none')
-    .replace(/@import\s+(['"])\s*(?:https?:)?\/\/[^'"]*\1[^;]*;?/gi, '');
+    .replace(/@import[^;]*;?/gi, '')
+    .replace(/url\(\s*(['"]?)((?:\\.|(?!\1\s*\)).)*?)\1\s*\)/gi, (whole, _q, inner: string) => (harmless(inner) ? whole : 'none'))
+    .replace(/(['"])((?:\\.|(?!\1).)*)\1/g, (whole, _q, inner: string) => (/^\s*(?:[a-z][\w+.-]*:|\/\/|\\\\)/i.test(inner) && !harmless(inner) ? '""' : whole));
 }
 
 type Attributes = Record<string, unknown>;
@@ -46,6 +59,9 @@ function offlineAttributes(tag: string | undefined, attributes: Attributes, snap
       if (tag && PICTURES.has(tag)) out[key] = BLANK;
       else if (tag === 'iframe' || tag === 'frame') out[key] = 'about:blank';
       else drop(key);
+    } else if (name === 'srcdoc') {
+      // A frame's own page as text: whatever it holds would load unchecked.
+      drop(key);
     } else if (tag === 'meta' && name === 'content' && /url\s*=/i.test(value)) {
       // <meta http-equiv=refresh content="0;url=...">: the replay frame would go to the site.
       drop(key);
@@ -90,5 +106,34 @@ export function offlineEvents<T>(events: T[]): T[] {
     }
     return out;
   };
-  return events.map((event) => walk(event) as T);
+  return events.map((event) => withPolicy(walk(event)) as T);
+}
+
+/**
+ * What the replayed page may load: nothing from the web. A policy in its head holds for whatever
+ * the rewrite above misses, as the page's own policy would. Pictures and fonts in data: and blob:
+ * addresses stay; style attributes and style elements work (the replay frame runs no scripts).
+ */
+export const OFFLINE_POLICY =
+  "default-src 'none'; img-src data: blob:; media-src data: blob:; font-src data:; style-src 'unsafe-inline' data: blob:; frame-src about: data:";
+let policyId = 2 ** 30;
+
+/** A full snapshot (rrweb type 2) with the policy as the first element of its head. */
+function withPolicy(event: unknown): unknown {
+  const record = event as { type?: number; data?: { node?: unknown } };
+  if (record?.type !== 2 || !record.data?.node) return event;
+  type Node = { type?: number; tagName?: string; childNodes?: Node[] };
+  const find = (node: Node, tag: string): Node | undefined => {
+    if (node.tagName?.toLowerCase() === tag) return node;
+    for (const child of node.childNodes ?? []) {
+      const found = find(child, tag);
+      if (found) return found;
+    }
+    return undefined;
+  };
+  const head = find(record.data.node as Node, 'head');
+  if (!head) return event;
+  const meta = { type: 2, tagName: 'meta', attributes: { 'http-equiv': 'Content-Security-Policy', content: OFFLINE_POLICY }, childNodes: [], id: policyId++ };
+  head.childNodes = [meta, ...(head.childNodes ?? [])];
+  return event;
 }
