@@ -225,9 +225,7 @@ pub fn verify(
 fn forms(private: &[String]) -> Vec<String> {
     let mut all: Vec<String> = private
         .iter()
-        // A value of a few characters ("3000", "a") is also in the base URL and the verdict:
-        // replacing it everywhere would leave the answer unreadable, and it reveals little.
-        .filter(|v| v.chars().count() >= MIN_SCRUBBED_CHARS)
+        .filter(|v| !v.is_empty())
         .flat_map(|v| {
             let json = serde_json::to_string(v).expect("strings serialize");
             let inner = json[1..json.len() - 1].to_string();
@@ -248,8 +246,6 @@ fn forms(private: &[String]) -> Vec<String> {
     all
 }
 
-const MIN_SCRUBBED_CHARS: usize = 4;
-
 /// `text` percent-encoded as JavaScript's encodeURIComponent does, leaving `keep` as it is too.
 fn percent(text: &str, keep: &str) -> String {
     let mut out = String::new();
@@ -266,12 +262,16 @@ fn percent(text: &str, keep: &str) -> String {
     out
 }
 
-/// Each string in the answer, scrubbed.
+/// Each string in the answer, scrubbed; short values too (a PIN is short). Lens's own fields stay
+/// as they are, so a value such as "3000" never makes the base URL or the verdict unreadable.
 fn scrub_value(value: &mut Value, private: &[String]) {
     match value {
         Value::String(text) => *text = scrub(text, private),
         Value::Array(items) => items.iter_mut().for_each(|v| scrub_value(v, private)),
-        Value::Object(map) => map.values_mut().for_each(|v| scrub_value(v, private)),
+        Value::Object(map) => map
+            .iter_mut()
+            .filter(|(key, _)| !matches!(key.as_str(), "baseUrl" | "verdict" | "project"))
+            .for_each(|(_, v)| scrub_value(v, private)),
         _ => {}
     }
 }
@@ -497,13 +497,14 @@ mod tests {
         scrub_value(&mut answer, &private);
         let text = answer.to_string();
         assert!(!text.contains("4242"), "{text}");
-        // Short values stay: the answer must stay readable.
-        let private = forms(&["abc".into()]);
-        let mut answer = json!({ "baseUrl": "http://abc.test", "verdict": "abc" });
+        // Short values go too, but Lens's own fields stay readable.
+        let private = forms(&["123".into()]);
+        let mut answer =
+            json!({ "baseUrl": "http://x.test:123", "verdict": "123", "errors": ["pin 123"] });
         scrub_value(&mut answer, &private);
         assert_eq!(
             answer,
-            json!({ "baseUrl": "http://abc.test", "verdict": "abc" })
+            json!({ "baseUrl": "http://x.test:123", "verdict": "123", "errors": ["pin [PRIVATE]"] })
         );
         assert_eq!(
             without_queries("GET https://a.test/x?id=REDACTED failed"),
