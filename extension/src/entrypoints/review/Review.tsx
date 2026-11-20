@@ -60,6 +60,27 @@ export function Review({ observation: id }: { observation: number }) {
   const [filedTask, setFiledTask] = useState<string | null>(null);
   const handoff = useHandoff(client, siteOf(review?.items[0]?.pageUrl ?? captures[0]?.pageUrl));
 
+  // A filing cut short (the page closed, the network went) belongs to its frozen review: after a
+  // reload the page shows that review again, so filing again finishes the same submission.
+  const restoreUnfinished = useCallback(
+    async (revision: number) => {
+      const all = await client.request({ method: 'listReviews' }).catch(() => []);
+      // Newest first: only the latest filed review of these notes counts.
+      for (const summary of all.filter((r) => r.observation === id && r.revision === revision)) {
+        const earlier = await client.request({ method: 'getFiling', params: { review: summary.id } }).catch(() => null);
+        if (!earlier) continue;
+        if (earlier.taskUrl && earlier.missingFiles === 0) return;
+        const frozen = await client.request({ method: 'getReview', params: { review: summary.id } }).catch(() => null);
+        if (!frozen) return;
+        setReview((current) => current ?? frozen);
+        setFiling((current) => current ?? earlier);
+        setNotice('An earlier filing of this review did not finish. File again to finish it: VibeQ gets no second task.');
+        return;
+      }
+    },
+    [client, id],
+  );
+
   // Until the app answers, the page tries again every few seconds (the banner says why).
   const [loadAttempt, setLoadAttempt] = useState(0);
   useEffect(() => {
@@ -78,6 +99,7 @@ export function Review({ observation: id }: { observation: number }) {
         setObservation(found);
         setCaptures(list);
         setVoice(notes);
+        void restoreUnfinished(found.revision);
       })
       .catch((error: Error) => {
         setProblem(error.message);

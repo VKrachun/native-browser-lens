@@ -77,7 +77,95 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE captures ADD COLUMN edits TEXT NOT NULL DEFAULT '{}';",
     "ALTER TABLE captures ADD COLUMN shots TEXT NOT NULL DEFAULT '[]';",
     "ALTER TABLE observations ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';",
+    // AUTOINCREMENT: an ID is never given again after a delete, so a page, an agent or a folder
+    // that still holds an old ID never reaches a new record. SQLite cannot add it in place: each
+    // table is rebuilt with the same columns (foreign keys are off while a migration runs).
+    "CREATE TABLE observations_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        url TEXT,
+        created_at INTEGER NOT NULL,
+        notes TEXT NOT NULL DEFAULT '',
+        revision INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL DEFAULT 0,
+        tags TEXT NOT NULL DEFAULT '[]'
+    );
+    INSERT INTO observations_new SELECT id, title, url, created_at, notes, revision, updated_at, tags
+        FROM observations;
+    DROP TABLE observations;
+    ALTER TABLE observations_new RENAME TO observations;
+    CREATE TABLE captures_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        observation_id INTEGER NOT NULL REFERENCES observations(id) ON DELETE CASCADE,
+        created_at INTEGER NOT NULL,
+        page_url TEXT NOT NULL,
+        page_title TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        screenshot_sha256 TEXT NOT NULL,
+        screenshot_size INTEGER NOT NULL,
+        evidence_sha256 TEXT NOT NULL,
+        evidence_size INTEGER NOT NULL,
+        event_count INTEGER NOT NULL,
+        gap_count INTEGER NOT NULL,
+        annotations TEXT NOT NULL DEFAULT '[]',
+        recording_sha256 TEXT,
+        recording_size INTEGER,
+        kind TEXT NOT NULL DEFAULT 'moment',
+        started_at INTEGER NOT NULL DEFAULT 0,
+        edits TEXT NOT NULL DEFAULT '{}',
+        shots TEXT NOT NULL DEFAULT '[]'
+    );
+    INSERT INTO captures_new SELECT id, observation_id, created_at, page_url, page_title, mode,
+        screenshot_sha256, screenshot_size, evidence_sha256, evidence_size, event_count, gap_count,
+        annotations, recording_sha256, recording_size, kind, started_at, edits, shots FROM captures;
+    DROP TABLE captures;
+    ALTER TABLE captures_new RENAME TO captures;
+    CREATE INDEX captures_by_observation ON captures(observation_id);
+    CREATE TABLE reviews_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        observation_id INTEGER NOT NULL REFERENCES observations(id) ON DELETE CASCADE,
+        body TEXT NOT NULL
+    );
+    INSERT INTO reviews_new SELECT id, observation_id, body FROM reviews;
+    DROP TABLE reviews;
+    ALTER TABLE reviews_new RENAME TO reviews;
+    CREATE TABLE voice_notes_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        observation_id INTEGER NOT NULL REFERENCES observations(id) ON DELETE CASCADE,
+        started_at INTEGER NOT NULL,
+        duration_ms INTEGER NOT NULL,
+        audio_sha256 TEXT NOT NULL,
+        audio_size INTEGER NOT NULL,
+        state TEXT NOT NULL,
+        language TEXT,
+        segments TEXT NOT NULL DEFAULT '[]',
+        detail TEXT
+    );
+    INSERT INTO voice_notes_new SELECT id, observation_id, started_at, duration_ms, audio_sha256,
+        audio_size, state, language, segments, detail FROM voice_notes;
+    DROP TABLE voice_notes;
+    ALTER TABLE voice_notes_new RENAME TO voice_notes;
+    CREATE INDEX voice_notes_by_observation ON voice_notes(observation_id);",
 ];
+
+/// A stored body this Lens cannot read (a newer Lens wrote it, say) is left out, and says so in
+/// the log, instead of vanishing without a word.
+fn unreadable<T>(what: &str, id: i64, parsed: serde_json::Result<T>) -> Option<T> {
+    parsed
+        .map_err(|e| eprintln!("lens: a stored {what} ({id}) is not readable and is left out: {e}"))
+        .ok()
+}
+
+/// An observation's filings so far.
+#[derive(Debug, PartialEq)]
+pub struct Filed {
+    /// The highest VibeQ revision sent: the next filing goes above it.
+    pub vibeq_revision: u64,
+    /// The newest notes revision filed: an older review would undo it.
+    pub reviewed_revision: u32,
+    /// The VibeQ project of the first filing: amendments stay in it (VibeQ keys a task by it).
+    pub project_id: String,
+}
 
 /// One task of a split: its title, notes and tags, and edits by original capture ID.
 pub struct TaskPlan {
@@ -291,13 +379,24 @@ impl Store {
                 MIGRATIONS.len()
             )));
         }
-        for (index, sql) in MIGRATIONS.iter().enumerate().skip(current) {
-            let tx = self.db.transaction()?;
-            tx.execute_batch(sql)?;
-            tx.pragma_update(None, "user_version", index as i64 + 1)?;
-            tx.commit()?;
+        if current == MIGRATIONS.len() {
+            return Ok(());
         }
-        Ok(())
+        // A rebuilt table is dropped and renamed: with foreign keys on, the drop would cascade
+        // and delete every child row. SQLite ignores this pragma inside a transaction.
+        self.db.pragma_update(None, "foreign_keys", "OFF")?;
+        let result = (|| {
+            for (index, sql) in MIGRATIONS.iter().enumerate().skip(current) {
+                let tx = self.db.transaction()?;
+                // A rebuild copies rows as they are: it cannot break a link that was whole.
+                tx.execute_batch(sql)?;
+                tx.pragma_update(None, "user_version", index as i64 + 1)?;
+                tx.commit()?;
+            }
+            Ok(())
+        })();
+        self.db.pragma_update(None, "foreign_keys", "ON")?;
+        result
     }
 
     pub fn create_observation(
@@ -632,7 +731,7 @@ impl Store {
         let mut statement = self.db.prepare("SELECT body FROM reviews WHERE id = ?1")?;
         let mut rows = statement.query_map([id], |row| row.get::<_, String>(0))?;
         Ok(match rows.next().transpose()? {
-            Some(body) => serde_json::from_str(&body).ok(),
+            Some(body) => unreadable("review", id, serde_json::from_str(&body)),
             None => None,
         })
     }
@@ -645,7 +744,7 @@ impl Store {
         let mut reviews = Vec::new();
         let bodies: Vec<String> = bodies.collect::<rusqlite::Result<_>>()?;
         for body in bodies {
-            if let Ok(review) = serde_json::from_str::<Review>(&body) {
+            if let Some(review) = unreadable::<Review>("review", 0, serde_json::from_str(&body)) {
                 let receipt = self.filing(review.id)?.and_then(|a| a.receipt);
                 reviews.push(ReviewSummary {
                     id: review.id,
@@ -681,7 +780,7 @@ impl Store {
         let mut clients = Vec::new();
         for row in rows {
             let (body, last_seen) = row?;
-            if let Ok(client) = serde_json::from_str(&body) {
+            if let Some(client) = unreadable("browser", 0, serde_json::from_str(&body)) {
                 clients.push(ClientSeen { client, last_seen });
             }
         }
@@ -754,19 +853,31 @@ impl Store {
         Ok(())
     }
 
-    /// The highest VibeQ revision this observation has a filing for, finished or not.
-    pub fn filed_revision(&self, observation: i64) -> rusqlite::Result<Option<u64>> {
-        let mut statement = self
-            .db
-            .prepare("SELECT body FROM filings WHERE observation_id = ?1")?;
-        let bodies = statement.query_map([observation], |row| row.get::<_, String>(0))?;
-        let mut highest = None;
-        for body in bodies {
-            if let Ok(attempt) = serde_json::from_str::<Attempt>(&body?) {
-                highest = highest.max(Some(attempt.submission.revision));
-            }
+    /// What this observation's filings, finished or not, decide for the next one.
+    pub fn filed(&self, observation: i64) -> rusqlite::Result<Option<Filed>> {
+        let mut statement = self.db.prepare(
+            "SELECT f.body, json_extract(r.body, '$.revision') FROM filings f
+             JOIN reviews r ON r.id = f.review_id
+             WHERE f.observation_id = ?1 ORDER BY f.review_id",
+        )?;
+        let rows = statement.query_map([observation], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<u32>>(1)?))
+        })?;
+        let mut found: Option<Filed> = None;
+        for row in rows {
+            let (body, reviewed) = row?;
+            let Ok(attempt) = serde_json::from_str::<Attempt>(&body) else {
+                continue;
+            };
+            let filed = found.get_or_insert_with(|| Filed {
+                vibeq_revision: 0,
+                reviewed_revision: 0,
+                project_id: attempt.submission.project_id.clone(),
+            });
+            filed.vibeq_revision = filed.vibeq_revision.max(attempt.submission.revision);
+            filed.reviewed_revision = filed.reviewed_revision.max(reviewed.unwrap_or(0));
         }
-        Ok(highest)
+        Ok(found)
     }
 
     pub fn list_projects(&self) -> rusqlite::Result<Vec<Project>> {
@@ -1120,6 +1231,95 @@ mod tests {
         assert_eq!(store.mp4_voice(&old, true).unwrap().len(), 1);
         store.delete_voice_note(first.id).unwrap();
         assert!(store.mp4_voice(&old, true).unwrap().is_empty());
+    }
+
+    #[test]
+    fn filed_names_the_first_project_and_the_highest_revisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("lens.sqlite")).unwrap();
+        let observation = store.create_observation("a", None, 1).unwrap().id;
+        assert_eq!(store.filed(observation).unwrap(), None);
+        for (review, revision, vibeq, project) in [(10, 2, 3, "first"), (11, 2, 4, "moved")] {
+            store
+                .db
+                .execute(
+                    "INSERT INTO reviews (id, observation_id, body) VALUES (?1, ?2, ?3)",
+                    params![review, observation, format!(r#"{{"revision":{revision}}}"#)],
+                )
+                .unwrap();
+            let attempt: Attempt = serde_json::from_value(serde_json::json!({
+                "review": review, "observation": observation, "endpoint": "https://v.test",
+                "folder": "/f", "memberId": null, "receipt": null,
+                "submission": {
+                    "submissionId": "s", "observationId": "o", "revision": vibeq,
+                    "projectId": project, "title": "t", "markdown": "m", "reviewed": true,
+                    "evidenceManifest": []
+                }
+            }))
+            .unwrap();
+            store.save_filing(&attempt).unwrap();
+        }
+        assert_eq!(
+            store.filed(observation).unwrap(),
+            Some(Filed {
+                vibeq_revision: 4,
+                reviewed_revision: 2,
+                project_id: "first".into()
+            })
+        );
+    }
+
+    #[test]
+    fn ids_are_never_given_again_and_old_rows_survive_the_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lens.sqlite");
+        // A notebook from before AUTOINCREMENT, with a review, a filing and a voice note.
+        {
+            let db = Connection::open(&path).unwrap();
+            for sql in &MIGRATIONS[..MIGRATIONS.len() - 1] {
+                db.execute_batch(sql).unwrap();
+            }
+            db.pragma_update(None, "user_version", (MIGRATIONS.len() - 1) as i64)
+                .unwrap();
+            db.execute_batch(
+                "INSERT INTO observations (id, title, created_at, notes) VALUES (1, 'a', 1, 'n'), (2, 'b', 2, '');
+                 INSERT INTO captures (id, observation_id, created_at, page_url, page_title, mode,
+                     screenshot_sha256, screenshot_size, evidence_sha256, evidence_size, event_count, gap_count)
+                     VALUES (5, 2, 3, 'https://a.test/', 'A', 'deep', 's', 1, 'e', 1, 0, 0);
+                 INSERT INTO reviews (id, observation_id, body) VALUES (4, 2, '{}');
+                 INSERT INTO filings (review_id, observation_id, body) VALUES (4, 2, '{}');
+                 INSERT INTO voice_notes (id, observation_id, started_at, duration_ms, audio_sha256, audio_size, state)
+                     VALUES (6, 2, 0, 1, 'w', 1, 'done');",
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let count = |table: &str| store.count(table).unwrap();
+        assert_eq!(
+            [
+                count("observations"),
+                count("captures"),
+                count("reviews"),
+                count("filings"),
+                count("voice_notes")
+            ],
+            [2, 1, 1, 1, 1],
+            "every row stays"
+        );
+        assert!(store.get_observation(1).unwrap().unwrap().notes == "n");
+        // Foreign keys hold again: deleting an observation takes its children.
+        assert!(store.delete_observation(2).unwrap());
+        assert_eq!(
+            [
+                count("captures"),
+                count("reviews"),
+                count("filings"),
+                count("voice_notes")
+            ],
+            [0, 0, 0, 0]
+        );
+        // The highest ID was 2 and is gone: the next observation still gets a new one.
+        assert_eq!(store.create_observation("c", None, 3).unwrap().id, 3);
     }
 
     #[test]

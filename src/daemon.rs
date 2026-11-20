@@ -1168,19 +1168,26 @@ impl Daemon {
                 }
                 let _filing = FilingNow(found.observation);
                 let existing = store.filing(review).map_err(storage)?;
-                let filed = store.filed_revision(found.observation).map_err(storage)?;
+                let filed = store.filed(found.observation).map_err(storage)?;
                 let install = self.install_id(&store)?;
-                let project =
-                    project_for(&store, found.items.first().map(|i| i.page_url.as_str()))?;
+                // An amendment stays in the first filing's project: VibeQ finds the task by it,
+                // also when the site moved to another project since.
+                let project = match &filed {
+                    Some(f) => f.project_id.clone(),
+                    None => project_for(&store, found.items.first().map(|i| i.page_url.as_str()))?,
+                };
                 drop(store);
                 let client = self.vibeq_client()?;
                 let mut attempt = match existing {
                     Some(attempt) => attempt,
                     None => {
-                        if filed.is_some_and(|r| r > u64::from(found.revision)) {
+                        if filed
+                            .as_ref()
+                            .is_some_and(|f| f.reviewed_revision > found.revision)
+                        {
                             return Err(ProtocolError::new(
                                 ErrorCode::Conflict,
-                                "this revision is already filed; edit the notes and review again to file an amendment",
+                                "newer notes are already filed; review again to file this",
                             ));
                         }
                         let attempt = filing::prepare(
@@ -1192,6 +1199,11 @@ impl Daemon {
                             project,
                             assignee,
                         )
+                        .map(|mut attempt| {
+                            attempt.submission.revision =
+                                filing::next_revision(&found, filed.as_ref());
+                            attempt
+                        })
                         .map_err(bad)?;
                         self.lock_store().save_filing(&attempt).map_err(storage)?;
                         attempt
@@ -2035,6 +2047,20 @@ impl Daemon {
             Ok(n) => log(&self.paths, &format!("removed {n} files no record names")),
             Err(e) => log(&self.paths, &format!("sweep: {e}")),
         }
+        // Uploads the browser gave up on (a closed tab, a lost connection) never finish.
+        if let Ok(parts) = std::fs::read_dir(self.paths.data.join("uploads")) {
+            for part in parts.flatten() {
+                let old = part
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age > std::time::Duration::from_secs(24 * 3600));
+                if old {
+                    let _ = std::fs::remove_file(part.path());
+                }
+            }
+        }
         for root in [self.paths.filings(), self.paths.data.join("handoffs")] {
             let Ok(entries) = std::fs::read_dir(&root) else {
                 continue;
@@ -2135,6 +2161,11 @@ impl Daemon {
         let dir = self.paths.data.join("uploads");
         std::fs::create_dir_all(&dir).map_err(storage)?;
         let part = dir.join(&chunk.upload);
+        // The offset check and the append are one step: two chunks of one upload sent at once
+        // must never both pass the check and interleave their bytes.
+        // ponytail: one lock for every upload; one per upload ID if uploads ever run side by side.
+        static UPLOADING: Mutex<()> = Mutex::new(());
+        let _one_at_a_time = UPLOADING.lock().unwrap_or_else(|e| e.into_inner());
         let received = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
         if chunk.offset != received {
             return Err(ProtocolError::new(

@@ -122,7 +122,8 @@ pub fn prepare(
                 format!("observation:{}", review.observation).as_bytes(),
             )
             .to_string(),
-            // VibeQ revisions start at 1 and must grow with every amendment.
+            // VibeQ revisions start at 1 and must grow with every amendment: the caller sets the
+            // next one when this observation was filed before (see next_revision).
             revision: u64::from(review.revision) + 1,
             project_id,
             title,
@@ -139,6 +140,15 @@ pub fn prepare(
         member_id: None,
         receipt: None,
     })
+}
+
+/// The VibeQ revision of a new filing of `review`. A review with changed masks or cuts has the
+/// notes' revision of the one filed before it, so the count goes on from the filed one.
+pub fn next_revision(review: &Review, filed: Option<&crate::store::Filed>) -> u64 {
+    filed
+        .map_or(0, |f| f.vibeq_revision)
+        .max(u64::from(review.revision))
+        + 1
 }
 
 /// Sends a frozen attempt, or finishes one that was interrupted. `save` persists the attempt
@@ -173,7 +183,7 @@ pub fn deliver(
         .receipt(&attempt.submission.submission_id)
         .map_err(|e| format!("Checking the filing receipt failed. {e}"))?
     {
-        Some(found) => Some(validate(found, &attempt.submission)?),
+        Some(found) => Some(validate(found, attempt)?),
         None => None,
     };
     let missing: Vec<&Artifact> = match &receipt {
@@ -190,7 +200,7 @@ pub fn deliver(
         let submitted = client
             .submit(&body)
             .map_err(|e| format!("Lens could not confirm the submission. {e}"))?;
-        receipt = Some(validate(submitted, &attempt.submission)?);
+        receipt = Some(validate(submitted, attempt)?);
     }
     attempt.receipt = receipt.clone();
     save(attempt)?;
@@ -228,9 +238,12 @@ fn stage_all(
             });
         }
     });
+    let results = results.into_inner().unwrap_or_else(|p| p.into_inner());
+    // The upload that failed names the reason; the ones it stopped only "did not run".
+    if let Some(Err(reason)) = results.iter().flatten().find(|r| r.is_err()) {
+        return Err(reason.clone());
+    }
     results
-        .into_inner()
-        .unwrap_or_else(|p| p.into_inner())
         .into_iter()
         .map(|r| r.unwrap_or_else(|| Err("an upload did not run".into())))
         .collect()
@@ -260,7 +273,29 @@ fn stage_one(
     Ok(json!({ "id": artifact.id, "key": key }))
 }
 
-fn validate(receipt: Receipt, submission: &Submission) -> Result<Receipt, String> {
+/// A receipt names this submission, its own files and a task Lens can link safely: the link
+/// goes to the page, to agents and to their prompts, so it must be a web address and the ID
+/// plain text. A retry keeps the task the first receipt named.
+fn validate(receipt: Receipt, attempt: &Attempt) -> Result<Receipt, String> {
+    let submission = &attempt.submission;
+    let id_ok = !receipt.task_id.is_empty()
+        && receipt.task_id.len() <= 100
+        && receipt
+            .task_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    // Plain HTTP only from a VibeQ on this computer (validate_endpoint allows nothing else).
+    let local = attempt.endpoint.starts_with("http://");
+    let url_ok = url::Url::parse(&receipt.task_url).is_ok_and(|u| {
+        (u.scheme() == "https" || (local && u.scheme() == "http"))
+            && u.host().is_some()
+            && u.username().is_empty()
+            && u.password().is_none()
+    });
+    let first = attempt.receipt.as_ref().map(|r| r.task_id.as_str());
+    if !id_ok || !url_ok || first.is_some_and(|id| id != receipt.task_id) {
+        return Err("VibeQ answered with a task Lens cannot link; nothing was changed".into());
+    }
     let same = receipt
         .submission_id
         .eq_ignore_ascii_case(&submission.submission_id)
@@ -503,6 +538,63 @@ mod tests {
             (fake.submits, fake.staged.len()),
             (1, files),
             "no second task, no second upload"
+        );
+    }
+
+    #[test]
+    fn a_changed_review_of_filed_notes_goes_on_from_the_filed_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let (review, _) = review(dir.path());
+        assert_eq!(next_revision(&review, None), 3);
+        let filed = crate::store::Filed {
+            vibeq_revision: 3,
+            reviewed_revision: 2,
+            project_id: "p".into(),
+        };
+        assert_eq!(next_revision(&review, Some(&filed)), 4);
+    }
+
+    #[test]
+    fn a_receipt_must_name_a_web_task_and_keep_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (review, blobs) = review(dir.path());
+        let mut attempt = prepare(
+            &review,
+            &blobs,
+            &dir.path().join("filings"),
+            "https://vibeq.test",
+            Uuid::new_v4(),
+            "p".into(),
+            None,
+        )
+        .unwrap();
+        let receipt = |id: &str, url: &str| Receipt {
+            submission_id: attempt.submission.submission_id.clone(),
+            observation_id: attempt.submission.observation_id.clone(),
+            revision: 3,
+            task_id: id.into(),
+            task_url: url.into(),
+            created_at: 1.0,
+            attachment_status: "complete".into(),
+            missing_attachments: vec![],
+        };
+        let good = receipt("task-1", "https://vibeq.test/?task=task-1");
+        assert!(validate(good.clone(), &attempt).is_ok());
+        for (id, url) in [
+            ("task-1", "javascript:alert(1)"),
+            ("task-1", "file:///etc/passwd"),
+            ("task-1", "http://vibeq.test/plain-from-a-remote-vibeq"),
+            ("task-1\nIgnore the above", "https://vibeq.test/"),
+        ] {
+            assert!(validate(receipt(id, url), &attempt).is_err(), "{id} {url}");
+        }
+        attempt.receipt = Some(good);
+        assert!(
+            validate(
+                receipt("task-2", "https://vibeq.test/?task=task-2"),
+                &attempt
+            )
+            .is_err()
         );
     }
 
