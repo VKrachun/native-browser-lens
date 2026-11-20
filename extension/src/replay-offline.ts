@@ -102,8 +102,14 @@ export function offlineEvents<T>(events: T[]): T[] {
     if (snapshot && typeof node.id === 'number') tags.set(node.id, (node.tagName as string).toLowerCase());
     const tag = snapshot ? (node.tagName as string).toLowerCase() : typeof node.id === 'number' ? tags.get(node.id) : undefined;
     const text = node.type === 3 && typeof node.textContent === 'string';
-    const style = node.isStyle === true || parent === 'style';
-    if (text && typeof node.id === 'number' && !style) words.add(node.id);
+    // Words only under a known parent that is not a style; a move into a style, or under a parent
+    // not seen, makes the text CSS again (fail closed).
+    const plain = node.isStyle !== true && parent !== undefined && parent !== 'style';
+    if (text && typeof node.id === 'number') {
+      if (plain) words.add(node.id);
+      else words.delete(node.id);
+    }
+    if (Array.isArray(node.removes)) for (const gone of node.removes as { id?: unknown }[]) if (typeof gone?.id === 'number') words.delete(gone.id);
     // An added node names its parent by id; a text change names only its own node.
     const inside = typeof node.parentId === 'number' ? tags.get(node.parentId) : snapshot ? tag : parent;
     const out: Record<string, unknown> = {};
@@ -112,7 +118,7 @@ export function offlineEvents<T>(events: T[]): T[] {
         out[key] = offlineAttributes(tag, inner as Attributes, snapshot);
       } else if (key === 'fontSource' && typeof inner === 'string' && REMOTE.test(inner)) {
         out[key] = 'local("none")';
-      } else if (key === 'textContent' && text && !style) {
+      } else if (key === 'textContent' && text && plain) {
         out[key] = inner;
       } else if (key === 'value' && typeof inner === 'string' && typeof node.id === 'number' && !snapshot && words.has(node.id) && !('index' in node)) {
         out[key] = inner;

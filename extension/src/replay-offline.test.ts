@@ -100,7 +100,7 @@ it('gives every full snapshot the offline policy and drops srcdoc', () => {
 it('keeps quoted text outside image-set and makes a head when there is none', () => {
   // Page words stay as recorded; CSS loses every quoted address, also in an escaped image-set.
   const [, words] = offlineEvents([
-    { type: 3, data: { source: 0, adds: [{ parentId: 1, node: { type: 3, id: 5, textContent: 'url(https://x.test) "https://x.test"' } }] } },
+    { type: 3, data: { source: 0, adds: [{ parentId: 0, node: { type: 2, id: 1, tagName: 'p', childNodes: [] } }, { parentId: 1, node: { type: 3, id: 5, textContent: 'url(https://x.test) "https://x.test"' } }] } },
     { type: 3, data: { source: 0, texts: [{ id: 5, value: 'see "https://x.test" here' }] } },
   ]) as { data: { texts: { value: string }[] } }[];
   expect(words!.data.texts[0]!.value).toBe('see "https://x.test" here');
@@ -117,4 +117,13 @@ it('keeps quoted text outside image-set and makes a head when there is none', ()
   const bare = { type: 2, data: { node: { type: 0, childNodes: [{ type: 2, tagName: 'body', childNodes: [] }] } } };
   const emptied = (offlineEvents([bare]) as typeof bare[])[0]!;
   expect(JSON.stringify(emptied)).not.toContain('body');
+});
+
+it('reads text as CSS again once it moves into a style or is removed', () => {
+  const [, , moved] = offlineEvents([
+    { type: 3, data: { source: 0, adds: [{ parentId: 1, node: { type: 2, id: 2, tagName: 'style', childNodes: [] } }, { parentId: 1, node: { type: 3, id: 5, textContent: 'hello' } }] } },
+    { type: 3, data: { source: 0, removes: [{ parentId: 1, id: 5 }], adds: [{ parentId: 2, node: { type: 3, id: 5, textContent: 'b{background:url(https://x.test/a.png)}' } }] } },
+    { type: 3, data: { source: 0, texts: [{ id: 5, value: 'b{background:url(https://x.test/b.png)}' }] } },
+  ]) as { data: { texts: { value: string }[] } }[];
+  expect(moved!.data.texts[0]!.value).toBe('b{background:none}');
 });
