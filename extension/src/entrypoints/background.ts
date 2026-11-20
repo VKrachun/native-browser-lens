@@ -1,6 +1,7 @@
 import { ActionLog, EvidenceBuffer, ReplayBuffer, ShotBuffer, WINDOW_MS } from '@/collector/buffer';
 import { DeepCollector } from '@/collector/deep';
 import { LimitedCollector, visibleShot } from '@/collector/limited';
+import { maskShot, privateRects } from '@/collector/shot-mask';
 import { sanitize, sanitizeText, sanitizeUrl } from '@/collector/sanitize';
 import { LensClient } from '@/lens-client';
 import { clientInfo } from '@/identity';
@@ -35,23 +36,34 @@ export default defineBackground(() => {
   const SHOT_STEPS = new Set(['click', 'press', 'select', 'check', 'uncheck']);
   function scheduleShot(tabId: number) {
     if (deep && !deep.isAttached(tabId)) return;
+    if (!collecting(tabId)) return;
     clearTimeout(shotTimers.get(tabId));
     shotTimers.set(
       tabId,
       setTimeout(() => {
         shotTimers.delete(tabId);
         const at = Date.now();
-        void (deep ? deep.shot(tabId) : visibleShot(tabId)).then(
-          (data) => data && buffer.mode(tabId) !== undefined && shots.add(tabId, at, data),
-        );
+        void (async () => {
+          // Where the private fields are, just before the shot: without that, no shot.
+          const found = await browser.scripting
+            .executeScript({ target: { tabId }, func: privateRects })
+            .then((results) => results[0]?.result ?? null, () => null);
+          if (!found) return;
+          const raw = await (deep ? deep.shot(tabId) : visibleShot(tabId));
+          const data = raw && (await maskShot(raw, found));
+          if (data && collecting(tabId)) shots.add(tabId, at, data);
+        })();
       }, SHOT_DELAY_MS),
     );
   }
   /** Record mode: the tabs with a running session, and when each started. */
   const sessions = new Map<number, number>();
+  /** Recording tabs on a site outside the project: the recording waits, nothing is collected. */
+  const offProject = new Set<number>();
+  const collecting = (tabId: number) => buffer.mode(tabId) !== undefined && !offProject.has(tabId);
   const urls = new Map<number, string>();
   const deep = DeepCollector.available() ? new DeepCollector(buffer, (tabId) => urls.get(tabId)) : undefined;
-  if (!deep) new LimitedCollector(buffer, (tabId) => buffer.mode(tabId) !== undefined).listen();
+  if (!deep) new LimitedCollector(buffer, collecting).listen();
 
   let projects: Project[] = [];
   let paused = false;
@@ -87,6 +99,8 @@ export default defineBackground(() => {
       // A recording keeps what it has when the tab passes through another site (a sign-in or
       // payment redirect); nothing is collected there, and collection resumes on the way back.
       if (sessions.has(tabId) && !paused) {
+        offProject.add(tabId);
+        clearTimeout(shotTimers.get(tabId));
         buffer.gap(tabId, 'navigation', 'The tab left the project sites: nothing was recorded there');
         await deep?.detach(tabId);
         return;
@@ -95,6 +109,7 @@ export default defineBackground(() => {
       await deep?.detach(tabId);
       return;
     }
+    offProject.delete(tabId);
     if (buffer.mode(tabId) !== undefined && (!deep || deep.isAttached(tabId) || deep.isDeclined(tabId))) return;
     void injectRecorder(tabId);
     if (!deep) return buffer.start(tabId, 'limited');
@@ -118,6 +133,7 @@ export default defineBackground(() => {
     shots.clear(tabId);
     clearTimeout(shotTimers.get(tabId));
     sessions.delete(tabId);
+    offProject.delete(tabId);
     keptVoice.delete(tabId);
     void endMicrophone(tabId, 'mic-cancel');
   }
@@ -334,7 +350,9 @@ export default defineBackground(() => {
   browser.runtime.onMessage.addListener((message: BackgroundRequest | RecorderMessage, sender, reply) => {
     if (message.kind === 'lens-action' || message.kind === 'lens-replay') {
       const tabId = sender.tab?.id;
-      if (tabId === undefined || buffer.mode(tabId) === undefined) return;
+      // Only from a page of an enabled project: an old document still sending after the tab left
+      // the project sites is ignored.
+      if (tabId === undefined || !collecting(tabId) || !projectFor(originOf(sender.url ?? sender.tab?.url))) return;
       if (message.kind === 'lens-action') {
         actions.add(tabId, message.action);
         if (SHOT_STEPS.has(message.action.kind)) scheduleShot(tabId);
@@ -368,16 +386,18 @@ export default defineBackground(() => {
       // a recording keeps going until its Stop.
       const project = projectFor(originOf(change.url));
       const moved = project?.id !== projectFor(originOf(urls.get(tabId)))?.id && !sessions.has(tabId);
-      if ((project && !moved) || sessions.has(tabId)) {
+      // Off the project sites a recording keeps going without collecting (syncNow notes a gap):
+      // their URL is not recorded either.
+      if (project && (!moved || sessions.has(tabId))) {
         buffer.record(tabId, 'navigation', { url: change.url });
         const url = sanitizeUrl(change.url);
         actions.add(tabId, { timestamp: Date.now(), kind: 'navigate', url, target: null, value: null, masked: false });
-      } else stop(tabId);
+      } else if (!sessions.has(tabId)) stop(tabId);
     }
     if (change.url || change.status === 'complete') {
       void sync(tabId, tab.url).then(async () => {
         // A new document has no recorder yet; sync starts one only when collection begins.
-        if (change.status === 'complete' && buffer.mode(tabId) !== undefined) await injectRecorder(tabId);
+        if (change.status === 'complete' && collecting(tabId)) await injectRecorder(tabId);
         await broadcast({ kind: 'tabChanged', tabId });
       });
     }

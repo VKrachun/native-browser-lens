@@ -12,14 +12,25 @@ use std::time::Duration;
 const RUN: Duration = Duration::from_secs(240);
 
 /// What the test notes while it runs, and where it writes it.
-const WATCH: &str = "
+/// The dev server's URLs and console text go to the agent: query values, credentials and
+/// secret-looking text are redacted first (failures compare by path), and the lists are bounded.
+const WATCH: &str = r#"
 const lensSeen = { requests: [] as { status: number; method: string; url: string }[], console: [] as string[] };
+const lensUrl = (u: string) => { try { const x = new URL(u); x.username = ''; x.password = ''; x.hash = ''; for (const k of [...x.searchParams.keys()]) x.searchParams.set(k, 'REDACTED'); return x.toString(); } catch { return '[unreadable URL]'; } };
+const lensText = (t: string) => t.slice(0, 1000)
+  .replace(/\b(Bearer|Basic)\s+\S+/gi, '$1 [REDACTED]')
+  .replace(/((?:authorization|cookie|password|passwd|secret|token|api[_-]?key|session[_-]?id|csrf|xsrf)["']?\s{0,8}[:=]\s{0,8})[^\s,;}]+/gi, '$1[REDACTED]')
+  .replace(/\beyJ[\w-]+\.[\w-]+\.[\w-]+/g, '[REDACTED]')
+  .replace(/\b(?:\d[ -]?){12,18}\d\b/g, '[REDACTED]')
+  .replace(/https?:\/\/[^\s"')]+/g, (u) => lensUrl(u));
+const lensRequest = (status: number, method: string, url: string) => { if (lensSeen.requests.length < 100) lensSeen.requests.push({ status, method, url: lensUrl(url) }); };
+const lensConsole = (text: string) => { if (lensSeen.console.length < 100) lensSeen.console.push(lensText(text)); };
 test.afterEach(() => writeFileSync(process.env.LENS_VERIFY_OUT ?? 'lens-verify.json', JSON.stringify(lensSeen)));
-";
-const LISTEN: &str = "  page.on('response', (r) => { if (r.status() >= 400) lensSeen.requests.push({ status: r.status(), method: r.request().method(), url: r.url() }); });
-  page.on('requestfailed', (r) => lensSeen.requests.push({ status: 0, method: r.method(), url: r.url() }));
-  page.on('console', (m) => { if (m.type() === 'error') lensSeen.console.push(m.text()); });
-  page.on('pageerror', (e) => lensSeen.console.push(String(e)));
+"#;
+const LISTEN: &str = "  page.on('response', (r) => { if (r.status() >= 400) lensRequest(r.status(), r.request().method(), r.url()); });
+  page.on('requestfailed', (r) => lensRequest(0, r.method(), r.url()));
+  page.on('console', (m) => { if (m.type() === 'error') lensConsole(m.text()); });
+  page.on('pageerror', (e) => lensConsole(String(e)));
 ";
 
 /// The test with the listeners added: a module-level record, written after the test, and the
@@ -171,7 +182,8 @@ fn run(project: &Path, config: &Path, seen: &Path) -> Result<(Value, Value), Str
         .or_else(|| crate::investigate::program("npx"))
         .ok_or("npx is not installed: install Node.js, then @playwright/test in the project")?;
     let (_, out, err) = crate::handoff::bounded(
-        Command::new(npx)
+        Command::new(&npx)
+            .env("PATH", crate::investigate::path_for(&npx))
             .args(["--no-install", "playwright", "test", "--config"])
             .arg(config)
             .current_dir(project)

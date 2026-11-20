@@ -84,8 +84,9 @@ pub fn save(
                 fs::write(&script, include_bytes!("review-video.cjs"))?;
                 let node = crate::investigate::program("node")
                     .ok_or_else(|| io::Error::other("Install Node.js to render MP4 files."))?;
-                let mut command = Command::new(node);
+                let mut command = Command::new(&node);
                 command
+                    .env("PATH", crate::investigate::path_for(&node))
                     .arg(script)
                     .arg(tools)
                     .arg(source)

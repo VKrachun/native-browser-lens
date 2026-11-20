@@ -97,6 +97,40 @@ impl Blobs {
         })
     }
 
+    /// Removes the blobs no record names that are older than `age` (a new blob waits a moment for
+    /// the record that will name it), and partial copies left by a failure. Returns how many went.
+    pub fn sweep(
+        &self,
+        keep: &std::collections::HashSet<String>,
+        age: std::time::Duration,
+    ) -> io::Result<usize> {
+        let mut removed = 0;
+        let Ok(folders) = std::fs::read_dir(&self.root) else {
+            return Ok(0);
+        };
+        for folder in folders.flatten() {
+            let Ok(files) = std::fs::read_dir(folder.path()) else {
+                continue;
+            };
+            for file in files.flatten() {
+                let name = file.file_name().to_string_lossy().into_owned();
+                let old = file
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|elapsed| elapsed > age);
+                let blob = name.len() == 64 && self.path(&name).is_ok();
+                let partial = name.ends_with(".partial");
+                if old && ((blob && !keep.contains(&name)) || partial) {
+                    std::fs::remove_file(file.path())?;
+                    removed += 1;
+                }
+            }
+        }
+        Ok(removed)
+    }
+
     /// Where a blob's file is, for a program that reads it directly.
     pub fn file(&self, sha256: &str) -> io::Result<PathBuf> {
         self.path(sha256)
@@ -124,6 +158,25 @@ impl Blobs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sweep_removes_only_unnamed_old_blobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let blobs = Blobs::new(dir.path().to_path_buf());
+        let kept = blobs.put(b"kept", "text/plain").unwrap();
+        let gone = blobs.put(b"gone", "text/plain").unwrap();
+        let keep = std::collections::HashSet::from([kept.sha256.clone()]);
+        assert_eq!(
+            blobs
+                .sweep(&keep, std::time::Duration::from_secs(3600))
+                .unwrap(),
+            0,
+            "too new"
+        );
+        assert_eq!(blobs.sweep(&keep, std::time::Duration::ZERO).unwrap(), 1);
+        assert!(blobs.read_all(&kept.sha256).is_ok());
+        assert!(blobs.read_all(&gone.sha256).is_err());
+    }
 
     #[test]
     fn stores_once_and_reads_in_chunks() {

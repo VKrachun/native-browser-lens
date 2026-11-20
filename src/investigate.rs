@@ -701,6 +701,7 @@ pub fn program(name: &str) -> Option<PathBuf> {
         ]);
     }
     folders.extend(["/usr/local/bin", "/opt/homebrew/bin"].map(PathBuf::from));
+    folders.extend(version_managers());
     let names: &[String] = &if cfg!(windows) {
         vec![format!("{name}.exe"), format!("{name}.cmd")]
     } else {
@@ -710,6 +711,55 @@ pub fn program(name: &str) -> Option<PathBuf> {
         .iter()
         .flat_map(|f| names.iter().map(move |n| f.join(n)))
         .find(|p| p.is_file())
+}
+
+/// Where Node version managers keep their programs. A login service (launchd on macOS) gets a
+/// bare PATH without them, while a terminal has them.
+fn version_managers() -> Vec<PathBuf> {
+    let Some(home) = directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf()) else {
+        return Vec::new();
+    };
+    let mut folders = vec![
+        home.join(".volta/bin"),
+        home.join(".asdf/shims"),
+        home.join(".local/share/fnm/aliases/default/bin"),
+        home.join(".fnm/aliases/default/bin"),
+        home.join(".bun/bin"),
+    ];
+    // nvm: the newest installed Node.
+    if let Ok(versions) = std::fs::read_dir(home.join(".nvm/versions/node")) {
+        let mut found: Vec<PathBuf> = versions.flatten().map(|e| e.path().join("bin")).collect();
+        found.sort_by_key(|p| {
+            p.parent()
+                .and_then(|v| v.file_name())
+                .and_then(|n| n.to_str())
+                .map(|n| {
+                    n.trim_start_matches('v')
+                        .split('.')
+                        .map(|part| part.parse::<u64>().unwrap_or(0))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        });
+        folders.extend(found.into_iter().rev());
+    }
+    folders
+}
+
+/// PATH for a program Lens found: its own folder first, then the folders `program` searches, so a
+/// script that starts with `#!/usr/bin/env node` finds the Node beside it.
+pub fn path_for(binary: &Path) -> std::ffi::OsString {
+    let mut folders: Vec<PathBuf> = binary.parent().map(Path::to_path_buf).into_iter().collect();
+    folders.extend(
+        std::env::var_os("PATH")
+            .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+            .unwrap_or_default(),
+    );
+    folders.extend(version_managers());
+    if let Some(node) = program("node").and_then(|n| n.parent().map(Path::to_path_buf)) {
+        folders.push(node);
+    }
+    std::env::join_paths(folders).unwrap_or_default()
 }
 
 /// Runs an agent CLI with API keys removed (the person's subscription sign-in applies), bounded in
@@ -724,6 +774,7 @@ fn run(
     let mut command = Command::new(binary);
     command
         .args(arguments)
+        .env("PATH", path_for(binary))
         .env_remove("OPENAI_API_KEY")
         .env_remove("CODEX_API_KEY")
         .env_remove("ANTHROPIC_API_KEY")

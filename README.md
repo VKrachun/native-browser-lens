@@ -5,7 +5,7 @@ Capture browser defects with their evidence, review them, and file them. See
 
 ## Install
 
-Download the installer for your computer from the [latest release](https://github.com/VKrachun/native-browser-lens/releases/latest).
+Download the installer for your computer from [lens.sirv.studio](https://lens.sirv.studio/#download).
 Each installs for your user only, without administrator rights.
 
 | Computer | Installer | Then |

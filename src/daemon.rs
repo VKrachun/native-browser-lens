@@ -158,6 +158,15 @@ pub fn run(paths: &Paths, service: bool) -> std::io::Result<()> {
     let _ = std::fs::remove_dir_all(paths.data.join("attachments"));
     start_transcription(daemon.clone());
     std::thread::spawn(has_token);
+    // What deleted records left behind: now, then every hour.
+    let sweeper = Arc::downgrade(&daemon);
+    std::thread::spawn(move || {
+        while let Some(daemon) = sweeper.upgrade() {
+            daemon.sweep_soon();
+            drop(daemon);
+            std::thread::sleep(std::time::Duration::from_secs(3600));
+        }
+    });
     match crate::wizard::serve(daemon.clone(), paths) {
         Ok(wizard) => {
             let _ = daemon.setup_page.set(wizard);
@@ -440,6 +449,10 @@ impl Daemon {
                 if !store.delete_observation(id).map_err(storage)? {
                     return Err(not_found("no such observation"));
                 }
+                drop(store);
+                // Its recordings, screenshots and frozen folders go too, unless another record
+                // shares them.
+                self.sweep_soon();
                 Reply::Deleted
             }
             Request::ListProjects => Reply::Projects(store.list_projects().map_err(storage)?),
@@ -1936,6 +1949,53 @@ impl Daemon {
         });
     }
 
+    /// Removes what no record names any more: blobs older than an hour (a new one waits for the
+    /// record that will name it), and the frozen folders of deleted reviews in filings/ and
+    /// handoffs/. Runs on its own thread.
+    fn sweep_soon(&self) {
+        if SWEEPING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let Some(daemon) = self.me.get().and_then(std::sync::Weak::upgrade) else {
+            SWEEPING.store(false, std::sync::atomic::Ordering::SeqCst);
+            return;
+        };
+        std::thread::spawn(move || {
+            daemon.sweep();
+            SWEEPING.store(false, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
+
+    fn sweep(&self) {
+        let (blobs, reviews) = match self.lock_store().references() {
+            Ok(found) => found,
+            Err(e) => return log(&self.paths, &format!("sweep: {e}")),
+        };
+        match self
+            .blobs
+            .sweep(&blobs, std::time::Duration::from_secs(3600))
+        {
+            Ok(0) => {}
+            Ok(n) => log(&self.paths, &format!("removed {n} files no record names")),
+            Err(e) => log(&self.paths, &format!("sweep: {e}")),
+        }
+        for root in [self.paths.filings(), self.paths.data.join("handoffs")] {
+            let Ok(entries) = std::fs::read_dir(&root) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let review = name
+                    .strip_prefix("lens-review-")
+                    .and_then(|rest| rest.split('-').next())
+                    .and_then(|id| id.parse::<i64>().ok());
+                if review.is_some_and(|id| !reviews.contains(&id)) {
+                    let _ = std::fs::remove_dir_all(entry.path());
+                }
+            }
+        }
+    }
+
     /// Voice notes that a split copied while they were still being written down.
     fn requeue_voice(&self, store: &Store) {
         if let Ok(waiting) = store.untranscribed_voice_notes() {
@@ -2096,6 +2156,7 @@ fn project_for(store: &Store, page_url: Option<&str>) -> Result<String, Protocol
 }
 
 /// Set once a restart is on its way, so two reasons never start two restarts.
+static SWEEPING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static RESTARTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// This daemon runs under the service manager (`lens daemon --service`).
 static SERVICE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

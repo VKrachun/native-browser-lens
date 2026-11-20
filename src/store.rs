@@ -374,6 +374,43 @@ impl Store {
             .collect()
     }
 
+    /// Every blob a record still names, and every review that exists. A blob is named by its
+    /// sha256 in some text column (a column of its own, or inside a JSON body), so any run of 64
+    /// lowercase hex digits counts: a false match only keeps a blob longer.
+    pub fn references(
+        &self,
+    ) -> rusqlite::Result<(
+        std::collections::HashSet<String>,
+        std::collections::HashSet<i64>,
+    )> {
+        let mut blobs = std::collections::HashSet::new();
+        let tables: Vec<String> = self
+            .db
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")?
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for table in tables {
+            let mut statement = self
+                .db
+                .prepare(&format!("SELECT * FROM \"{}\"", table.replace('"', "\"\"")))?;
+            let columns = statement.column_count();
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                for i in 0..columns {
+                    if let rusqlite::types::ValueRef::Text(text) = row.get_ref(i)? {
+                        hex_runs(text, &mut blobs);
+                    }
+                }
+            }
+        }
+        let reviews = self
+            .db
+            .prepare("SELECT id FROM reviews")?
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok((blobs, reviews))
+    }
+
     /// Deletes an observation; captures, voice notes and reviews go with it. Returns false when
     /// there is none. Blobs stay: other records may share them.
     pub fn delete_observation(&self, id: i64) -> rusqlite::Result<bool> {
@@ -973,9 +1010,50 @@ impl Store {
     }
 }
 
+/// Each run of exactly 64 lowercase hex digits in `text`.
+fn hex_runs(text: &[u8], found: &mut std::collections::HashSet<String>) {
+    let hex = |b: u8| b.is_ascii_digit() || (b'a'..=b'f').contains(&b);
+    let mut start = None;
+    for i in 0..=text.len() {
+        match (start, text.get(i).copied().is_some_and(hex)) {
+            (None, true) => start = Some(i),
+            (Some(from), false) => {
+                if i - from == 64 {
+                    found.insert(String::from_utf8_lossy(&text[from..i]).into_owned());
+                }
+                start = None;
+            }
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn references_find_blobs_in_columns_and_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("lens.sqlite")).unwrap();
+        let a = "a".repeat(64);
+        let b = format!("{}b", "0".repeat(63));
+        store
+            .set_setting(
+                "x",
+                &format!(
+                    r#"{{"sha256":"{a}","other":"{b}","long":"{}"}}"#,
+                    "c".repeat(65)
+                ),
+            )
+            .unwrap();
+        let (found, _) = store.references().unwrap();
+        assert!(found.contains(&a) && found.contains(&b));
+        assert!(
+            !found.iter().any(|s| s.starts_with('c')),
+            "a 65-digit run names no blob"
+        );
+    }
 
     #[test]
     fn mp4_voice_is_local_and_frozen_independently_of_transcription() {

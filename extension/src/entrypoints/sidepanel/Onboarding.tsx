@@ -3,8 +3,9 @@ import type { LensClient } from '@/lens-client';
 import type { SetupStatus } from '@/protocol/SetupStatus';
 import { CopyIcon, DoneIcon } from '@/ui/icons';
 
-const REPO = 'https://github.com/VKrachun/native-browser-lens/releases';
-const RELEASES = `${REPO}/latest/download`;
+/** People download Lens from its site; the terminal installers stay on the release. */
+const SITE = 'https://lens.sirv.studio/#download';
+const RELEASES = 'https://github.com/VKrachun/native-browser-lens/releases/latest/download';
 
 /** The installer for this computer, as people know it, and the terminal line for those who prefer it. */
 function installerFor(os: string) {
@@ -41,7 +42,7 @@ export function InstallApp({ reason }: { reason: string }) {
           <em>{reason}</em>. Open Sirv Lens from your applications to reconnect.
         </p>
       )}
-      <a className="btn btn-primary btn-block" href={`${REPO}/latest`} target="_blank" rel="noreferrer">
+      <a className="btn btn-primary btn-block" href={SITE} target="_blank" rel="noreferrer">
         Download for {system}
       </a>
       <p className="small muted">
