@@ -160,7 +160,7 @@ export class LensClient {
   }
 
   /** Sends a file in chunks (requests stay under 16 MiB); the last reply names the stored blob. */
-  async upload(file: Blob, mediaType: 'audio/wav' | 'application/json' | 'image/webp'): Promise<BlobRef> {
+  async upload(file: Blob, mediaType: 'audio/wav' | 'application/json' | 'image/webp' | 'image/png'): Promise<BlobRef> {
     const CHUNK = 3 * 1024 * 1024;
     const id = crypto.randomUUID();
     for (let offset = 0; ; offset += CHUNK) {

@@ -499,9 +499,18 @@ impl Daemon {
                 false => return Err(not_found("no such project")),
             },
             Request::CreateCapture(capture) => {
-                let screenshot = BASE64
-                    .decode(capture.screenshot.as_bytes())
-                    .map_err(|e| bad(format!("the screenshot is not base64: {e}")))?;
+                let screenshot = match &capture.screenshot_blob {
+                    // One byte past the limit is enough to refuse it below.
+                    Some(blob) => {
+                        self.blobs
+                            .read(&blob.sha256, 0, MAX_SCREENSHOT_BYTES as u32 + 1)
+                            .map_err(|_| not_found("upload the screenshot first"))?
+                            .0
+                    }
+                    None => BASE64
+                        .decode(capture.screenshot.as_bytes())
+                        .map_err(|e| bad(format!("the screenshot is not base64: {e}")))?,
+                };
                 if !screenshot.starts_with(b"\x89PNG\r\n\x1a\n") {
                     return Err(bad("the screenshot is not a PNG"));
                 }
@@ -2123,10 +2132,10 @@ impl Daemon {
         }
         if !matches!(
             chunk.media_type.as_str(),
-            "audio/wav" | "application/json" | "image/webp"
+            "audio/wav" | "application/json" | "image/webp" | "image/png"
         ) {
             return Err(bad(
-                "Lens takes WAV audio, WebP images and JSON uploads only",
+                "Lens takes WAV audio, WebP and PNG images and JSON uploads only",
             ));
         }
         let data = BASE64
@@ -2786,6 +2795,17 @@ mod tests {
             read.extend(data);
         }
         assert_eq!(read, png);
+        // A large screenshot comes as an uploaded blob instead of base64.
+        let mut by_blob = request.clone();
+        by_blob["params"]["screenshot"] = "".into();
+        by_blob["params"]["screenshotBlob"] = capture["screenshot"].clone();
+        let again = ask(&daemon, &by_blob.to_string());
+        assert_eq!(
+            again["result"]["data"]["screenshot"]["sha256"], sha,
+            "{again}"
+        );
+        by_blob["params"]["screenshotBlob"]["sha256"] = "0".repeat(64).into();
+        assert_eq!(ask(&daemon, &by_blob.to_string())["status"], "error");
 
         // Edits: saved, validated, and returned with the capture.
         let id = capture["id"].as_i64().unwrap();

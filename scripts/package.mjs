@@ -8,7 +8,7 @@
 // macOS signing: set APPLE_SIGNING_IDENTITY. Notarization (app and DMG): also set APPLE_API_KEY
 // (key ID), APPLE_API_ISSUER and APPLE_API_KEY_PATH (the App Store Connect .p8).
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 
@@ -39,6 +39,15 @@ if (!values['skip-build']) {
       join(gpuDir, ...(values.target ? [values.target] : []), 'release', `lens-speech${exe}`),
       join(release, `lens-speech-gpu${exe}`),
     );
+  }
+}
+
+// A test build pre-grants the fixture sites (LENS_E2E in wxt.config.ts): installed, it would read
+// them without the person's prompt. --skip-build packages whatever .output holds, so check it.
+for (const folder of ['chrome-mv3', 'firefox-mv3']) {
+  const manifest = JSON.parse(readFileSync(join(root, 'extension', '.output', folder, 'manifest.json'), 'utf8'));
+  if (manifest.host_permissions?.length) {
+    throw new Error(`extension/.output/${folder} is a test build (it grants ${manifest.host_permissions.join(', ')}); build it again without LENS_E2E`);
   }
 }
 

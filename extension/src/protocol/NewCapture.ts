@@ -6,9 +6,13 @@ import type { Shot } from "./Shot";
 
 export type NewCapture = { observation: number | null, pageUrl: string, pageTitle: string, 
 /**
- * PNG bytes, base64.
+ * PNG bytes, base64; empty when `screenshot_blob` names them.
  */
-screenshot: string, evidence: Evidence, 
+screenshot: string, 
+/**
+ * The PNG from UploadChunk: a large screenshot in base64 would pass the request limit.
+ */
+screenshotBlob?: BlobRef, evidence: Evidence, 
 /**
  * The rrweb events (a JSON array) from UploadChunk, when the tab was recorded.
  */

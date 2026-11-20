@@ -7,6 +7,8 @@ export default defineConfig({
   modules: ['@wxt-dev/module-react'],
   manifest: ({ browser }) => {
     const firefox = browser === 'firefox';
+    // The test build pre-grants fixture sites (below): a store package must never be one.
+    if (process.env.LENS_E2E && process.env.LENS_STORE) throw new Error('LENS_E2E and LENS_STORE together: unset LENS_E2E for a store build');
     return {
       name: 'Sirv Lens',
       description: 'Record a bug with your voice: get a task with the steps, network errors and a replay. Works with the free Sirv Lens app.',
@@ -16,6 +18,8 @@ export default defineConfig({
         'tabs',
         'scripting',
         'activeTab',
+        // Wakes the background during a recording (see background.ts); it shows no warning.
+        'alarms',
         ...(firefox ? ['webRequest'] : ['sidePanel', 'debugger', 'favicon', 'offscreen']),
       ],
       // Lens reads a site only after the person grants that exact origin from the side panel.
