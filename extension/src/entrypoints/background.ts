@@ -23,6 +23,7 @@ import type { Action } from '@/protocol/Action';
 import type { PageElement } from '@/protocol/PageElement';
 import type { Prepared, RecorderMessage } from './recorder.content';
 import { spool, spooled, unspool } from '@/voice-spool';
+import * as evidence from '@/collector/evidence-spool';
 
 /** A recording uploads in chunks; past this it is left out with a gap. */
 const MAX_RECORDING_BYTES = 256 * 1024 * 1024;
@@ -69,6 +70,72 @@ export default defineBackground(() => {
   }
   /** Record mode: the tabs with a running session, and when each started. */
   const sessions = new Map<number, number>();
+
+  /**
+   * What a running recording collects also goes to the evidence spool, in batches: every few
+   * seconds, and at once after each step. A worker the browser stopped then loses at most the
+   * last batch (see restore and resume).
+   */
+  const SPOOL_MS = 3000;
+  const batches = new Map<number, evidence.Batch>();
+  /** Bytes each recording's spool holds; past MAX_SPOOL_BYTES it is written again from memory. */
+  const spoolBytes = new Map<number, number>();
+  const tap =
+    <K extends evidence.Kind>(kind: K) =>
+    (tabId: number, items: evidence.Batch[K]) => {
+      // A restored recording spools again only after its earlier spool is read back.
+      if (!sessions.has(tabId) || restored.has(tabId)) return;
+      const batch = batches.get(tabId) ?? evidence.emptyBatch();
+      (batch[kind] as unknown[]).push(...items);
+      batches.set(tabId, batch);
+      if (kind === 'actions') void flushEvidence();
+    };
+  buffer.onAdd = tap('events');
+  actions.onAdd = tap('actions');
+  replay.onAdd = tap('replay');
+  shots.onAdd = tap('shots');
+  let flushing: Promise<void> = Promise.resolve();
+  function flushEvidence(): Promise<void> {
+    flushing = flushing.then(async () => {
+      if (!batches.size) return;
+      const chunks: evidence.Chunk[] = [];
+      const states: evidence.State[] = [];
+      const fresh: number[] = [];
+      for (const [tabId, batch] of batches) {
+        const session = sessions.get(tabId);
+        if (session === undefined) continue;
+        let written = evidence.KINDS.filter((kind) => batch[kind].length).map((kind) => evidence.chunk(session, kind, batch[kind]));
+        let bytes = (spoolBytes.get(session) ?? 0) + written.reduce((sum, c) => sum + c.bytes, 0);
+        if (bytes > evidence.MAX_SPOOL_BYTES) {
+          // Memory keeps to its caps and the spool only grows: then the spool starts again from memory.
+          fresh.push(session);
+          written = [
+            evidence.chunk(session, 'events', buffer.snapshot(tabId, session)?.events ?? []),
+            evidence.chunk(session, 'actions', actions.snapshot(tabId, session)),
+            evidence.chunk(session, 'replay', replay.slice(tabId, session)),
+            evidence.chunk(session, 'shots', shots.since(tabId, session)),
+          ];
+          bytes = written.reduce((sum, c) => sum + c.bytes, 0);
+        }
+        spoolBytes.set(session, bytes);
+        chunks.push(...written);
+        const meta = buffer.snapshot(tabId, Number.MAX_SAFE_INTEGER);
+        states.push({ session, tab: tabId, savedAt: Date.now(), gaps: meta?.gaps ?? [], dropped: meta?.dropped ?? {} });
+      }
+      batches.clear();
+      await evidence.write(chunks, states, fresh).catch(() => {});
+    });
+    return flushing;
+  }
+  setInterval(() => void flushEvidence(), SPOOL_MS);
+  /** The recording ended or went: its spool goes too. */
+  function dropEvidence(tabId: number, session: number | undefined) {
+    batches.delete(tabId);
+    if (session === undefined) return;
+    spoolBytes.delete(session);
+    // After any write in flight, so a late batch cannot bring the spool back.
+    void flushing.then(() => evidence.remove([session])).catch(() => {});
+  }
   /** Recording tabs on a site outside the project: the recording waits, nothing is collected. */
   const offProject = new Set<number>();
   const collecting = (tabId: number) => buffer.mode(tabId) !== undefined && !offProject.has(tabId);
@@ -153,12 +220,11 @@ export default defineBackground(() => {
   /**
    * Chrome stops a service worker after 30 s without events, and a browser can restart it any
    * time: the recordings in memory would be gone, and the panel would show Record again. So who
-   * records what is kept in storage.session, and a new worker continues those recordings; it
-   * loses only the evidence the old one held, and says so in a gap. While a recording runs, an
-   * extension call every 20 s keeps the worker (Chrome 110 and later), and an alarm wakes it
-   * when it stopped anyway.
+   * records what is kept in storage.session, and a new worker continues those recordings with the
+   * evidence spool; it loses only the last batch and the time it was down, and says so in a gap.
+   * While a recording runs, an extension call every 20 s keeps the worker (Chrome 110 and later),
+   * and an alarm wakes it when it stopped anyway.
    */
-  // ponytail: the evidence itself is not spooled; spool it to IndexedDB if workers die mid-session in practice.
   const SESSIONS_KEY = 'lens.sessions';
   type Checkpoint = { sessions: [number, number][]; offProject: number[]; voiced: number[] };
   let saved = '';
@@ -195,7 +261,7 @@ export default defineBackground(() => {
   async function restore() {
     const found = await browser.storage.session.get(SESSIONS_KEY).catch(() => ({}) as Record<string, unknown>);
     const earlier = found[SESSIONS_KEY] as Checkpoint | undefined;
-    if (!earlier) return checkpoint();
+    if (!earlier) return checkpoint(), void cleanSpool();
     const open = new Set((await browser.tabs.query({})).map((t) => t.id));
     // The microphone page outlives the worker: its voice still belongs to the recording.
     const microphoneOpen = !import.meta.env.FIREFOX && (await browser.offscreen.hasDocument().catch(() => false));
@@ -212,6 +278,15 @@ export default defineBackground(() => {
       if (voice) voiced.add(tabId);
     }
     checkpoint();
+    void cleanSpool();
+  }
+  /** Spools of recordings that ended while no worker ran (a crash, a closed tab), or are old. */
+  async function cleanSpool() {
+    const live = new Set([...sessions.values(), ...[...vanished.values()].map((v) => v.startedAt)]);
+    await evidence
+      .list()
+      .then((states) => evidence.remove(evidence.stale(states, live, Date.now())))
+      .catch(() => {});
   }
   /** Holds what a tab's recording needs, from its start on; null releases it. */
   function holdAll(tabId: number, from: number | null) {
@@ -220,20 +295,38 @@ export default defineBackground(() => {
     replay.hold(tabId, from);
     shots.hold(tabId, from);
   }
-  /** After a sync: a restored recording resumes once its tab collects; the state is saved. */
-  function resume(tabId: number) {
-    if (restored.has(tabId) && collecting(tabId)) {
-      restored.delete(tabId);
-      holdAll(tabId, sessions.get(tabId) ?? null);
-      buffer.gap(tabId, 'collector', 'The browser restarted Lens in the background: what was recorded before is lost');
-      // The replay needs a fresh copy of the page to start from.
-      void browser.tabs.sendMessage(tabId, { kind: 'lens-snapshot' }).catch(() => {});
+  /**
+   * After a sync: a restored recording resumes once its tab collects, with what the earlier worker
+   * spooled in front of what this one collected since. The state is saved.
+   */
+  async function resume(tabId: number) {
+    const session = sessions.get(tabId);
+    if (session !== undefined && restored.has(tabId) && collecting(tabId)) {
+      holdAll(tabId, session);
+      const found = await evidence.read(session).catch(() => null);
+      // The tab may have gone or stopped while the spool was read.
+      if (sessions.get(tabId) === session && restored.has(tabId)) {
+        if (found) {
+          const lost = { channel: 'collector', reason: 'The browser restarted Lens in the background: nothing was recorded for this time', startedAt: found.savedAt, endedAt: Date.now() };
+          buffer.restore(tabId, found.events, [...found.gaps, lost], found.dropped);
+          actions.restore(tabId, found.actions);
+          replay.restore(tabId, found.replay);
+          shots.restore(tabId, found.shots);
+          spoolBytes.set(session, found.bytes);
+        } else {
+          buffer.gap(tabId, 'collector', 'The browser restarted Lens in the background: what was recorded before is lost');
+        }
+        restored.delete(tabId);
+        // The replay needs a fresh copy of the page to go on from.
+        void browser.tabs.sendMessage(tabId, { kind: 'lens-snapshot' }).catch(() => {});
+      }
     }
     checkpoint();
   }
 
   function stop(tabId: number) {
     const session = sessions.get(tabId);
+    dropEvidence(tabId, session);
     if (session !== undefined && !import.meta.env.FIREFOX) void unspool(tabId, session);
     restored.delete(tabId);
     buffer.stop(tabId);
@@ -246,6 +339,37 @@ export default defineBackground(() => {
     keptVoice.delete(tabId);
     void endMicrophone(tabId, 'mic-cancel');
     checkpoint();
+  }
+
+  /**
+   * The recorder also starts with each page of a granted, enabled project, when the page starts
+   * to load: steps taken while a slow page loads are recorded too. It records nothing until this
+   * script says the tab collects (lens-should-record). Ports are left out of the patterns, as
+   * Firefox's match patterns take none: the recorder's question keeps other ports out.
+   */
+  const RECORDER = 'lens-recorder';
+  let registered: string | null = null;
+  async function registerRecorder() {
+    const origins: string[] = [];
+    for (const project of paused ? [] : projects.filter((p) => p.enabled)) {
+      for (const origin of project.origins) if (await permitted(origin).catch(() => false)) origins.push(origin);
+    }
+    const matches = [...new Set(origins.map((origin) => `${new URL(origin).protocol}//${new URL(origin).hostname}/*`))].sort();
+    const key = JSON.stringify(matches);
+    if (key === registered) return;
+    try {
+      const found = await browser.scripting.getRegisteredContentScripts({ ids: [RECORDER] });
+      if (!matches.length) {
+        if (found.length) await browser.scripting.unregisterContentScripts({ ids: [RECORDER] });
+      } else {
+        const script = { id: RECORDER, js: ['content-scripts/recorder.js'], matches, runAt: 'document_start' as const, persistAcrossSessions: false };
+        await (found.length ? browser.scripting.updateContentScripts([script]) : browser.scripting.registerContentScripts([script]));
+      }
+      registered = key;
+    } catch {
+      // The next look at the projects (every 15 s) tries again; executeScript still starts the
+      // recorder once a page has loaded.
+    }
   }
 
   /** The rrweb recorder, in collected tabs only. Idempotent: the script guards against a second run. */
@@ -293,6 +417,7 @@ export default defineBackground(() => {
       // would stop every tab's collection and end a running recording before its Stop.
     }
     await syncAll();
+    await registerRecorder();
   }
 
   async function status(tabId: number): Promise<TabStatus> {
@@ -446,7 +571,9 @@ export default defineBackground(() => {
       }
       voiced.add(tabId);
     }
-    const startedAt = sessions.get(tabId) ?? Date.now();
+    let startedAt = sessions.get(tabId) ?? Date.now();
+    // The start names the recording's spool: two recordings never share one.
+    if (!sessions.has(tabId)) while ([...sessions.values()].includes(startedAt)) startedAt++;
     sessions.set(tabId, startedAt);
     holdAll(tabId, startedAt);
     checkpoint();
@@ -498,6 +625,7 @@ export default defineBackground(() => {
     }
     keptVoice.delete(tabId);
     if (!import.meta.env.FIREFOX) void unspool(tabId, startedAt);
+    dropEvidence(tabId, startedAt);
     sessions.delete(tabId);
     restored.delete(tabId);
     holdAll(tabId, null);
@@ -529,6 +657,16 @@ export default defineBackground(() => {
   }
 
   browser.runtime.onMessage.addListener((message: BackgroundRequest | RecorderMessage, sender, reply) => {
+    // A recorder that started with its page asks first: it records only where Lens collects.
+    if (message.kind === 'lens-should-record') {
+      const tabId = sender.tab?.id;
+      const url = sender.url ?? sender.tab?.url;
+      if (tabId === undefined || sender.frameId !== 0) return void reply(false);
+      void ready
+        .then(() => sync(tabId, url))
+        .then(() => reply(collecting(tabId) && Boolean(projectFor(originOf(url)))), () => reply(false));
+      return true;
+    }
     if (message.kind === 'lens-action' || message.kind === 'lens-replay') {
       const tabId = sender.tab?.id;
       // Only from a page of an enabled project: an old document still sending after the tab left
@@ -609,6 +747,10 @@ export default defineBackground(() => {
     // A prerendered page swapped in: to the person it is the same tab, so a recording moves along.
     if (sessions.has(removed)) {
       for (const store of [buffer, actions, replay, shots]) store.move(removed, added);
+      // The spool is named by the recording's start, not its tab: only the batch in hand moves.
+      const batch = batches.get(removed);
+      batches.delete(removed);
+      if (batch) batches.set(added, batch);
       clearTimeout(shotTimers.get(removed));
       sessions.set(added, sessions.get(removed)!);
       sessions.delete(removed);
