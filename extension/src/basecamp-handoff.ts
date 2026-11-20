@@ -116,7 +116,10 @@ async function fill(url: string, key: string, titleSelector: string, title: stri
     placed = normalize(notes.innerText).includes(normalize(body)) &&
       files.every(file => attachments.some(node => node.textContent?.includes(file.name) ||
         node.getAttribute('filename') === file.name || node.getAttribute('data-trix-attachment')?.includes(file.name)));
-    if (placed && !notes.querySelector('progress')) return '';
+    // Only a visible bar that is not full: an editor can keep a finished or hidden one.
+    const uploading = Array.from(notes.querySelectorAll('progress')).some(bar =>
+      !bar.hidden && bar.getClientRects().length > 0 && !(bar.hasAttribute('value') && bar.value >= bar.max));
+    if (placed && !uploading) return '';
     if (!placed && i >= 50) break;
     await new Promise(resolve => setTimeout(resolve, 100));
   }

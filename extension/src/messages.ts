@@ -23,10 +23,13 @@ export type SessionStart =
 /** Background → the offscreen page (Chrome), which holds a session's microphone. */
 export type OffscreenRequest =
   | { target: 'offscreen'; kind: 'mic-start' | 'mic-stop' | 'mic-cancel' }
-  | { target: 'offscreen'; kind: 'mic-part'; offset: number };
-/** mic-stop gives the WAV's size; mic-part then gives it in base64 parts from `offset` on. */
+  | { target: 'offscreen'; kind: 'mic-part'; id: number; offset: number };
+/**
+ * mic-stop gives the WAV's size and an id; mic-part then gives that WAV in base64 parts from
+ * `offset` on. The id makes sure every part comes from the same WAV.
+ */
 export type OffscreenReply =
-  | { ok: true; startedAt: number; size?: number; wav?: string }
+  | { ok: true; startedAt: number; size?: number; id?: number; wav?: string }
   | { ok: false; error: string; blocked?: boolean };
 /** One message carries at most 64 MiB: a long voice note goes in parts of this many bytes. */
 export const OFFSCREEN_PART_BYTES = 8 * 1024 * 1024;

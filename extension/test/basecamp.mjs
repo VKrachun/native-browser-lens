@@ -33,7 +33,15 @@ export async function basecampFixture() {
         <input id="notes" type="hidden" name="todo[description]"><${fixture.editor}-editor input="notes"></${fixture.editor}-editor>
         <button>Add to-do</button>
       </form>
-      <script>document.addEventListener('trix-attachment-add', e => { (window.received ??= []).push(e.attachment.file) });</script>`);
+      <script>document.addEventListener('trix-attachment-add', e => {
+        (window.received ??= []).push(e.attachment.file);
+        // As Basecamp does: the upload finishes and the attachment gets its address, so the
+        // editor's progress bar goes away.
+        if (e.attachment.file) {
+          e.attachment.setUploadProgress(100);
+          e.attachment.setAttributes({ url: '/uploads/' + encodeURIComponent(e.attachment.file.name) });
+        }
+      });</script>`);
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   return Object.assign(fixture, { server, flags: [

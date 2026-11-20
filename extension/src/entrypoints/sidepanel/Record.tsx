@@ -3,18 +3,20 @@ import type { LensClient } from '@/lens-client';
 import { send, type CaptureResult, type SessionStart, type TabStatus } from '@/messages';
 import { MicIcon, StopIcon } from '@/ui/icons';
 import { MicrophoneBlocked, record, toWav, type Recording } from '@/voice';
-import { spool, spooled, unspool } from '@/voice-spool';
+import { purge, spool, spooled, unspool } from '@/voice-spool';
 import type { SpeechStatus } from '@/protocol/SpeechStatus';
 import { ModelNotice } from './Voice';
 
 export type PanelMode = 'record' | 'capture';
 
-/** The voice a closed panel left for this tab's recording, as a WAV; null when none. */
-async function fromSpool(tab: number): Promise<{ wav: Blob; startedAt: number; tab: number } | null> {
-  const found = await spooled(tab);
+type Kept = { wav: Blob; startedAt: number; tab: number; session: number };
+
+/** The voice a closed panel left for this recording, as a WAV; null when none. */
+async function fromSpool(tab: number, session: number): Promise<Kept | null> {
+  const found = await spooled(tab, session);
   if (!found?.parts.length) return null;
   const wav = found.type === 'audio/wav' ? found.parts[0]! : await toWav(new Blob(found.parts, { type: found.type })).catch(() => null);
-  return wav && { wav, startedAt: found.startedAt, tab };
+  return wav && { wav, startedAt: found.startedAt, tab, session };
 }
 
 const clock = (ms: number) => {
@@ -76,7 +78,10 @@ export function RecordControls({
   const microphone = useRef<Recording | null>(null);
   const microphoneTab = useRef<number | null>(null);
   /** The voice of a Stop that the app did not take: the next Stop in that tab saves it. */
-  const keptVoice = useRef<{ wav: Blob; startedAt: number; tab: number } | null>(null);
+  const keptVoice = useRef<Kept | null>(null);
+  /** The recording the panel's microphone spools for, once the background named it. */
+  const spoolFor = useRef<number | null>(null);
+  const spoolFailed = useRef(false);
   const running = site?.session ?? null;
   const screenAccess = useScreenAccess();
   // With the voice on, the speech model must be there to write it down: offer it here, once.
@@ -119,9 +124,20 @@ export function RecordControls({
       if (microphone.current && microphoneTab.current !== tabId)
         return onProblem('Stop the recording in the other tab first: it is using the microphone.');
       try {
-        await unspool(tabId);
+        // Earlier recordings of this tab are over: their voice can only be stale now.
+        await purge((entry) => entry.tab !== tabId);
         const tab = tabId;
-        microphone.current = await record((parts, type, startedAt) => void spool({ tab, startedAt, type, parts }));
+        spoolFor.current = null;
+        spoolFailed.current = false;
+        microphone.current = await record((parts, type, startedAt) => {
+          const session = spoolFor.current;
+          if (session === null) return;
+          spool({ tab, session, startedAt, type, parts }).catch((error: Error) => {
+            if (spoolFailed.current) return;
+            spoolFailed.current = true;
+            onProblem(`Keep this panel open until Stop: the browser does not keep your voice (${error.message}).`);
+          });
+        });
         microphoneTab.current = tabId;
       } catch (error) {
         if (error instanceof MicrophoneBlocked) {
@@ -136,7 +152,6 @@ export function RecordControls({
       if (microphoneTab.current === tabId) {
         microphone.current?.cancel();
         microphone.current = microphoneTab.current = null;
-        void unspool(tabId);
       }
       if (started.microphoneBlocked) {
         await browser.tabs.create({ url: browser.runtime.getURL('/microphone.html') });
@@ -144,18 +159,21 @@ export function RecordControls({
       }
       return onProblem(started.error);
     }
+    if (microphoneTab.current === tabId) spoolFor.current = started.startedAt;
     setNow(Date.now());
   }
 
   async function stop() {
-    if (tabId === null) return;
+    if (tabId === null || running === null) return;
+    const session = running;
     if (!(await screenAccess())) return onProblem(SCREEN_ACCESS_REFUSED);
     setBusy(true);
     const mine = microphoneTab.current === tabId;
     const spoken = mine ? microphone.current : null;
     if (mine) microphone.current = microphoneTab.current = null;
     try {
-      const kept = keptVoice.current?.tab === tabId ? keptVoice.current : spoken ? null : await fromSpool(tabId);
+      const mineKept = keptVoice.current?.tab === tabId && keptVoice.current.session === session;
+      const kept = mineKept ? keptVoice.current : spoken ? null : await fromSpool(tabId, session);
       const [result, wav] = await Promise.all([
         send<CaptureResult>({ kind: 'stopSession', tabId }),
         kept ? Promise.resolve(kept.wav) : spoken ? spoken.stop() : Promise.resolve(null),
@@ -164,21 +182,29 @@ export function RecordControls({
       if (!result.ok) {
         // The background keeps the session; the voice waits here for Stop again.
         if (wav && startedAt !== undefined) {
-          keptVoice.current = { wav, startedAt, tab: tabId };
+          keptVoice.current = { wav, startedAt, tab: tabId, session };
           // Also past this panel: closing it before Stop again keeps the voice.
-          void spool({ tab: tabId, startedAt, type: 'audio/wav', parts: [wav] });
+          const kept = spool({ tab: tabId, session, startedAt, type: 'audio/wav', parts: [wav] }).then(
+            () => '',
+            (error: Error) => ` Keep this panel open: the browser does not keep your voice (${error.message}).`,
+          );
+          return onProblem(`The recording was not saved: ${result.error}${await kept}`);
         }
         return onProblem(`The recording was not saved: ${result.error}`);
       }
       if (kept) keptVoice.current = null;
-      if (wav && startedAt !== undefined) {
-        const audio = await client.upload(wav, 'audio/wav');
-        await client.request({
-          method: 'addVoiceNote',
-          params: { observation: result.capture.observation, startedAt, audio },
-        });
+      try {
+        if (wav && startedAt !== undefined) {
+          const audio = await client.upload(wav, 'audio/wav');
+          await client.request({
+            method: 'addVoiceNote',
+            params: { observation: result.capture.observation, startedAt, audio },
+          });
+        }
+      } finally {
+        // The recording is saved: its voice, attached or not, belongs to no later recording.
+        await unspool(tabId, session);
       }
-      await unspool(tabId);
       onProblem(null);
       await browser.tabs.create({
         url: browser.runtime.getURL(`/review.html?observation=${result.capture.observation}`),
