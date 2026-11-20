@@ -9,7 +9,7 @@ import { readable } from '@/findings';
 import type { BlobRef } from '@/protocol/BlobRef';
 import { Notes } from './Notes';
 import { VoiceNotes } from './Voice';
-import { RecordControls, SCREEN_ACCESS_REFUSED, useScreenAccess, useStored, type PanelMode } from './Record';
+import { RecordControls, ScreenNotice, useStored, type PanelMode } from './Record';
 import { DestinationForm } from '@/ui/Destination';
 import { InstallApp, SetupCard, hostNotFound } from './Onboarding';
 
@@ -69,7 +69,6 @@ export function App() {
   const [site, setSite] = useState<TabStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
-  const screenAccess = useScreenAccess();
   const [attempt, setAttempt] = useState(0);
   const wasReady = useRef(false);
   const failures = useRef(0);
@@ -185,7 +184,6 @@ export function App() {
 
   async function capture() {
     if (tabId === null) return;
-    if (!(await screenAccess())) return setProblem(SCREEN_ACCESS_REFUSED);
     setBusy(true);
     const result = await send<CaptureResult>({ kind: 'capture', tabId, observation: selected });
     setBusy(false);
@@ -237,6 +235,7 @@ export function App() {
               </span>
             </div>
           )}
+          <ScreenNotice />
           <DestinationForm client={client} onboarding />
           <SetupCard client={client} refresh={site?.mode ? 1 : 0} />
 

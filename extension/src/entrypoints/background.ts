@@ -446,13 +446,15 @@ export default defineBackground(() => {
       // As a blob: a 10 MiB PNG in base64 would pass the app's request limit on its own. A Lens
       // app older than 0.12.18 takes no PNG uploads: then the screenshot goes inline, as it did.
       const shot = await takeScreenshot(tab);
-      const png = Uint8Array.from(atob(shot), (c) => c.charCodeAt(0));
-      const screenshotBlob = await client()
-        .upload(new Blob([png], { type: 'image/png' }), 'image/png')
-        .catch((error: Error) => {
-          if (shot.length > MAX_INLINE_SCREENSHOT) throw error;
-          return null;
-        });
+      const png = shot === null ? null : Uint8Array.from(atob(shot), (c) => c.charCodeAt(0));
+      const screenshotBlob = !png
+        ? null
+        : await client()
+            .upload(new Blob([png], { type: 'image/png' }), 'image/png')
+            .catch((error: Error) => {
+              if (shot!.length > MAX_INLINE_SCREENSHOT) throw error;
+              return null;
+            });
       const snapshot = buffer.snapshot(tabId, from) ?? {
         mode: 'screenshotOnly' as const,
         events: [],
@@ -471,6 +473,9 @@ export default defineBackground(() => {
           recording = await client().upload(body, 'application/json');
         }
       }
+      if (shot === null && !recording) {
+        throw new Error('Firefox takes a screenshot here only with access to all sites, and this page has no replay to make one from. Allow it in the Lens panel');
+      }
       const taken = [];
       for (const shot of shots.since(tabId, from)) {
         const bytes = Uint8Array.from(atob(shot.data), (c) => c.charCodeAt(0));
@@ -487,9 +492,11 @@ export default defineBackground(() => {
           observation,
           pageUrl: sanitizeUrl(tab.url ?? ''),
           pageTitle: sanitizeText(tab.title ?? ''),
-          screenshot: screenshotBlob ? '' : shot,
+          screenshot: screenshotBlob || shot === null ? '' : shot,
           // An older app knows no such field: it goes only with a blob that app took.
           ...(screenshotBlob ? { screenshotBlob } : {}),
+          // No picture from the browser: the app renders it, and the step shots, from the replay.
+          ...(shot === null ? { renderScreenshot: true } : {}),
           evidence: { ...snapshot, page, actions: [...actions.snapshot(tabId, from), ...pending], elements },
           recording,
           kind: session === null ? 'moment' : 'session',
@@ -645,13 +652,20 @@ export default defineBackground(() => {
     return result;
   }
 
-  /** Through the debugger when attached; else the visible tab, which needs activeTab (a toolbar
-   * click or the shortcut) and the tab in front. */
-  async function takeScreenshot(tab: Browser.tabs.Tab): Promise<string> {
+  /** Through the debugger when attached; else the visible tab, which needs access to all sites or
+   * activeTab (a toolbar click or the shortcut) and the tab in front. Null when Firefox has neither:
+   * then the Lens app renders the screenshot from the replay. */
+  async function takeScreenshot(tab: Browser.tabs.Tab): Promise<string | null> {
     if (tab.id !== undefined && deep?.isAttached(tab.id)) return deep.screenshot(tab.id);
     if (tab.id === undefined) throw new Error('The tab is gone');
     if (!tab.active) await browser.tabs.update(tab.id, { active: true });
-    const image = await captureTab(tab.id);
+    let image: string | null;
+    try {
+      image = await captureTab(tab.id);
+    } catch (error) {
+      if (import.meta.env.FIREFOX && !(await browser.permissions.contains({ origins: ['<all_urls>'] }))) return null;
+      throw error;
+    }
     if (!image) throw new Error('Another tab came to the front during the screenshot; press again');
     return image.slice(image.indexOf(',') + 1);
   }

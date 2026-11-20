@@ -25,24 +25,41 @@ const clock = (ms: number) => {
 };
 
 /**
- * Firefox takes a tab screenshot only with access to all sites; a granted site is not enough.
- * `ensure` asks once, and must be the first await of a click handler, while the click counts as
- * the person's gesture. Lens still collects only on the sites the person adds.
+ * Firefox takes a tab screenshot only with access to all sites (or right after a toolbar click). Without
+ * it, the Lens app renders the screenshots from the replay; the grant stays optional, offered here once.
+ * Lens still collects only on the sites the person adds.
  */
 const ALL_SITES = { origins: ['<all_urls>'] };
-export function useScreenAccess(): () => Promise<boolean> {
-  const granted = useRef(!import.meta.env.FIREFOX);
+export function ScreenNotice() {
+  const [seen, setSeen] = useStored('lens.screenNotice', false);
+  const [granted, setGranted] = useState(true);
   useEffect(() => {
-    if (import.meta.env.FIREFOX) void browser.permissions.contains(ALL_SITES).then((yes) => (granted.current = yes));
+    if (import.meta.env.FIREFOX) void browser.permissions.contains(ALL_SITES).then(setGranted, () => {});
   }, []);
-  return async () => {
-    if (granted.current) return true;
-    granted.current = await browser.permissions.request(ALL_SITES).catch(() => false);
-    return granted.current;
-  };
+  if (!import.meta.env.FIREFOX || granted || seen) return null;
+  return (
+    <div role="note" className="notice" data-tone="info">
+      <span>
+        Screenshots: Firefox takes them only with access to all sites. Without it, the Lens app makes them from the
+        replay. Lens still collects only on the sites you add.{' '}
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm"
+          onClick={async () => {
+            // The first await of the click: Firefox asks only during the person's gesture.
+            setGranted(await browser.permissions.request(ALL_SITES).catch(() => false));
+            setSeen(true);
+          }}
+        >
+          Allow
+        </button>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={() => setSeen(true)}>
+          Not now
+        </button>
+      </span>
+    </div>
+  );
 }
-export const SCREEN_ACCESS_REFUSED =
-  'Firefox lets Lens take screenshots only with access to all sites. Lens still collects only on the sites you add. Allow it and press again.';
 
 /** A setting kept in the browser profile; it never matters enough to fail over. */
 export function useStored<T>(key: string, initial: T): [T, (value: T) => void] {
@@ -83,7 +100,6 @@ export function RecordControls({
   const spoolFor = useRef<number | null>(null);
   const spoolFailed = useRef(false);
   const running = site?.session ?? null;
-  const screenAccess = useScreenAccess();
   // With the voice on, the speech model must be there to write it down: offer it here, once.
   const [speech, setSpeech] = useState<SpeechStatus | null>(null);
   const downloading = speech?.model.state === 'downloading';
@@ -117,7 +133,6 @@ export function RecordControls({
 
   async function start() {
     if (tabId === null) return;
-    if (!(await screenAccess())) return onProblem(SCREEN_ACCESS_REFUSED);
     onProblem(null);
     if (voice && !inBackground) {
       // One microphone: a recording with voice in another tab keeps it until its Stop.
@@ -166,7 +181,6 @@ export function RecordControls({
   async function stop() {
     if (tabId === null || running === null) return;
     const session = running;
-    if (!(await screenAccess())) return onProblem(SCREEN_ACCESS_REFUSED);
     setBusy(true);
     const mine = microphoneTab.current === tabId;
     const spoken = mine ? microphone.current : null;

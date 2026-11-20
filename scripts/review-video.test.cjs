@@ -51,3 +51,37 @@ test('a WAV with a LIST chunk before its samples is read at its data chunk', t =
   t.after(() => fs.closeSync(fd));
   assert.equal(wavData(fd), 12 + 24 + 14 + 8);
 });
+
+test('stills render the end of a replay as PNG and each step time as WebP', async t => {
+  const tools = process.env.LENS_E2E_VIDEO_TOOLS ||
+    path.join(os.homedir(), '.local', 'share', 'sirv-lens', 'video-tools');
+  if (!fs.existsSync(path.join(tools, 'node_modules', 'playwright-core'))) return t.skip('no video tools');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lens-stills-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const at = 1_700_000_000_000;
+  const events = [
+    { type: 4, data: { href: 'https://shop.test/', width: 800, height: 600 }, timestamp: at },
+    { type: 2, timestamp: at + 1, data: { initialOffset: { left: 0, top: 0 }, node: { type: 0, id: 1, childNodes: [
+      { type: 1, id: 2, name: 'html', publicId: '', systemId: '' },
+      { type: 2, id: 3, tagName: 'html', attributes: {}, childNodes: [
+        { type: 2, id: 4, tagName: 'head', attributes: {}, childNodes: [] },
+        { type: 2, id: 5, tagName: 'body', attributes: { style: 'background:#c00' }, childNodes: [
+          { type: 3, id: 6, textContent: 'Checkout' },
+          // A recorded page asks for a remote image: the renderer must not fetch it.
+          { type: 2, id: 7, tagName: 'img', attributes: { src: 'https://tracker.test/seen.png' }, childNodes: [] }] }] }] } } },
+    { type: 5, data: { tag: 'lens-end', payload: {} }, timestamp: at + 2000 },
+  ];
+  const recording = path.join(dir, 'recording.json');
+  const times = path.join(dir, 'times.json');
+  fs.writeFileSync(recording, JSON.stringify(events));
+  fs.writeFileSync(times, JSON.stringify([at + 500, at + 1500]));
+  const { stills } = require('../src/review-video.cjs');
+  await stills(tools, recording, times, dir);
+  const png = fs.readFileSync(path.join(dir, 'screenshot.png'));
+  assert.deepEqual([...png.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  assert.equal(png.readUInt32BE(16), 800);
+  for (const n of [0, 1]) {
+    const webp = fs.readFileSync(path.join(dir, `shot-${n}.webp`));
+    assert.equal(webp.toString('ascii', 0, 4) + webp.toString('ascii', 8, 12), 'RIFFWEBP');
+  }
+});
