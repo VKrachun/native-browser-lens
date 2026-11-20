@@ -138,7 +138,8 @@ pub fn verify(
         .filter(|(k, v)| k.starts_with("LENS_PRIVATE_") && !v.is_empty())
         .map(|(_, v)| v)
         .collect();
-    let (report, watched) = result.map_err(|e| scrub(&e, &private))?;
+    let private = forms(&private);
+    let (report, watched) = result.map_err(|e| scrub(&strip_ansi(&e), &private))?;
     let errors = errors(&report);
     let passed = report["stats"]["unexpected"].as_u64() == Some(0)
         && report["stats"]["expected"].as_u64().unwrap_or(0) > 0;
@@ -210,18 +211,42 @@ pub fn verify(
         "failedRequestsNow": requests,
         "consoleErrorsNow": console,
     });
-    // In the JSON text, where a value appears with its escapes.
-    let escaped: Vec<String> = private
+    let mut answer = answer;
+    scrub_value(&mut answer, &private);
+    Ok(answer)
+}
+
+/// Every form a private value can take in Playwright's output: as typed, escaped in JSON or a
+/// JavaScript string, and URL-encoded. Longest first, so a value inside another goes with it.
+fn forms(private: &[String]) -> Vec<String> {
+    let mut all: Vec<String> = private
         .iter()
-        .map(|v| {
-            serde_json::to_string(v)
-                .expect("strings serialize")
-                .trim_matches('"')
-                .to_string()
+        .filter(|v| !v.is_empty())
+        .flat_map(|v| {
+            let json = serde_json::to_string(v).expect("strings serialize");
+            let inner = json[1..json.len() - 1].to_string();
+            let twice = serde_json::to_string(&inner).expect("strings serialize");
+            [
+                v.clone(),
+                inner,
+                twice[1..twice.len() - 1].to_string(),
+                url::form_urlencoded::byte_serialize(v.as_bytes()).collect(),
+            ]
         })
         .collect();
-    serde_json::from_str(&scrub(&answer.to_string(), &escaped))
-        .map_err(|e| format!("the verdict could not be built: {e}"))
+    all.sort_by_key(|f| std::cmp::Reverse(f.len()));
+    all.dedup();
+    all
+}
+
+/// Each string in the answer, scrubbed.
+fn scrub_value(value: &mut Value, private: &[String]) {
+    match value {
+        Value::String(text) => *text = scrub(text, private),
+        Value::Array(items) => items.iter_mut().for_each(|v| scrub_value(v, private)),
+        Value::Object(map) => map.values_mut().for_each(|v| scrub_value(v, private)),
+        _ => {}
+    }
 }
 
 /// The text with each private value replaced.
@@ -410,6 +435,12 @@ mod tests {
             scrub("fill(\"hunter2\") failed", &["hunter2".into()]),
             "fill(\"[PRIVATE]\") failed"
         );
+        // Escaped, encoded, and one value inside another: none of it survives.
+        let private = forms(&["a\"b c".into(), "a\"b c d".into()]);
+        let mut answer = json!({ "errors": ["fill(\"a\\\"b c d\")"], "url": "/x?q=a%22b+c" });
+        scrub_value(&mut answer, &private);
+        let text = answer.to_string();
+        assert!(!text.contains("b c") && !text.contains("a%22b"), "{text}");
         assert_eq!(
             without_queries("GET https://a.test/x?id=REDACTED failed"),
             without_queries("GET https://a.test/x?id=7 failed")
