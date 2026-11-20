@@ -62,14 +62,26 @@ export default defineContentScript({
         retire();
       }
     };
-    const timer = setInterval(() => {
+    const sendReplay = () => {
       if (!unsent.length) return;
       const events = unsent;
       unsent = [];
       send({ kind: 'lens-replay', events });
-    }, SEND_MS);
+    };
+    const timer = setInterval(sendReplay, SEND_MS);
+    // A click that navigates ends this document before the next send: its last changes and steps
+    // go now, while the page is still here.
+    const leave = () => {
+      steps.flushAll();
+      sendReplay();
+    };
+    const hidden = () => document.visibilityState === 'hidden' && leave();
+    addEventListener('pagehide', leave);
+    document.addEventListener('visibilitychange', hidden);
     function retire() {
       clearInterval(timer);
+      removeEventListener('pagehide', leave);
+      document.removeEventListener('visibilitychange', hidden);
       steps.stop();
       stopRecording?.();
       unsent = [];

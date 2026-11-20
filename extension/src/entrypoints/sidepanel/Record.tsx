@@ -2,11 +2,20 @@ import { useEffect, useRef, useState } from 'react';
 import type { LensClient } from '@/lens-client';
 import { send, type CaptureResult, type SessionStart, type TabStatus } from '@/messages';
 import { MicIcon, StopIcon } from '@/ui/icons';
-import { MicrophoneBlocked, record, type Recording } from '@/voice';
+import { MicrophoneBlocked, record, toWav, type Recording } from '@/voice';
+import { spool, spooled, unspool } from '@/voice-spool';
 import type { SpeechStatus } from '@/protocol/SpeechStatus';
 import { ModelNotice } from './Voice';
 
 export type PanelMode = 'record' | 'capture';
+
+/** The voice a closed panel left for this tab's recording, as a WAV; null when none. */
+async function fromSpool(tab: number): Promise<{ wav: Blob; startedAt: number; tab: number } | null> {
+  const found = await spooled(tab);
+  if (!found?.parts.length) return null;
+  const wav = found.type === 'audio/wav' ? found.parts[0]! : await toWav(new Blob(found.parts, { type: found.type })).catch(() => null);
+  return wav && { wav, startedAt: found.startedAt, tab };
+}
 
 const clock = (ms: number) => {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -95,8 +104,9 @@ export function RecordControls({
     return () => clearInterval(timer);
   }, [running]);
 
-  // Firefox only: closing the panel ends its microphone; the session keeps running in the tab.
-  // Chrome records the voice in the background, so it survives the panel.
+  // Firefox only: closing the panel ends its microphone; the session keeps running in the tab, and
+  // the voice so far waits in the spool for its Stop. Chrome records the voice in the background,
+  // so it survives the panel.
   useEffect(() => () => microphone.current?.cancel(), []);
   const inBackground = !import.meta.env.FIREFOX;
 
@@ -109,7 +119,9 @@ export function RecordControls({
       if (microphone.current && microphoneTab.current !== tabId)
         return onProblem('Stop the recording in the other tab first: it is using the microphone.');
       try {
-        microphone.current = await record();
+        await unspool(tabId);
+        const tab = tabId;
+        microphone.current = await record((parts, type, startedAt) => void spool({ tab, startedAt, type, parts }));
         microphoneTab.current = tabId;
       } catch (error) {
         if (error instanceof MicrophoneBlocked) {
@@ -124,6 +136,7 @@ export function RecordControls({
       if (microphoneTab.current === tabId) {
         microphone.current?.cancel();
         microphone.current = microphoneTab.current = null;
+        void unspool(tabId);
       }
       if (started.microphoneBlocked) {
         await browser.tabs.create({ url: browser.runtime.getURL('/microphone.html') });
@@ -142,7 +155,7 @@ export function RecordControls({
     const spoken = mine ? microphone.current : null;
     if (mine) microphone.current = microphoneTab.current = null;
     try {
-      const kept = keptVoice.current?.tab === tabId ? keptVoice.current : null;
+      const kept = keptVoice.current?.tab === tabId ? keptVoice.current : spoken ? null : await fromSpool(tabId);
       const [result, wav] = await Promise.all([
         send<CaptureResult>({ kind: 'stopSession', tabId }),
         kept ? Promise.resolve(kept.wav) : spoken ? spoken.stop() : Promise.resolve(null),
@@ -150,7 +163,11 @@ export function RecordControls({
       const startedAt = kept?.startedAt ?? spoken?.startedAt;
       if (!result.ok) {
         // The background keeps the session; the voice waits here for Stop again.
-        if (wav && startedAt !== undefined) keptVoice.current = { wav, startedAt, tab: tabId };
+        if (wav && startedAt !== undefined) {
+          keptVoice.current = { wav, startedAt, tab: tabId };
+          // Also past this panel: closing it before Stop again keeps the voice.
+          void spool({ tab: tabId, startedAt, type: 'audio/wav', parts: [wav] });
+        }
         return onProblem(`The recording was not saved: ${result.error}`);
       }
       if (kept) keptVoice.current = null;
@@ -161,6 +178,7 @@ export function RecordControls({
           params: { observation: result.capture.observation, startedAt, audio },
         });
       }
+      await unspool(tabId);
       onProblem(null);
       await browser.tabs.create({
         url: browser.runtime.getURL(`/review.html?observation=${result.capture.observation}`),

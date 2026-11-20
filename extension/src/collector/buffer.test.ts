@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { EvidenceBuffer, MAX_EVENTS, ReplayBuffer, startBefore, WINDOW_MS } from './buffer';
+import { EvidenceBuffer, MAX_EVENTS, ReplayBuffer, ShotBuffer, startBefore, WINDOW_MS } from './buffer';
 
 describe('EvidenceBuffer', () => {
   it('keeps two minutes, then evicts by count and records the gap', () => {
@@ -75,3 +75,22 @@ describe('ReplayBuffer', () => {
   });
 });
 
+
+describe('ShotBuffer', () => {
+  it('keeps the shots of a session that started before its first shot, past the window', () => {
+    let now = 0;
+    const shots = new ShotBuffer(() => now);
+    shots.hold(1, 0);
+    shots.add(1, 1, 'a');
+    now = WINDOW_MS * 3;
+    shots.add(1, now, 'b');
+    expect(shots.since(1, 0).map((s) => s.data)).toEqual(['a', 'b']);
+  });
+
+  it('moves a recording to the tab that replaced it', () => {
+    const shots = new ShotBuffer(() => 10);
+    shots.add(1, 10, 'a');
+    shots.move(1, 2);
+    expect([shots.since(1, 0).length, shots.since(2, 0).length]).toEqual([0, 1]);
+  });
+});

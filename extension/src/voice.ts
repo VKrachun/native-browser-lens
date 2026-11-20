@@ -11,7 +11,11 @@ export interface Recording {
 /** The microphone is refused here: a side panel cannot ask, so a tab must ask once. */
 export class MicrophoneBlocked extends Error {}
 
-export async function record(): Promise<Recording> {
+/**
+ * `onData` hears the encoded audio so far, about once a second: a page that may close before
+ * Stop (Firefox's sidebar) keeps it somewhere that outlives the page.
+ */
+export async function record(onData?: (parts: Blob[], type: string, startedAt: number) => void): Promise<Recording> {
   let stream: MediaStream;
   try {
     stream = await navigator.mediaDevices.getUserMedia({
@@ -23,13 +27,18 @@ export async function record(): Promise<Recording> {
   }
   const recorder = new MediaRecorder(stream);
   const chunks: Blob[] = [];
-  recorder.ondataavailable = (event) => event.data.size && chunks.push(event.data);
+  let startedAt = 0;
+  recorder.ondataavailable = (event) => {
+    if (!event.data.size) return;
+    chunks.push(event.data);
+    if (startedAt) onData?.(chunks.slice(), recorder.mimeType, startedAt);
+  };
   // The clock starts with the first sample, not the call: speech then lines up with the replay.
   await new Promise((started) => {
     recorder.onstart = started;
     recorder.start(1000);
   });
-  const startedAt = Date.now();
+  startedAt = Date.now();
   const release = () => stream.getTracks().forEach((track) => track.stop());
   return {
     startedAt,
@@ -46,7 +55,7 @@ export async function record(): Promise<Recording> {
 }
 
 /** Decodes what MediaRecorder wrote and resamples it to 16 kHz mono, as Whisper reads it. */
-async function toWav(encoded: Blob): Promise<Blob> {
+export async function toWav(encoded: Blob): Promise<Blob> {
   const context = new AudioContext({ sampleRate: SAMPLE_RATE });
   try {
     const audio = await context.decodeAudioData(await encoded.arrayBuffer());

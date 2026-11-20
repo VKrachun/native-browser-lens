@@ -808,8 +808,13 @@ pub struct NewCapture {
     pub observation: Option<i64>,
     pub page_url: String,
     pub page_title: String,
-    /// PNG bytes, base64.
+    /// PNG bytes, base64; empty when `screenshot_blob` names them.
+    #[serde(default)]
     pub screenshot: String,
+    /// The PNG from UploadChunk: a large screenshot in base64 would pass the request limit.
+    #[serde(default)]
+    #[ts(optional)]
+    pub screenshot_blob: Option<BlobRef>,
     pub evidence: Evidence,
     /// The rrweb events (a JSON array) from UploadChunk, when the tab was recorded.
     pub recording: Option<BlobRef>,

@@ -196,8 +196,11 @@ export class ReplayBuffer {
   }
 
   hold(tabId: number, from: number | null) {
-    const entry = this.tabs.get(tabId);
-    if (entry) entry.hold = from ?? undefined;
+    // A session that starts before the first event still holds them: the entry starts here.
+    const entry = this.tabs.get(tabId) ?? (from === null ? undefined : { events: [], size: 0 });
+    if (!entry) return;
+    entry.hold = from ?? undefined;
+    this.tabs.set(tabId, entry);
   }
 
   /** The events from the last full snapshot at or before `from`, or the first one after it. */
@@ -285,8 +288,11 @@ export class ShotBuffer {
   }
 
   hold(tabId: number, from: number | null) {
-    const entry = this.tabs.get(tabId);
-    if (entry) entry.hold = from ?? undefined;
+    // A session that starts before its first shot still keeps them all: the entry starts here.
+    const entry = this.tabs.get(tabId) ?? (from === null ? undefined : { shots: [] });
+    if (!entry) return;
+    entry.hold = from ?? undefined;
+    this.tabs.set(tabId, entry);
   }
 
   since(tabId: number, from: number) {

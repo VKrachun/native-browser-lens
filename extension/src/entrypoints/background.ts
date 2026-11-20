@@ -1,6 +1,6 @@
 import { ActionLog, EvidenceBuffer, ReplayBuffer, ShotBuffer, WINDOW_MS } from '@/collector/buffer';
 import { DeepCollector } from '@/collector/deep';
-import { LimitedCollector, visibleShot } from '@/collector/limited';
+import { LimitedCollector, captureTab, visibleShot } from '@/collector/limited';
 import { maskShot, privateRects } from '@/collector/shot-mask';
 import { sanitize, sanitizeText, sanitizeUrl } from '@/collector/sanitize';
 import { LensClient } from '@/lens-client';
@@ -10,6 +10,7 @@ import {
   type BackgroundRequest,
   type Broadcast,
   type CaptureResult,
+  OFFSCREEN_PART_BYTES,
   type OffscreenReply,
   type OffscreenRequest,
   type SessionStart,
@@ -24,6 +25,9 @@ import type { Prepared, RecorderMessage } from './recorder.content';
 
 /** A recording uploads in chunks; past this it is left out with a gap. */
 const MAX_RECORDING_BYTES = 256 * 1024 * 1024;
+
+/** The voice of a Chrome session, as the offscreen page recorded it. */
+type Spoken = { ok: true; startedAt: number; wav: Blob | null } | { ok: false; error: string };
 
 export default defineBackground(() => {
   const buffer = new EvidenceBuffer();
@@ -44,12 +48,16 @@ export default defineBackground(() => {
         shotTimers.delete(tabId);
         const at = Date.now();
         void (async () => {
+          const page = async () => (await browser.tabs.get(tabId).catch(() => null))?.url;
+          const before = await page();
           // Where the private fields are, just before the shot: without that, no shot.
           const found = await browser.scripting
             .executeScript({ target: { tabId }, func: privateRects })
             .then((results) => results[0]?.result ?? null, () => null);
           if (!found) return;
           const raw = await (deep ? deep.shot(tabId) : visibleShot(tabId));
+          // Another page by now: the rectangles describe the old one, so they would mask the wrong places.
+          if (!before || (await page()) !== before) return;
           const data = raw && (await maskShot(raw, found));
           if (data && collecting(tabId)) shots.add(tabId, at, data);
         })();
@@ -84,7 +92,10 @@ export default defineBackground(() => {
    */
   function sync(tabId: number, url: string | undefined): Promise<void> {
     if (url) urls.set(tabId, url);
-    const next = (queues.get(tabId) ?? Promise.resolve()).then(() => syncNow(tabId)).catch(() => {});
+    const next = (queues.get(tabId) ?? Promise.resolve())
+      .then(() => syncNow(tabId))
+      .then(() => resume(tabId))
+      .catch(() => {});
     queues.set(tabId, next);
     return next;
   }
@@ -126,7 +137,77 @@ export default defineBackground(() => {
     }
   }
 
+  /**
+   * Chrome stops a service worker after 30 s without events, and a browser can restart it any
+   * time: the recordings in memory would be gone, and the panel would show Record again. So who
+   * records what is kept in storage.session, and a new worker continues those recordings; it
+   * loses only the evidence the old one held, and says so in a gap. While a recording runs, an
+   * extension call every 20 s keeps the worker (Chrome 110 and later), and an alarm wakes it
+   * when it stopped anyway.
+   */
+  // ponytail: the evidence itself is not spooled; spool it to IndexedDB if workers die mid-session in practice.
+  const SESSIONS_KEY = 'lens.sessions';
+  type Checkpoint = { sessions: [number, number][]; offProject: number[]; voiced: number[] };
+  let saved = '';
+  let alive: ReturnType<typeof setInterval> | undefined;
+  function checkpoint() {
+    const now: Checkpoint = { sessions: [...sessions], offProject: [...offProject], voiced: [...voiced] };
+    const text = JSON.stringify(now);
+    if (text !== saved) {
+      saved = text;
+      void browser.storage.session.set({ [SESSIONS_KEY]: now }).catch(() => {});
+    }
+    if (sessions.size > 0 && alive === undefined) {
+      alive = setInterval(() => void browser.runtime.getPlatformInfo().catch(() => {}), 20_000);
+      void browser.alarms?.create(SESSIONS_KEY, { periodInMinutes: 0.5 });
+    } else if (sessions.size === 0 && alive !== undefined) {
+      clearInterval(alive);
+      alive = undefined;
+      void browser.alarms?.clear(SESSIONS_KEY);
+    }
+  }
+  // The alarm's work is the wake itself: this script then restores the recordings.
+  browser.alarms?.onAlarm.addListener(() => {});
+
+  /** Recordings an earlier worker started: they continue once their tab collects again. */
+  const restored = new Set<number>();
+  async function restore() {
+    const found = await browser.storage.session.get(SESSIONS_KEY).catch(() => ({}) as Record<string, unknown>);
+    const earlier = found[SESSIONS_KEY] as Checkpoint | undefined;
+    if (!earlier) return;
+    const open = new Set((await browser.tabs.query({})).map((t) => t.id));
+    for (const [tabId, startedAt] of earlier.sessions) {
+      if (!open.has(tabId)) continue;
+      sessions.set(tabId, startedAt);
+      restored.add(tabId);
+    }
+    for (const tabId of earlier.offProject) if (sessions.has(tabId)) offProject.add(tabId);
+    // The microphone page outlives the worker: its voice still belongs to the recording.
+    const microphoneOpen = !import.meta.env.FIREFOX && (await browser.offscreen.hasDocument().catch(() => false));
+    for (const tabId of earlier.voiced) if (microphoneOpen && sessions.has(tabId)) voiced.add(tabId);
+    checkpoint();
+  }
+  /** Holds what a tab's recording needs, from its start on; null releases it. */
+  function holdAll(tabId: number, from: number | null) {
+    buffer.hold(tabId, from);
+    actions.hold(tabId, from);
+    replay.hold(tabId, from);
+    shots.hold(tabId, from);
+  }
+  /** After a sync: a restored recording resumes once its tab collects; the state is saved. */
+  function resume(tabId: number) {
+    if (restored.has(tabId) && collecting(tabId)) {
+      restored.delete(tabId);
+      holdAll(tabId, sessions.get(tabId) ?? null);
+      buffer.gap(tabId, 'collector', 'The browser restarted Lens in the background: what was recorded before is lost');
+      // The replay needs a fresh copy of the page to start from.
+      void browser.tabs.sendMessage(tabId, { kind: 'lens-snapshot' }).catch(() => {});
+    }
+    checkpoint();
+  }
+
   function stop(tabId: number) {
+    restored.delete(tabId);
     buffer.stop(tabId);
     actions.clear(tabId);
     replay.clear(tabId);
@@ -136,6 +217,7 @@ export default defineBackground(() => {
     offProject.delete(tabId);
     keptVoice.delete(tabId);
     void endMicrophone(tabId, 'mic-cancel');
+    checkpoint();
   }
 
   /** The rrweb recorder, in collected tabs only. Idempotent: the script guards against a second run. */
@@ -208,7 +290,9 @@ export default defineBackground(() => {
     try {
       const from = session ?? Date.now() - WINDOW_MS;
       const tab = await browser.tabs.get(tabId);
-      const screenshot = await takeScreenshot(tab);
+      // As a blob: a 10 MiB PNG in base64 would pass the app's request limit on its own.
+      const png = Uint8Array.from(atob(await takeScreenshot(tab)), (c) => c.charCodeAt(0));
+      const screenshotBlob = await client().upload(new Blob([png], { type: 'image/png' }), 'image/png');
       const snapshot = buffer.snapshot(tabId, from) ?? {
         mode: 'screenshotOnly' as const,
         events: [],
@@ -243,7 +327,8 @@ export default defineBackground(() => {
           observation,
           pageUrl: sanitizeUrl(tab.url ?? ''),
           pageTitle: sanitizeText(tab.title ?? ''),
-          screenshot,
+          screenshot: '',
+          screenshotBlob,
           evidence: { ...snapshot, page, actions: [...actions.snapshot(tabId, from), ...pending], elements },
           recording,
           kind: session === null ? 'moment' : 'session',
@@ -260,7 +345,7 @@ export default defineBackground(() => {
 
   /** Chrome: tabs whose session records the microphone in the offscreen page. One at a time. */
   const voiced = new Set<number>();
-  async function microphone(kind: OffscreenRequest['kind']): Promise<OffscreenReply> {
+  async function microphone(kind: Exclude<OffscreenRequest['kind'], 'mic-part'>, offset = 0): Promise<OffscreenReply> {
     if (kind === 'mic-start' && !(await browser.offscreen.hasDocument())) {
       await browser.offscreen.createDocument({
         url: browser.runtime.getURL('/offscreen.html'),
@@ -270,9 +355,28 @@ export default defineBackground(() => {
     }
     return browser.runtime.sendMessage({ target: 'offscreen', kind } satisfies OffscreenRequest);
   }
-  async function endMicrophone(tabId: number, kind: 'mic-stop' | 'mic-cancel'): Promise<OffscreenReply | null> {
+  /** The offscreen page's WAV, read in parts: one message carries at most 64 MiB. */
+  async function readWav(size: number): Promise<Blob> {
+    const parts: Uint8Array<ArrayBuffer>[] = [];
+    for (let offset = 0; offset < size; offset += OFFSCREEN_PART_BYTES) {
+      const part: OffscreenReply = await browser.runtime.sendMessage({ target: 'offscreen', kind: 'mic-part', offset } satisfies OffscreenRequest);
+      if (!part.ok || !part.wav) throw new Error(part.ok ? 'the voice broke off' : part.error);
+      parts.push(Uint8Array.from(atob(part.wav), (c) => c.charCodeAt(0)) as Uint8Array<ArrayBuffer>);
+    }
+    return new Blob(parts, { type: 'audio/wav' });
+  }
+  async function endMicrophone(tabId: number, kind: 'mic-stop' | 'mic-cancel'): Promise<Spoken | null> {
     if (!voiced.delete(tabId)) return null;
-    const reply = await microphone(kind).catch((error: Error) => ({ ok: false as const, error: error.message }));
+    checkpoint();
+    let reply: Spoken;
+    try {
+      const ended = await microphone(kind);
+      reply = !ended.ok
+        ? ended
+        : { ok: true, startedAt: ended.startedAt, wav: kind === 'mic-stop' && ended.size ? await readWav(ended.size) : null };
+    } catch (error) {
+      reply = { ok: false, error: (error as Error).message };
+    }
     if (voiced.size === 0) await browser.offscreen.closeDocument().catch(() => {});
     return reply;
   }
@@ -295,17 +399,15 @@ export default defineBackground(() => {
     }
     const startedAt = sessions.get(tabId) ?? Date.now();
     sessions.set(tabId, startedAt);
-    buffer.hold(tabId, startedAt);
-    actions.hold(tabId, startedAt);
-    replay.hold(tabId, startedAt);
-    shots.hold(tabId, startedAt);
+    holdAll(tabId, startedAt);
+    checkpoint();
     await browser.tabs.sendMessage(tabId, { kind: 'lens-snapshot' }).catch(() => {});
     void broadcast({ kind: 'tabChanged', tabId });
     return { ok: true, startedAt };
   }
 
   /** The voice of a Stop that the app did not take: the next Stop saves it with the recording. */
-  const keptVoice = new Map<number, OffscreenReply | null>();
+  const keptVoice = new Map<number, Spoken | null>();
   async function stopSession(tabId: number): Promise<CaptureResult> {
     const startedAt = sessions.get(tabId);
     if (startedAt === undefined) return { ok: false, error: 'No recording runs in this tab.' };
@@ -322,16 +424,14 @@ export default defineBackground(() => {
     }
     keptVoice.delete(tabId);
     sessions.delete(tabId);
-    buffer.hold(tabId, null);
-    actions.hold(tabId, null);
-    replay.hold(tabId, null);
-    shots.hold(tabId, null);
+    restored.delete(tabId);
+    holdAll(tabId, null);
+    checkpoint();
     void broadcast({ kind: 'tabChanged', tabId });
     if (!result.ok || !spoken) return result;
     try {
       if (!spoken.ok || !spoken.wav) throw new Error(spoken.ok ? 'it is empty' : spoken.error);
-      const bytes = Uint8Array.from(atob(spoken.wav), (c) => c.charCodeAt(0));
-      const audio = await client().upload(new Blob([bytes], { type: 'audio/wav' }), 'audio/wav');
+      const audio = await client().upload(spoken.wav, 'audio/wav');
       await client().request({
         method: 'addVoiceNote',
         params: { observation: result.capture.observation, startedAt: spoken.startedAt, audio },
@@ -346,8 +446,10 @@ export default defineBackground(() => {
    * click or the shortcut) and the tab in front. */
   async function takeScreenshot(tab: Browser.tabs.Tab): Promise<string> {
     if (tab.id !== undefined && deep?.isAttached(tab.id)) return deep.screenshot(tab.id);
-    if (!tab.active && tab.id !== undefined) await browser.tabs.update(tab.id, { active: true });
-    const image = await browser.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+    if (tab.id === undefined) throw new Error('The tab is gone');
+    if (!tab.active) await browser.tabs.update(tab.id, { active: true });
+    const image = await captureTab(tab.id);
+    if (!image) throw new Error('Another tab came to the front during the screenshot; press again');
     return image.slice(image.indexOf(',') + 1);
   }
 
@@ -425,6 +527,8 @@ export default defineBackground(() => {
       keptVoice.delete(removed);
       if (voiced.delete(removed)) voiced.add(added);
       if (offProject.delete(removed)) offProject.add(added);
+      if (restored.delete(removed)) restored.add(added);
+      checkpoint();
     } else {
       stop(removed);
     }
@@ -523,18 +627,17 @@ export default defineBackground(() => {
     if (agentsLive) void serveAgents();
   });
 
-  void loadProjects();
-  // A restarted background has no sessions: a microphone page left from before records nothing
-  // anyone can save, and open panels must stop showing a recording.
-  if (!import.meta.env.FIREFOX) {
-    void browser.offscreen
-      .hasDocument()
-      .then((open) => {
-        if (open && voiced.size === 0) return browser.offscreen.closeDocument();
-      })
-      .catch(() => {});
-  }
-  void broadcast({ kind: 'tabChanged', tabId: -1 });
+  // The recordings of an earlier worker first: the sync after it then resumes them.
+  void restore()
+    .catch(() => {})
+    .then(async () => {
+      await loadProjects();
+      // A microphone page that no restored recording owns records nothing anyone can save.
+      if (!import.meta.env.FIREFOX && voiced.size === 0 && (await browser.offscreen.hasDocument().catch(() => false))) {
+        await browser.offscreen.closeDocument().catch(() => {});
+      }
+      await broadcast({ kind: 'tabChanged', tabId: -1 });
+    });
   // Pause and resume come from the Lens menu, outside the browser: check for them regularly.
   setInterval(() => {
     const before = paused;

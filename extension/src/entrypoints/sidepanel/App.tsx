@@ -163,11 +163,10 @@ export function App() {
   async function track() {
     if (!client || !site?.origin) return;
     const origin = site.origin;
-    // The permission prompt must open inside the click, before any other await. Firefox also
-    // needs all sites for screenshots (see useScreenAccess); one prompt asks for both.
-    const granted = await browser.permissions.request({
-      origins: [`${origin}/*`, ...(import.meta.env.FIREFOX ? ['<all_urls>'] : [])],
-    });
+    // The permission prompt must open inside the click, before any other await. The site only:
+    // Firefox's screenshot access (all sites) is its own prompt at Record and Capture (see
+    // useScreenAccess), so refusing that one never blocks adding the site.
+    const granted = await browser.permissions.request({ origins: [`${origin}/*`] });
     if (!granted) return setProblem(`Lens may not read ${origin}.`);
     try {
       if (site.projectId === null) {

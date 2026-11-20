@@ -46,14 +46,26 @@ export class LimitedCollector {
 }
 
 /**
+ * The visible part of the window, as a PNG data URL, when it shows `tabId`; null when another tab
+ * or page came to the front during the shot. captureVisibleTab shoots the window, not the tab: a
+ * switch at that moment would put another tab's pixels in this tab's record.
+ */
+export async function captureTab(tabId: number): Promise<string | null> {
+  const before = await browser.tabs.get(tabId);
+  if (!before.active) return null;
+  const png = await browser.tabs.captureVisibleTab(before.windowId, { format: 'png' });
+  const after = await browser.tabs.get(tabId);
+  return after.active && after.url === before.url ? png : null;
+}
+
+/**
  * Firefox has no debugger: a WebP shot of the visible tab, about 1280 px wide, base64. Only when
  * the tab is in front (the visible tab is what can be shot) and the grant allows it; else none.
  */
 export async function visibleShot(tabId: number): Promise<string | null> {
   try {
-    const tab = await browser.tabs.get(tabId);
-    if (!tab.active) return null;
-    const png = await browser.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+    const png = await captureTab(tabId);
+    if (!png) return null;
     const bitmap = await createImageBitmap(await (await fetch(png)).blob());
     const scale = Math.min(1, 1280 / Math.max(1, bitmap.width));
     const canvas = new OffscreenCanvas(Math.round(bitmap.width * scale), Math.round(bitmap.height * scale));

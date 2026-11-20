@@ -107,14 +107,20 @@ async function fill(url: string, key: string, titleSelector: string, title: stri
     if (files.length) lexxy.contents.uploadFiles(files);
   }
   const normalize = (value: string) => value.replace(/\s+/g, ' ').trim();
-  for (let i = 0; i < 50; i++) {
+  let placed = false;
+  // The files show in the editor at once, with a progress bar until Basecamp has them: a draft
+  // saved before that loses them. Up to two minutes for the uploads.
+  for (let i = 0; i < 1200; i++) {
     if (location.href !== url || !form.isConnected) break;
     const attachments = Array.from(notes.querySelectorAll('figure, action-text-attachment, [data-trix-attachment]'));
-    if (normalize(notes.innerText).includes(normalize(body)) &&
-        files.every(file => attachments.some(node => node.textContent?.includes(file.name) ||
-          node.getAttribute('filename') === file.name || node.getAttribute('data-trix-attachment')?.includes(file.name)))) return '';
+    placed = normalize(notes.innerText).includes(normalize(body)) &&
+      files.every(file => attachments.some(node => node.textContent?.includes(file.name) ||
+        node.getAttribute('filename') === file.name || node.getAttribute('data-trix-attachment')?.includes(file.name)));
+    if (placed && !notes.querySelector('progress')) return '';
+    if (!placed && i >= 50) break;
     await new Promise(resolve => setTimeout(resolve, 100));
   }
+  if (placed) return 'The files still upload in the Basecamp tab. Wait until their progress bars are gone, then save the to-do.';
   return 'Check the open draft. Lens could not confirm all of the Notes and attachments.';
 }
 
