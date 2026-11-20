@@ -120,11 +120,23 @@ pub fn install(paths: &Paths, executable: &Path) -> io::Result<()> {
     std::fs::create_dir_all(path.parent().expect("plist has a folder"))?;
     let _ = run("launchctl", &["bootout", &format!("{}/{LABEL}", domain())]);
     std::fs::write(&path, plist(executable, paths))?;
-    run(
-        "launchctl",
-        &["bootstrap", &domain(), &path.display().to_string()],
-    )
-    .map(drop)
+    // A daemon the browser started holds the lock: launchd's would see it and exit for good.
+    let _ = crate::stop_daemon(paths);
+    // bootout can return before the old job is gone; bootstrap then fails for a moment.
+    let mut tries = 0;
+    loop {
+        match run(
+            "launchctl",
+            &["bootstrap", &domain(), &path.display().to_string()],
+        ) {
+            Ok(_) => return Ok(()),
+            Err(_) if tries < 10 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -310,8 +322,12 @@ fn runs(_paths: &Paths, executable: &Path) -> bool {
     RegKey::predef(HKEY_CURRENT_USER)
         .open_subkey(RUN_KEY)
         .and_then(|k| k.get_value::<String, _>(RUN_VALUE))
+        // Windows paths ignore case: C:\Users\Ana and c:\users\ana are one folder.
         .is_ok_and(|have| {
-            have == format!("\"{}\" daemon --service", launcher(executable).display())
+            have.eq_ignore_ascii_case(&format!(
+                "\"{}\" daemon --service",
+                launcher(executable).display()
+            ))
         })
 }
 

@@ -309,6 +309,10 @@ export default defineBackground(() => {
   async function stopSession(tabId: number): Promise<CaptureResult> {
     const startedAt = sessions.get(tabId);
     if (startedAt === undefined) return { ok: false, error: 'No recording runs in this tab.' };
+    // The page now is not the project's: its screenshot, URL and title must not join the recording.
+    if (offProject.has(tabId)) {
+      return { ok: false, error: 'This tab is on a site outside the project. Go back to the project site, then press Stop' };
+    }
     const voiceSoFar = keptVoice.has(tabId) ? Promise.resolve(keptVoice.get(tabId) ?? null) : endMicrophone(tabId, 'mic-stop');
     const [result, spoken] = await Promise.all([capture(tabId, null, startedAt), voiceSoFar]);
     if (!result.ok) {
@@ -411,7 +415,19 @@ export default defineBackground(() => {
   });
   // A prerendered or discarded tab swapped in gets a new id: the old one's state goes.
   browser.tabs.onReplaced.addListener((added, removed) => {
-    stop(removed);
+    // A prerendered page swapped in: to the person it is the same tab, so a recording moves along.
+    if (sessions.has(removed)) {
+      for (const store of [buffer, actions, replay, shots]) store.move(removed, added);
+      clearTimeout(shotTimers.get(removed));
+      sessions.set(added, sessions.get(removed)!);
+      sessions.delete(removed);
+      if (keptVoice.has(removed)) keptVoice.set(added, keptVoice.get(removed)!);
+      keptVoice.delete(removed);
+      if (voiced.delete(removed)) voiced.add(added);
+      if (offProject.delete(removed)) offProject.add(added);
+    } else {
+      stop(removed);
+    }
     urls.delete(removed);
     queues.delete(removed);
     void deep?.detach(removed);
@@ -470,7 +486,8 @@ export default defineBackground(() => {
         const from = Date.now() - WINDOW_MS;
         const tabs = [];
         for (const tab of await browser.tabs.query({})) {
-          if (tab.id === undefined || !collecting(tab.id)) continue;
+          // A recording can span projects: its evidence leaves as a review, not here.
+          if (tab.id === undefined || !collecting(tab.id) || sessions.has(tab.id)) continue;
           let host = '';
           try {
             host = new URL(tab.url ?? '').hostname;

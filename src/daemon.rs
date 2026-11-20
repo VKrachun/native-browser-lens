@@ -46,6 +46,22 @@ const TOKEN_ENV: &str = "LENS_VIBEQ_TOKEN";
 /// would otherwise stall every browser.
 static HAS_TOKEN: Mutex<Option<bool>> = Mutex::new(None);
 
+/// The observations being filed now. A second filing of one (a double click, the page and an
+/// agent) is refused: both would freeze their own submission and VibeQ would get two tasks.
+static FILING: Mutex<std::collections::BTreeSet<i64>> =
+    Mutex::new(std::collections::BTreeSet::new());
+
+struct FilingNow(i64);
+
+impl Drop for FilingNow {
+    fn drop(&mut self) {
+        FILING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.0);
+    }
+}
+
 fn has_token() -> bool {
     let mut known = HAS_TOKEN.lock().unwrap_or_else(|e| e.into_inner());
     *known.get_or_insert_with(|| saved_token().ok().flatten().is_some())
@@ -1140,6 +1156,17 @@ impl Daemon {
                     .get_review(review)
                     .map_err(storage)?
                     .ok_or_else(|| not_found("no such review"))?;
+                if !FILING
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(found.observation)
+                {
+                    return Err(ProtocolError::new(
+                        ErrorCode::Conflict,
+                        "Lens is filing this already; wait for it to finish",
+                    ));
+                }
+                let _filing = FilingNow(found.observation);
                 let existing = store.filing(review).map_err(storage)?;
                 let filed = store.filed_revision(found.observation).map_err(storage)?;
                 let install = self.install_id(&store)?;
@@ -1704,10 +1731,15 @@ impl Daemon {
         let summary =
             investigate::summarize(&context, &self.notebook, preferred).map_err(remote)?;
         // The review page offers to split by these, also when the summary ran in the background.
-        let _ = self.lock_store().set_setting(
-            &format!("issues.{observation}"),
-            &serde_json::to_string(&summary.issues).expect("issues serialize"),
-        );
+        // Not for an observation deleted while the model ran: a new one can get its ID.
+        let store = self.lock_store();
+        if store.get_observation(observation).ok().flatten().is_some() {
+            let _ = store.set_setting(
+                &format!("issues.{observation}"),
+                &serde_json::to_string(&summary.issues).expect("issues serialize"),
+            );
+        }
+        drop(store);
         Ok(summary)
     }
 
@@ -2288,7 +2320,12 @@ fn restart_soon(paths: &Paths, executable: &std::path::Path) {
     // (Restart=on-failure) or launchd (KeepAlive unless SuccessfulExit) starts the new program.
     // Only a supervised daemon may exit to restart: launchd on macOS, systemd on Linux (it sets
     // INVOCATION_ID). One from a desktop autostart entry restarts itself like a plain one.
-    let supervised = cfg!(target_os = "macos") || std::env::var_os("INVOCATION_ID").is_some();
+    // launchd names its job in XPC_SERVICE_NAME; a --service daemon started without the plist
+    // has no launchd to start it again.
+    #[cfg(target_os = "macos")]
+    let supervised = std::env::var("XPC_SERVICE_NAME").is_ok_and(|n| n == crate::service::LABEL);
+    #[cfg(not(target_os = "macos"))]
+    let supervised = std::env::var_os("INVOCATION_ID").is_some();
     if cfg!(unix) && supervised && SERVICE.load(std::sync::atomic::Ordering::SeqCst) {
         log(
             paths,

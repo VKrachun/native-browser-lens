@@ -164,7 +164,7 @@ fn capture_from_row(row: &rusqlite::Row) -> rusqlite::Result<Capture> {
         },
         event_count: row.get(10)?,
         gap_count: row.get(11)?,
-        annotations: serde_json::from_str(&annotations).unwrap_or_default(),
+        annotations: stored_json(12, &annotations)?,
         recording: match (
             row.get::<_, Option<String>>(13)?,
             row.get::<_, Option<i64>>(14)?,
@@ -182,8 +182,16 @@ fn capture_from_row(row: &rusqlite::Row) -> rusqlite::Result<Capture> {
             CaptureKind::Moment
         },
         started_at: row.get(16)?,
-        edits: serde_json::from_str(&edits).unwrap_or_default(),
-        shots: serde_json::from_str(&row.get::<_, String>(18)?).unwrap_or_default(),
+        edits: stored_json(17, &edits)?,
+        shots: stored_json(18, &row.get::<_, String>(18)?)?,
+    })
+}
+
+/// A JSON column read strictly: masks and cuts that cannot be read must fail the capture, never
+/// read as none, so a review cannot leave with what the person hid.
+fn stored_json<T: serde::de::DeserializeOwned>(column: usize, text: &str) -> rusqlite::Result<T> {
+    serde_json::from_str(text).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(column, rusqlite::types::Type::Text, Box::new(e))
     })
 }
 
@@ -549,6 +557,9 @@ impl Store {
         }
         tx.execute("DELETE FROM filings WHERE observation_id = ?1", [id])?;
         tx.execute("DELETE FROM observations WHERE id = ?1", [id])?;
+        for key in [format!("issues.{id}"), format!("title.auto.{id}")] {
+            tx.execute("DELETE FROM settings WHERE key = ?1", [key])?;
+        }
         tx.commit()?;
         let mut out = Vec::new();
         for copy in copies {

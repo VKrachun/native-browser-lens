@@ -58,7 +58,13 @@ fn instrument(spec: &str) -> String {
 
 /// A failure as people compare it: the status and the path of a request, or a console text.
 fn key_of_finding(finding: &str) -> Option<String> {
-    let path = |url: &str| url::Url::parse(url).ok().map(|u| u.path().to_string());
+    // Web addresses only: "net::ERR_FAILED" parses as a URL too, and would never match.
+    let path = |url: &str| {
+        url::Url::parse(url)
+            .ok()
+            .filter(|u| matches!(u.scheme(), "http" | "https"))
+            .map(|u| u.path().to_string())
+    };
     if let Some(rest) = finding.strip_prefix("Request failed: ") {
         return Some(format!("0 {}", path(rest.split_whitespace().last()?)?));
     }
@@ -124,7 +130,15 @@ pub fn verify(
     let _ = std::fs::remove_dir(project.join(".lens"));
     let (report, watched) = result?;
 
-    let errors = errors(&report);
+    // Private values the agent's environment gives the test never come back in its messages.
+    let private: Vec<String> = std::env::vars()
+        .filter(|(k, v)| k.starts_with("LENS_PRIVATE_") && !v.is_empty())
+        .map(|(_, v)| v)
+        .collect();
+    let errors: Vec<String> = errors(&report)
+        .into_iter()
+        .map(|e| private.iter().fold(e, |e, v| e.replace(v, "[PRIVATE]")))
+        .collect();
     let passed = report["stats"]["unexpected"].as_u64() == Some(0)
         && report["stats"]["expected"].as_u64().unwrap_or(0) > 0;
     let recorded = crate::export::findings(raw_evidence);
@@ -148,27 +162,32 @@ pub fn verify(
         .unwrap_or_default();
     let mut still = Vec::new();
     let mut gone = Vec::new();
+    // A failure without an address or a text to compare: Lens cannot say that it is gone.
+    let mut unknown = Vec::new();
     for finding in &recorded {
-        let again = match key_of_finding(finding) {
-            Some(key) => now.contains(&key),
-            None => finding
-                .strip_prefix("Console error: ")
-                .or_else(|| finding.strip_prefix("Exception: "))
-                .is_some_and(|text| {
-                    let text = without_queries(text.trim());
-                    console.iter().any(|c| without_queries(c).contains(&text))
-                }),
+        let text = finding
+            .strip_prefix("Console error: ")
+            .or_else(|| finding.strip_prefix("Exception: "));
+        let again = match (key_of_finding(finding), text) {
+            (Some(key), _) => Some(now.contains(&key)),
+            (None, Some(text)) => {
+                let text = without_queries(text.trim());
+                Some(console.iter().any(|c| without_queries(c).contains(&text)))
+            }
+            (None, None) => None,
         };
-        if again {
-            still.push(finding.clone());
-        } else {
-            gone.push(finding.clone());
+        match again {
+            Some(true) => still.push(finding.clone()),
+            Some(false) => gone.push(finding.clone()),
+            None => unknown.push(finding.clone()),
         }
     }
     let verdict = if !passed {
         "The steps did not run through: see errors. The defect, or a changed page, stops them."
     } else if !still.is_empty() {
         "The steps ran, but a failure the person recorded happened again: see stillFailing."
+    } else if !unknown.is_empty() {
+        "The steps ran, and no failure Lens can compare happened again; check notCompared by hand."
     } else {
         "The steps ran on the dev server, and none of the failures the person recorded happened again."
     };
@@ -182,6 +201,7 @@ pub fn verify(
         "recordedFindings": recorded,
         "stillFailing": still,
         "notSeenAgain": gone,
+        "notCompared": unknown,
         "failedRequestsNow": requests,
         "consoleErrorsNow": console,
     }))
@@ -195,6 +215,10 @@ fn run(project: &Path, config: &Path, seen: &Path) -> Result<(Value, Value), Str
     let (_, out, err) = crate::handoff::bounded(
         Command::new(&npx)
             .env("PATH", crate::investigate::path_for(&npx))
+            // The JSON report goes to stdout, never over a file the project's CI keeps.
+            .env_remove("PLAYWRIGHT_JSON_OUTPUT_FILE")
+            .env_remove("PLAYWRIGHT_JSON_OUTPUT_DIR")
+            .env_remove("PLAYWRIGHT_JSON_OUTPUT_NAME")
             .args(["--no-install", "playwright", "test", "--config"])
             .arg(config)
             .current_dir(project)

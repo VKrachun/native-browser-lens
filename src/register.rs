@@ -273,7 +273,12 @@ fn manifest_problem(path: &Path, family: Family, executable: &Path) -> Option<St
         return Some("the registration is damaged; run lens register".into());
     };
     let expected = manifest(family, executable);
-    if found["path"] != expected["path"] {
+    // Windows and macOS paths ignore case.
+    let same = match (found["path"].as_str(), expected["path"].as_str()) {
+        (Some(a), Some(b)) if cfg!(any(windows, target_os = "macos")) => a.eq_ignore_ascii_case(b),
+        (a, b) => a == b,
+    };
+    if !same {
         return Some(format!(
             "registered for {}, not this Lens; run lens register",
             found["path"].as_str().unwrap_or("another program")

@@ -268,6 +268,16 @@ pub fn open(paths: &Paths) -> io::Result<()> {
 /// The setup steps of `open`; true when an extension of this version has already connected.
 fn open_steps(paths: &Paths) -> io::Result<bool> {
     let executable = crate::paths::executable()?;
+    // Opened from the disk image, or moved by Gatekeeper to a random read-only folder: the
+    // browsers and the login item would name a path that is gone after a restart.
+    let at = executable.to_string_lossy();
+    if cfg!(target_os = "macos")
+        && (at.starts_with("/Volumes/") || at.contains("/AppTranslocation/"))
+    {
+        return Err(io::Error::other(
+            "drag Sirv Lens to the Applications folder, then open it from there",
+        ));
+    }
     crate::bundle::sync_extensions(paths)?;
     crate::register::register(paths, &executable)?;
     crate::service::ensure(paths, &executable)?;

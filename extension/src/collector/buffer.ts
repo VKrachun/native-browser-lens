@@ -80,6 +80,11 @@ export class EvidenceBuffer {
   }
 
   /** Keeps everything from `from` on, past the window, until released with null. */
+  /** The tab became another tab (a prerendered page swapped in): its record goes along. */
+  move(from: number, to: number) {
+    for (const map of [this.tabs] as Map<number, unknown>[]) moveKey(map, from, to);
+  }
+
   hold(tabId: number, from: number | null) {
     const entry = this.tabs.get(tabId);
     if (entry) entry.hold = from ?? undefined;
@@ -133,6 +138,11 @@ export class ActionLog {
     this.tabs.set(tabId, list);
   }
 
+  /** The tab became another tab (a prerendered page swapped in): its record goes along. */
+  move(from: number, to: number) {
+    for (const map of [this.tabs, this.holds] as Map<number, unknown>[]) moveKey(map, from, to);
+  }
+
   hold(tabId: number, from: number | null) {
     if (from === null) this.holds.delete(tabId);
     else this.holds.set(tabId, from);
@@ -178,6 +188,11 @@ export class ReplayBuffer {
     }
     this.tabs.set(tabId, entry);
     this.prune(entry);
+  }
+
+  /** The tab became another tab (a prerendered page swapped in): its record goes along. */
+  move(from: number, to: number) {
+    for (const map of [this.tabs] as Map<number, unknown>[]) moveKey(map, from, to);
   }
 
   hold(tabId: number, from: number | null) {
@@ -264,6 +279,11 @@ export class ShotBuffer {
     return true;
   }
 
+  /** The tab became another tab (a prerendered page swapped in): its record goes along. */
+  move(from: number, to: number) {
+    for (const map of [this.tabs] as Map<number, unknown>[]) moveKey(map, from, to);
+  }
+
   hold(tabId: number, from: number | null) {
     const entry = this.tabs.get(tabId);
     if (entry) entry.hold = from ?? undefined;
@@ -276,4 +296,10 @@ export class ShotBuffer {
   clear(tabId: number) {
     this.tabs.delete(tabId);
   }
+}
+
+function moveKey(map: Map<number, unknown>, from: number, to: number) {
+  if (!map.has(from)) return;
+  map.set(to, map.get(from));
+  map.delete(from);
 }

@@ -117,13 +117,9 @@ export class LensClient {
     });
     port.onDisconnect.addListener(() => {
       if (this.port !== port) return;
-      this.port = null;
       // Firefox puts the cause on the port. Chromium exposes it through runtime.lastError.
       const { error } = port as Browser.runtime.Port & { error?: { message: string } | null };
-      const closed = new LensError('disconnected', error?.message ?? browser.runtime.lastError?.message ?? 'Lens closed the connection');
-      for (const waiter of this.pending.values()) waiter.reject(closed);
-      this.pending.clear();
-      this.onClose(closed);
+      this.fail(new LensError('disconnected', error?.message ?? browser.runtime.lastError?.message ?? 'Lens closed the connection'));
     });
     this.port = port;
     return port;
@@ -136,11 +132,20 @@ export class LensClient {
       try {
         (this.port ?? this.open()).postMessage({ id, ...request });
       } catch (error) {
-        this.pending.delete(id);
-        this.port = null;
-        reject(new LensError('disconnected', (error as Error).message));
+        // The port is dead: every request on it fails now, not only this one.
+        this.port?.disconnect();
+        this.fail(new LensError('disconnected', (error as Error).message));
       }
     });
+  }
+
+  /** Ends the connection: each waiting request fails once, then the owner hears of it. */
+  private fail(closed: LensError) {
+    this.port = null;
+    const waiting = [...this.pending.values()];
+    this.pending.clear();
+    for (const waiter of waiting) waiter.reject(closed);
+    this.onClose(closed);
   }
 
   /** Closes the port; a later request opens a new one. */
