@@ -201,11 +201,12 @@ pub fn playwright(
 
 /// How a test reaches `url`. After a click or a key, the page usually gets there itself: wait for
 /// it. Timing alone cannot tell (the person may have typed an address after opening a menu), so a
-/// wait that sees no navigation goes there after five seconds instead of failing.
+/// wait that sees no navigation goes there after five seconds instead of failing. It tells a Lens
+/// check that it did (`lensMissed`): a button that stopped navigating is the defect, not a pass.
 pub fn navigation(url: &str, caused: bool) -> String {
     if caused {
         format!(
-            "  await page.waitForURL({0}, {{ timeout: 5000 }}).catch(() => page.goto({0}));",
+            "  await page.waitForURL({0}, {{ timeout: 5000 }}).catch(() => ((globalThis as {{ lensMissed?: (url: string) => void }}).lensMissed?.({0}), page.goto({0})));",
             js(url)
         )
     } else {
@@ -909,7 +910,7 @@ mod tests {
             "  await page.getByRole(\"textbox\", { name: \"Coupon\", exact: true }).fill(\"SAVE10\");",
             "  await page.getByRole(\"button\", { name: \"Pay\", exact: true }).click();",
             "  // Lens recorded: HTTP 500 from POST https://shop.test/api/price",
-            "  await page.waitForURL(\"https://shop.test/receipt\", { timeout: 5000 }).catch(() => page.goto(\"https://shop.test/receipt\"));",
+            "  await page.waitForURL(\"https://shop.test/receipt\", { timeout: 5000 }).catch(() => ((globalThis as { lensMissed?: (url: string) => void }).lensMissed?.(\"https://shop.test/receipt\"), page.goto(\"https://shop.test/receipt\")));",
             "await page.screenshot({ path: 'capture-1-reproduced.png' });",
         ] {
             assert!(

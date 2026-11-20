@@ -295,6 +295,33 @@ impl OriginMap {
     }
 }
 
+/// The first lines of a project test: a page load on another site (production, a payment or
+/// sign-in site) is stopped in the browser before it gets there. A click before Lens's `throw` can
+/// submit a form or follow a redirect there, so the throw alone is not enough. A Lens check hears
+/// of each stop (`lensBlocked`).
+// ponytail: a server redirect after an allowed request is followed by the browser unrouted; a
+// framenavigated check would catch it after the fact.
+fn guard(map: &OriginMap) -> String {
+    let home = match &map.base {
+        Some(base) => serde_json::to_string(base).expect("strings serialize"),
+        None => "String(test.info().project.use.baseURL)".into(),
+    };
+    format!(
+        "  // Lens: this test runs on the dev server only; a page load on another site stops here.\n  \
+         const lensHome = new URL({home}).origin;\n  \
+         await page.context().route('**/*', (route) => {{\n    \
+           const request = route.request();\n    \
+           let top = true;\n    \
+           try {{ top = !request.frame().parentFrame(); }} catch {{}}\n    \
+           if (request.isNavigationRequest() && top && new URL(request.url()).origin !== lensHome) {{\n      \
+             (globalThis as {{ lensBlocked?: (url: string) => void }}).lensBlocked?.(request.url());\n      \
+             return route.abort('blockedbyclient');\n    \
+           }}\n    \
+           return route.fallback();\n  \
+         }});\n"
+    )
+}
+
 fn for_project(spec: &str, map: &OriginMap, n: usize, name: &str, review: i64) -> String {
     // Only the pages the test opens move to the dev server: text the person typed keeps its URLs.
     let mut out = String::new();
@@ -319,6 +346,9 @@ fn for_project(spec: &str, map: &OriginMap, n: usize, name: &str, review: i64) -
             None => out.push_str(line),
         }
         out.push('\n');
+        if line.starts_with("test(") && line.ends_with("async ({ page }) => {") {
+            out.push_str(&guard(map));
+        }
     }
     for (from, to) in [
         (format!("capture-{n}.spec.ts"), format!("{name}.spec.ts")),
@@ -524,14 +554,14 @@ mod project_tests {
 
     #[test]
     fn a_project_test_points_at_the_dev_server_and_asks_for_private_values() {
-        let spec = "  await page.goto(\"https://app.example.com/cart\");\n  await page.getByRole('textbox', { name: 'Note' }).fill(\"see https://app.example.com/x\");\n  await page.getByRole('textbox', { name: 'Card' }).fill(''); // The person typed a private value here: type a valid one.\n  // await page.routeFromHAR('capture-1.har', { notFound: 'fallback' });\n  await page.waitForURL(\"https://app.example.com/pay\", { timeout: 5000 }).catch(() => page.goto(\"https://app.example.com/pay\"));\n  await page.goto(\"https://other.example/x\");";
+        let spec = "  await page.goto(\"https://app.example.com/cart\");\n  await page.getByRole('textbox', { name: 'Note' }).fill(\"see https://app.example.com/x\");\n  await page.getByRole('textbox', { name: 'Card' }).fill(''); // The person typed a private value here: type a valid one.\n  // await page.routeFromHAR('capture-1.har', { notFound: 'fallback' });\n  await page.waitForURL(\"https://app.example.com/pay\", { timeout: 5000 }).catch(() => ((globalThis as { lensMissed?: (url: string) => void }).lensMissed?.(\"https://app.example.com/pay\"), page.goto(\"https://app.example.com/pay\")));\n  await page.goto(\"https://other.example/x\");";
         let local = project(
             spec,
             Some("http://localhost:3000/"),
             "lens-review-7-capture-1",
         );
         assert!(local.contains("page.goto(\"http://localhost:3000/cart\")"));
-        assert!(local.contains("waitForURL(\"http://localhost:3000/pay\", { timeout: 5000 }).catch(() => page.goto(\"http://localhost:3000/pay\"))"));
+        assert!(local.contains("waitForURL(\"http://localhost:3000/pay\", { timeout: 5000 }).catch(() => ((globalThis as { lensMissed?: (url: string) => void }).lensMissed?.(\"http://localhost:3000/pay\"), page.goto(\"http://localhost:3000/pay\")))"));
         assert!(local.contains("fill(process.env.LENS_PRIVATE_1 ?? '')"));
         assert!(local.contains("routeFromHAR('lens-review-7-capture-1.har'"));
         assert!(
@@ -551,6 +581,18 @@ mod project_tests {
         assert!(hostile.contains("page.goto(\"http://evil.test/%22+alert(1)+%22/cart\")"));
         let not_web = project(spec, Some("javascript:alert(1)"), "t");
         assert!(not_web.contains("page.goto(\"/cart\")"));
+    }
+
+    #[test]
+    fn a_project_test_stops_page_loads_on_other_sites() {
+        let spec = "test(\"capture 1\", async ({ page }) => {\n  await page.goto(\"https://app.example.com/cart\");\n});";
+        let local = project(spec, Some("http://localhost:3000"), "t");
+        let guard = local.find("const lensHome = new URL(\"http://localhost:3000\").origin;");
+        let first = local.find("page.goto(\"http://localhost:3000/cart\")");
+        assert!(guard.is_some() && guard < first, "{local}");
+        assert!(local.contains("route.abort('blockedbyclient')"));
+        let relative = project(spec, None, "t");
+        assert!(relative.contains("new URL(String(test.info().project.use.baseURL)).origin"));
     }
 
     #[test]

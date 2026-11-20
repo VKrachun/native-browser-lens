@@ -128,6 +128,36 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 !endif
 
 
+; Sirv Lens: stops the background app, its tray and the browsers' connections to it: lens.exe and
+; lensw.exe from this folder only, since another program may be called lens.exe too. A running
+; lens.exe keeps its file from changing.
+; $LensRan is 1 once the background app was found running, so the update starts it again; the
+; old version's uninstaller can stop it before the Install section looks.
+Var LensRan
+!macro StopLens
+  ${If} ${FileExists} "$INSTDIR\lens.exe"
+    nsExec::ExecToStack '"$INSTDIR\lens.exe" stop'
+    Pop $R0
+    Pop $R1
+    StrCpy $R1 $R1 7
+    ${IfThen} $R1 == "stopped" ${|} StrCpy $LensRan 1 ${|}
+  ${EndIf}
+  System::Call 'Kernel32::SetEnvironmentVariable(t "LENS_DIR", t "$INSTDIR")'
+  nsExec::Exec `powershell -NoProfile -NonInteractive -Command "Get-Process -Name lens, lensw -ErrorAction SilentlyContinue | Where-Object { $$_.Path -and $$_.Path.StartsWith($$env:LENS_DIR + '\', [StringComparison]::OrdinalIgnoreCase) } | Stop-Process -Force -ErrorAction SilentlyContinue"`
+  Pop $R0
+  Sleep 500
+!macroend
+
+; Sirv Lens: $R1 is "running" when lens.exe or lensw.exe from this folder still runs. By path, never
+; by name: another installation, or another program, may run a lens.exe of its own.
+!macro LensStillRuns
+  System::Call 'Kernel32::SetEnvironmentVariable(t "LENS_DIR", t "$INSTDIR")'
+  nsExec::ExecToStack `powershell -NoProfile -NonInteractive -Command "if (Get-Process -Name lens, lensw -ErrorAction SilentlyContinue | Where-Object { $$_.Path -and $$_.Path.StartsWith($$env:LENS_DIR + '\', [StringComparison]::OrdinalIgnoreCase) }) { 'running' }"`
+  Pop $R0
+  Pop $R1
+  StrCpy $R1 $R1 7
+!macroend
+
 ; 4. Custom page to ask user if he wants to reinstall/uninstall
 ;    only if a previous installtion was detected
 Var ReinstallPageCheck
@@ -271,7 +301,15 @@ Function PageLeaveReinstall
     ${Else}
       ReadRegStr $4 SHCTX "${MANUPRODUCTKEY}" ""
       ReadRegStr $R1 SHCTX "${UNINSTKEY}" "UninstallString"
-      ExecWait '$R1 /P _?=$4' $0
+      ; Sirv Lens: /UPDATE tells the old uninstaller that a new version follows: it keeps the
+      ; data, the login entry and the browsers' registrations. Uninstall chosen on its own (the
+      ; same version) is a removal: no /UPDATE, so it cleans up everything.
+      ${If} $R5 == "1"
+        !insertmacro StopLens
+        ExecWait '$R1 /P /UPDATE _?=$4' $0
+      ${Else}
+        ExecWait '$R1 /P _?=$4' $0
+      ${EndIf}
     ${EndIf}
 
     BringToFront
@@ -292,6 +330,8 @@ Function PageLeaveReinstall
       ${IfThen} $0 == '"' ${|} StrCpy $R1 $R1 -1 1 ${|} ; Strip quotes from UninstallString
       Delete $R1
       RMDir $INSTDIR
+      ; Sirv Lens: Uninstall was the choice, not a new version: the job is done.
+      ${IfThen} $R5 == "2" ${|} Quit ${|}
     ${EndIf}
   reinst_done:
 FunctionEnd
@@ -330,6 +370,12 @@ Var DeleteAppDataCheckboxState
 !define /ifndef WS_EX_LAYOUTRTL         0x00400000
 !define MUI_PAGE_CUSTOMFUNCTION_SHOW un.ConfirmShow
 Function un.ConfirmShow
+    ; Sirv Lens: an update never offers to delete the person's data.
+    ClearErrors
+    ${GetOptions} $CMDLINE "/UPDATE" $1
+    ${IfNot} ${Errors}
+      Return
+    ${EndIf}
     FindWindow $1 "#32770" "" $HWNDPARENT ; Find inner dialog
     ${If} $(^RTL) == 1
       System::Call 'USER32::CreateWindowEx(i${__NSD_CheckBox_EXSTYLE}|${WS_EX_LAYOUTRTL},t"${__NSD_CheckBox_CLASS}",t "$(deleteAppData)",i${__NSD_CheckBox_STYLE},i 50,i 100,i 400, i 25,i$1,i0,i0,i0)i.s'
@@ -440,36 +486,17 @@ SectionEnd
 {{unescape_newlines preinstall_section}}
 {{/if}}
 
-; Sirv Lens: stops the background app, its tray and the browsers' connections to it: lens.exe and
-; lensw.exe from this folder only, since another program may be called lens.exe too. The packager's
-; check below looks for lensw.exe by name only, and a running lens.exe keeps its file from changing.
-; $R9 is 1 when the background app was running.
-!macro StopLens
-  StrCpy $R9 0
-  ${If} ${FileExists} "$INSTDIR\lens.exe"
-    nsExec::ExecToStack '"$INSTDIR\lens.exe" stop'
-    Pop $R0
-    Pop $R1
-    StrCpy $R1 $R1 7
-    ${IfThen} $R1 == "stopped" ${|} StrCpy $R9 1 ${|}
-  ${EndIf}
-  System::Call 'Kernel32::SetEnvironmentVariable(t "LENS_DIR", t "$INSTDIR")'
-  nsExec::Exec `powershell -NoProfile -NonInteractive -Command "Get-Process -Name lens, lensw -ErrorAction SilentlyContinue | Where-Object { $$_.Path -and $$_.Path.StartsWith($$env:LENS_DIR + '\', [StringComparison]::OrdinalIgnoreCase) } | Stop-Process -Force -ErrorAction SilentlyContinue"`
-  Pop $R0
-  Sleep 500
-!macroend
 
+; Sirv Lens: the packager's check found and killed lensw.exe by name, from any folder.
 !macro CheckIfAppIsRunning
-  nsis_tauri_utils::FindProcess "${MAINBINARYNAME}.exe"
-  Pop $R0
-  ${If} $R0 = 0
+  !insertmacro LensStillRuns
+  ${If} $R1 == "running"
       IfSilent kill 0
       ${IfThen} $PassiveMode != 1 ${|} MessageBox MB_OKCANCEL "$(appRunningOkKill)" IDOK kill IDCANCEL cancel ${|}
       kill:
-        nsis_tauri_utils::KillProcess "${MAINBINARYNAME}.exe"
-        Pop $R0
-        Sleep 500
-        ${If} $R0 = 0
+        !insertmacro StopLens
+        !insertmacro LensStillRuns
+        ${If} $R1 != "running"
           Goto app_check_done
         ${Else}
           IfSilent silent ui
@@ -530,7 +557,7 @@ Section Install
   {{/each}}
 
   ; Sirv Lens: the background app ran before this update: it runs again, as the new version.
-  ${If} $R9 = 1
+  ${If} $LensRan = 1
     Exec '"$INSTDIR\lens.exe" start'
   ${EndIf}
 
@@ -605,11 +632,15 @@ FunctionEnd
 Section Uninstall
   ; Sirv Lens: a person who uninstalls also leaves the login entry and the browsers'
   ; native-messaging registrations (registry keys and manifests). A new installer that removes the
-  ; old version first passes /P: those then stay for the version that follows. The data stays
-  ; unless the person ticks the box to delete it.
+  ; old version first passes /UPDATE: those then stay for the version that follows, and so does
+  ; the data. Otherwise the data stays unless the person ticks the box to delete it.
+  StrCpy $R8 0
   ClearErrors
-  ${GetOptions} $CMDLINE "/P" $R0
-  ${If} ${Errors}
+  ${GetOptions} $CMDLINE "/UPDATE" $R0
+  ${IfNot} ${Errors}
+    StrCpy $R8 1
+  ${EndIf}
+  ${If} $R8 = 0
     nsExec::Exec '"$INSTDIR\lens.exe" service uninstall'
     Pop $R0
     nsExec::Exec '"$INSTDIR\lens.exe" unregister'
@@ -677,6 +708,7 @@ Section Uninstall
   ; Delete app data
   {{#if appdata_paths}}
   ${If} $DeleteAppDataCheckboxState == 1
+  ${AndIf} $R8 = 0
       SetShellVarContext current
       {{#each appdata_paths}}
       RmDir /r "{{unescape_dollar_sign this}}"

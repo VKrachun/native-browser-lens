@@ -768,17 +768,30 @@ pub fn path_for(binary: &Path) -> std::ffi::OsString {
 /// such a file Lens runs that node and script itself, as the .cmd file would.
 pub fn command(binary: &Path) -> Command {
     match npm_shim(binary) {
-        Some((node, script)) => {
+        Some(Shim {
+            node,
+            flags,
+            script,
+        }) => {
             let mut command = Command::new(node);
-            command.arg(script);
+            command.args(flags).arg(script);
             command
         }
         None => Command::new(binary),
     }
 }
 
-/// The node and the script of an npm .cmd file; None for any other program.
-fn npm_shim(binary: &Path) -> Option<(PathBuf, PathBuf)> {
+/// What an npm .cmd file runs: node, the node flags its package asks for, and the script.
+#[derive(Debug, PartialEq)]
+struct Shim {
+    node: PathBuf,
+    flags: Vec<String>,
+    script: PathBuf,
+}
+
+/// The call of an npm or pnpm .cmd file; None for any other program, and for a .cmd file Lens
+/// does not recognise (another interpreter, extra arguments): that one runs through cmd.exe.
+fn npm_shim(binary: &Path) -> Option<Shim> {
     if !binary
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("cmd"))
@@ -786,7 +799,8 @@ fn npm_shim(binary: &Path) -> Option<(PathBuf, PathBuf)> {
         return None;
     }
     let folder = binary.parent()?;
-    let script = shim_script(&std::fs::read_to_string(binary).ok()?)?
+    let (flags, relative) = shim_call(&std::fs::read_to_string(binary).ok()?)?;
+    let script = relative
         .split('\\')
         .filter(|part| !part.is_empty())
         .fold(folder.to_path_buf(), |path, part| path.join(part));
@@ -797,21 +811,85 @@ fn npm_shim(binary: &Path) -> Option<(PathBuf, PathBuf)> {
     let node = Some(folder.join("node.exe"))
         .filter(|n| n.is_file())
         .or_else(|| program("node"))?;
-    Some((node, script))
+    Some(Shim {
+        node,
+        flags,
+        script,
+    })
 }
 
-/// The script an npm or pnpm .cmd file runs, relative to its folder: `"%dp0%\...\cli.js"`.
-fn shim_script(text: &str) -> Option<String> {
-    ["\"%dp0%\\", "\"%~dp0\\"].iter().find_map(|marker| {
-        text.match_indices(marker).find_map(|(at, _)| {
-            let rest = &text[at + marker.len()..];
-            let relative = &rest[..rest.find('"')?];
-            [".js", ".cjs", ".mjs"]
-                .iter()
-                .any(|end| relative.ends_with(end))
-                .then(|| relative.to_string())
-        })
-    })
+/// The node flags and the script (relative to the file's folder) of the line that runs it:
+/// `... "%_prog%" --flag "%dp0%\...\cli.js" %*`, or with `node` itself in place of `%_prog%`.
+fn shim_call(text: &str) -> Option<(Vec<String>, String)> {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .rev()
+        .find(|l| l.ends_with("%*"))?;
+    // cmd.exe's words: quotes group, spaces part.
+    let mut words = Vec::new();
+    let (mut word, mut quoted) = (String::new(), false);
+    for c in line.chars() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                word.push(c);
+            }
+            ' ' | '\t' if !quoted => {
+                if !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+            }
+            _ => word.push(c),
+        }
+    }
+    words.push(word);
+    let script_of = |word: &str| {
+        let word = word.trim_matches('"');
+        let relative = word
+            .strip_prefix("%dp0%\\")
+            .or_else(|| word.strip_prefix("%~dp0\\"))?;
+        [".js", ".cjs", ".mjs"]
+            .iter()
+            .any(|end| relative.ends_with(end))
+            .then(|| relative.to_string())
+    };
+    let at = words.iter().position(|w| script_of(w).is_some())?;
+    // Nothing after the script but the person's arguments.
+    if words[at + 1..] != ["%*"] {
+        return None;
+    }
+    let first_flag = words[..at]
+        .iter()
+        .rposition(|w| !w.starts_with('-'))
+        .map_or(0, |i| i + 1);
+    let flags = &words[first_flag..at];
+    if flags.iter().any(|f| f.contains(['%', '"', '^', '&'])) || first_flag == 0 {
+        return None;
+    }
+    let lower = text.to_ascii_lowercase();
+    let node_ish = |name: &str| {
+        let name = name.trim_matches('"').to_ascii_lowercase();
+        name == "node" || name.ends_with("\\node.exe") || name == "node.exe"
+    };
+    let interpreter = &words[first_flag - 1];
+    let runs_node = if interpreter
+        .trim_matches('"')
+        .eq_ignore_ascii_case("%_prog%")
+    {
+        // Every program the file can pick is node.
+        let picks: Vec<&str> = lower
+            .match_indices("set \"_prog=")
+            .filter_map(|(at, marker)| {
+                let rest = &lower[at + marker.len()..];
+                rest.find('"').map(|end| &rest[..end])
+            })
+            .collect();
+        !picks.is_empty() && picks.iter().all(|p| node_ish(p))
+    } else {
+        node_ish(interpreter)
+    };
+    runs_node.then(|| (flags.to_vec(), script_of(&words[at]).expect("found above")))
 }
 
 /// Runs an agent CLI with API keys removed (the person's subscription sign-in applies), bounded in
@@ -913,8 +991,24 @@ mod tests {
                     endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \
                     \"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js\" %*\r\n";
         assert_eq!(
-            shim_script(shim).as_deref(),
-            Some("node_modules\\@anthropic-ai\\claude-code\\cli.js")
+            shim_call(shim),
+            Some((
+                vec![],
+                "node_modules\\@anthropic-ai\\claude-code\\cli.js".to_string()
+            ))
+        );
+        // Node flags the package asks for stay; another interpreter or more arguments: cmd.exe.
+        let with_flags = shim.replace("\"%_prog%\"  ", "\"%_prog%\" --no-warnings ");
+        assert_eq!(shim_call(&with_flags).unwrap().0, vec!["--no-warnings"]);
+        let bun = shim.replace(
+            "node.exe\"\r\n)",
+            "node.exe\"\r\n) ELSE (\r\n  SET \"_prog=bun\"\r\n)",
+        );
+        assert_eq!(shim_call(&bun), None);
+        assert_eq!(shim_call(&shim.replace(" %*", " --x %*")), None);
+        assert_eq!(
+            shim_call("@\"%~dp0\\node.exe\"  \"%~dp0\\..\\pkg\\cli.mjs\" %*").map(|c| c.1),
+            Some("..\\pkg\\cli.mjs".to_string())
         );
         let folder = tempfile::tempdir().unwrap();
         let script = folder
@@ -927,10 +1021,14 @@ mod tests {
         std::fs::write(&cmd, shim).unwrap();
         assert_eq!(
             npm_shim(&cmd),
-            Some((folder.path().join("node.exe"), script))
+            Some(Shim {
+                node: folder.path().join("node.exe"),
+                flags: vec![],
+                script
+            })
         );
         // Not a shim: the program itself runs.
-        assert_eq!(shim_script("@echo off\r\nclaude.exe %*"), None);
+        assert_eq!(shim_call("@echo off\r\nclaude.exe %*"), None);
         assert_eq!(npm_shim(&folder.path().join("node.exe")), None);
     }
     use crate::protocol::{BlobRef, CaptureKind, CaptureMode, ReviewItem};
