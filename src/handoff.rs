@@ -149,7 +149,7 @@ pub fn start(app: HandoffApp, title: &str, prompt: &str, folder: &Path) -> Resul
                 (done, said) = thread(prompt)?;
             }
             let open = || {
-                Command::new(&t3)
+                crate::investigate::command(&t3)
                     .args(["app", &path])
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
@@ -192,7 +192,7 @@ pub fn start(app: HandoffApp, title: &str, prompt: &str, folder: &Path) -> Resul
         HandoffApp::Zeron => {
             let zeron = zeron().ok_or("Zeron is not installed")?;
             let chat = zeron_chat(&zeron, title, prompt, &path)?;
-            Command::new(&zeron)
+            crate::investigate::command(&zeron)
                 .arg(format!("zeron://open/chat/{chat}"))
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -217,7 +217,8 @@ fn open(url: String) -> Result<(), String> {
 /// printed.
 fn exec(binary: &Path, args: &[&str], input: Option<&str>) -> Result<(bool, String), String> {
     let (ok, out, err) = bounded(
-        Command::new(binary).args(args),
+        // An npm .cmd file runs through node: see investigate::command.
+        crate::investigate::command(binary).args(args),
         input,
         Duration::from_secs(60),
         64 * 1024,
@@ -296,7 +297,7 @@ pub fn bounded(
 /// Creates a Zeron chat through its MCP server: in the folder's Zeron project when there is one,
 /// else in the folder itself. Returns the chat's id.
 fn zeron_chat(zeron: &Path, title: &str, prompt: &str, folder: &str) -> Result<String, String> {
-    let mut child = Command::new(zeron)
+    let mut child = crate::investigate::command(zeron)
         .arg("mcp")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

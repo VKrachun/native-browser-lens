@@ -11,6 +11,30 @@ const FRAME_MS = 100;
 const FFMPEG = process.env.LENS_FFMPEG || 'ffmpeg';
 const SAMPLES_PER_MS = 16; // Lens microphone WAVs are mono 16 kHz signed 16-bit PCM.
 
+// Where a 16 kHz mono 16-bit WAV's samples start. Chunks such as LIST may come before them, so the
+// chunks are walked, as speech.rs does.
+function wavData(fd) {
+  const header = Buffer.alloc(4096);
+  const read = fs.readSync(fd, header, 0, header.length, 0);
+  const fail = () => { throw new Error('Cannot read the recorded microphone WAV.'); };
+  if (read < 12 || header.toString('ascii', 0, 4) !== 'RIFF' || header.toString('ascii', 8, 12) !== 'WAVE') fail();
+  let format = false;
+  for (let at = 12; at + 8 <= read;) {
+    const id = header.toString('ascii', at, at + 4);
+    const length = header.readUInt32LE(at + 4);
+    const body = at + 8;
+    if (id === 'fmt ') {
+      format = body + 16 <= read && header.readUInt16LE(body) === 1 && header.readUInt16LE(body + 2) === 1 &&
+        header.readUInt32LE(body + 4) === 16000 && header.readUInt16LE(body + 14) === 16;
+      if (!format) fail();
+    } else if (id === 'data' && format) {
+      return body;
+    }
+    at = body + length + (length & 1);
+  }
+  fail();
+}
+
 // Compose the soundtrack on the same clock as frames(). Pad the last frame of each
 // interval with silence so many short cuts cannot make the narration drift.
 function writeVoice(spans, tracks, output) {
@@ -23,13 +47,7 @@ function writeVoice(spans, tracks, output) {
   try {
     for (const track of inputs) {
       const fd = fs.openSync(track.path, 'r');
-      sources.push({ ...track, fd });
-      const header = Buffer.alloc(44);
-      if (fs.readSync(fd, header, 0, 44, 0) !== 44 || header.toString('ascii', 0, 4) !== 'RIFF' ||
-          header.toString('ascii', 8, 16) !== 'WAVEfmt ' || header.readUInt32LE(16) !== 16 ||
-          header.readUInt16LE(20) !== 1 || header.readUInt16LE(22) !== 1 ||
-          header.readUInt32LE(24) !== 16000 || header.readUInt16LE(34) !== 16 ||
-          header.toString('ascii', 36, 40) !== 'data') throw new Error('Cannot read the recorded microphone WAV.');
+      sources.push({ ...track, fd, data: wavData(fd) });
     }
     for (const { from, to } of spans) {
       const renderedMs = FRAME_MS * Math.max(1, Math.ceil((to - from) / FRAME_MS));
@@ -41,7 +59,7 @@ function writeVoice(spans, tracks, output) {
           const last = Math.min(at + 1000, to, track.start + track.duration);
           if (first >= last) continue;
           const pcm = Buffer.alloc((last - first) * SAMPLES_PER_MS * 2);
-          const position = 44 + (first - track.start) * SAMPLES_PER_MS * 2;
+          const position = track.data + (first - track.start) * SAMPLES_PER_MS * 2;
           if (fs.readSync(track.fd, pcm, 0, pcm.length, position) !== pcm.length)
             throw new Error('The microphone WAV ended before the reviewed interval.');
           const offset = (first - at) * SAMPLES_PER_MS;
@@ -84,7 +102,10 @@ async function render(tools, recording, ranges, output) {
   if (!spans.length) throw new Error('No kept frames in this recording.');
   const pcm = path.join(path.dirname(ranges), 'voice.s16le');
   const hasVoice = writeVoice(spans, voice, pcm);
-  const browser = await chromium.launch({ chromiumSandbox: process.platform === 'linux' });
+  // Recorded pages are untrusted: the renderer keeps Chromium's process sandbox on every system.
+  const browser = await chromium.launch({ chromiumSandbox: true }).catch(error => {
+    throw new Error(`Chromium did not start with its sandbox, so Lens did not render the MP4: ${error.message}`);
+  });
   try {
     const context = await browser.newContext({ viewport, offline: true, serviceWorkers: 'block' });
     await context.route('**/*', route => route.abort());
@@ -128,5 +149,5 @@ async function render(tools, recording, ranges, output) {
     await browser.close();
   }
 }
-module.exports = { writeVoice };
+module.exports = { writeVoice, wavData };
 if (require.main === module) render(...process.argv.slice(2)).catch(error => { console.error(error.message); process.exitCode = 1; });

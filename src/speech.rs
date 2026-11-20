@@ -278,6 +278,17 @@ fn run(
 
 /// The length of a 16 kHz mono 16-bit WAV, or why it is not one.
 pub fn wav_duration_ms(header: &[u8], size: u64) -> Result<i64, String> {
+    let (_, length) = wav_data(header, size)?;
+    Ok((length / 32) as i64)
+}
+
+/// How many bytes of a WAV `wav_data` reads: room for chunks such as LIST before the samples.
+pub const WAV_HEADER_BYTES: u32 = 4096;
+
+/// Where the samples of a 16 kHz mono 16-bit WAV are: (offset, length) in a file of `size` bytes.
+/// Chunks other than fmt and data (LIST, fact) may come first, so the chunks are walked.
+pub fn wav_data(header: &[u8], size: u64) -> Result<(u64, u64), String> {
+    let invalid = || "the voice note must be a 16 kHz mono 16-bit WAV".to_string();
     let u16_at = |i: usize| {
         header
             .get(i..i + 2)
@@ -288,16 +299,41 @@ pub fn wav_duration_ms(header: &[u8], size: u64) -> Result<i64, String> {
             .get(i..i + 4)
             .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     };
-    let ok = header.get(0..4) == Some(b"RIFF")
-        && header.get(8..12) == Some(b"WAVE")
-        && u16_at(20) == Some(1)
-        && u16_at(22) == Some(1)
-        && u32_at(24) == Some(16_000)
-        && u16_at(34) == Some(16);
-    if !ok {
-        return Err("the voice note must be a 16 kHz mono 16-bit WAV".into());
+    if header.get(0..4) != Some(b"RIFF") || header.get(8..12) != Some(b"WAVE") {
+        return Err(invalid());
     }
-    Ok((size.saturating_sub(44) / 32) as i64)
+    let mut at = 12;
+    let mut format = false;
+    while let (Some(id), Some(length)) = (header.get(at..at + 4), u32_at(at + 4)) {
+        let body = at + 8;
+        match id {
+            b"fmt " => {
+                format = u16_at(body) == Some(1)
+                    && u16_at(body + 2) == Some(1)
+                    && u32_at(body + 4) == Some(16_000)
+                    && u16_at(body + 14) == Some(16);
+                if !format {
+                    return Err(invalid());
+                }
+            }
+            b"data" if format => {
+                let rest = size.saturating_sub(body as u64);
+                // A recorder that streams may write 0 (or 0xFFFFFFFF) and never fix it: the file
+                // size then gives the length.
+                let declared = u64::from(length);
+                let length = if declared == 0 {
+                    rest
+                } else {
+                    declared.min(rest)
+                };
+                return Ok((body as u64, length));
+            }
+            _ => {}
+        }
+        // Chunks are padded to an even length.
+        at = body + length as usize + (length as usize & 1);
+    }
+    Err(invalid())
 }
 
 #[cfg(test)]
@@ -325,6 +361,13 @@ mod tests {
         stereo[22] = 2;
         assert!(wav_duration_ms(&stereo, 100).is_err());
         assert!(wav_duration_ms(b"not a wav", 100).is_err());
+        // A LIST chunk before the samples (as ffmpeg and many editors write it).
+        let mut listed = header();
+        let data = listed.split_off(36);
+        listed.extend_from_slice(b"LIST\x05\0\0\0INFOx\0");
+        listed.extend_from_slice(&data);
+        assert_eq!(wav_data(&listed, 58 + 32_000), Ok((58, 32_000)));
+        assert_eq!(wav_duration_ms(&listed, 58 + 32_000), Ok(1000));
     }
 
     #[test]

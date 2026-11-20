@@ -87,7 +87,14 @@ const config = {
     { src: join(root, 'extension/.output/firefox-mv3'), target: 'extension-firefox' },
   ],
   // Per user, no administrator: Lens itself installs per user (service, browser registrations).
-  nsis: { installMode: 'currentUser' },
+  // The template is the packager's own plus Lens's steps: the background app stops before files
+  // change, and an uninstall also removes the login entry and the browser registrations. The
+  // uninstaller offers to delete the data folder (paths.rs), unticked.
+  nsis: {
+    installMode: 'currentUser',
+    template: join(root, 'assets', 'windows', 'installer.nsi'),
+    appdataPaths: ['$LOCALAPPDATA/Sirv/Lens'],
+  },
   // Not just "lens": other software uses that package name.
   deb: { 'package-name': 'sirv-lens', depends: ['libc6'] },
   pacman: { depends: ['glibc'] },

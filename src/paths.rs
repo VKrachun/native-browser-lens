@@ -57,6 +57,11 @@ impl Paths {
         for dir in [&self.data, &self.runtime, &self.blobs(), &self.logs] {
             private_dir(dir)?;
         }
+        // The short socket folder, when the runtime folder's path is too long (see `socket`).
+        #[cfg(unix)]
+        if let Some(folder) = self.socket().parent().map(PathBuf::from) {
+            private_dir(&folder)?;
+        }
         Ok(())
     }
 
@@ -98,9 +103,33 @@ impl Paths {
         self.runtime.join("lensd.lock")
     }
 
+    /// A socket address holds 104 bytes on macOS (108 on Linux), so a long home folder or
+    /// LENS_HOME does not fit: then the socket goes to a short 0700 folder of this account's own in
+    /// the temporary folder, named for the runtime folder so two data folders never meet.
     #[cfg(unix)]
     pub fn socket(&self) -> PathBuf {
-        self.runtime.join("lensd.sock")
+        let path = self.runtime.join("lensd.sock");
+        if path.as_os_str().len() < 100 {
+            return path;
+        }
+        let digest = self
+            .runtime
+            .as_os_str()
+            .as_encoded_bytes()
+            .iter()
+            .fold(0xcbf29ce484222325u64, |h, b| {
+                (h ^ *b as u64).wrapping_mul(0x100000001b3)
+            });
+        let temporary = std::env::temp_dir();
+        let base = if temporary.as_os_str().len() > 60 {
+            PathBuf::from("/tmp")
+        } else {
+            temporary
+        };
+        // SAFETY: getuid has no preconditions and cannot fail.
+        let uid = unsafe { libc::getuid() };
+        base.join(format!("sirv-lens-{uid}"))
+            .join(format!("{digest:016x}.sock"))
     }
 
     /// Named pipes share one machine-wide namespace, so the name carries the data folder: two users,
@@ -141,5 +170,30 @@ pub fn executable() -> io::Result<PathBuf> {
     match std::env::var_os("APPIMAGE").map(PathBuf::from) {
         Some(image) if image.is_file() => Ok(image),
         _ => std::env::current_exe(),
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_long_runtime_folder_gets_a_short_socket() {
+        let at = |runtime: &str| Paths {
+            data: PathBuf::from("/d"),
+            runtime: PathBuf::from(runtime),
+            logs: PathBuf::from("/l"),
+        };
+        assert_eq!(
+            at("/run/user/1000/sirv-lens").socket(),
+            PathBuf::from("/run/user/1000/sirv-lens/lensd.sock")
+        );
+        let long = format!(
+            "/Users/{}/Library/Application Support/Sirv Lens/run",
+            "a".repeat(60)
+        );
+        let socket = at(&long).socket();
+        assert!(socket.as_os_str().len() < 104, "{}", socket.display());
+        assert_ne!(socket, at(&format!("{long}2")).socket());
     }
 }

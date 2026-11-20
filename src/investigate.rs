@@ -762,6 +762,58 @@ pub fn path_for(binary: &Path) -> std::ffi::OsString {
     std::env::join_paths(folders).unwrap_or_default()
 }
 
+/// A command for a program `program` found. npm installs a CLI on Windows as a .cmd file that
+/// runs node with the package's script; cmd.exe reads quotes, %, ^ and line breaks its own way, so
+/// a multi-line prompt or a JSON argument would arrive changed, or Rust refuses to pass it. For
+/// such a file Lens runs that node and script itself, as the .cmd file would.
+pub fn command(binary: &Path) -> Command {
+    match npm_shim(binary) {
+        Some((node, script)) => {
+            let mut command = Command::new(node);
+            command.arg(script);
+            command
+        }
+        None => Command::new(binary),
+    }
+}
+
+/// The node and the script of an npm .cmd file; None for any other program.
+fn npm_shim(binary: &Path) -> Option<(PathBuf, PathBuf)> {
+    if !binary
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("cmd"))
+    {
+        return None;
+    }
+    let folder = binary.parent()?;
+    let script = shim_script(&std::fs::read_to_string(binary).ok()?)?
+        .split('\\')
+        .filter(|part| !part.is_empty())
+        .fold(folder.to_path_buf(), |path, part| path.join(part));
+    if !script.is_file() {
+        return None;
+    }
+    // The .cmd file prefers a node.exe beside it, then the node on PATH.
+    let node = Some(folder.join("node.exe"))
+        .filter(|n| n.is_file())
+        .or_else(|| program("node"))?;
+    Some((node, script))
+}
+
+/// The script an npm or pnpm .cmd file runs, relative to its folder: `"%dp0%\...\cli.js"`.
+fn shim_script(text: &str) -> Option<String> {
+    ["\"%dp0%\\", "\"%~dp0\\"].iter().find_map(|marker| {
+        text.match_indices(marker).find_map(|(at, _)| {
+            let rest = &text[at + marker.len()..];
+            let relative = &rest[..rest.find('"')?];
+            [".js", ".cjs", ".mjs"]
+                .iter()
+                .any(|end| relative.ends_with(end))
+                .then(|| relative.to_string())
+        })
+    })
+}
+
 /// Runs an agent CLI with API keys removed (the person's subscription sign-in applies), bounded in
 /// time and output.
 fn run(
@@ -771,7 +823,7 @@ fn run(
     cwd: Option<&Path>,
     timeout: Duration,
 ) -> Result<Vec<u8>, String> {
-    let mut command = Command::new(binary);
+    let mut command = command(binary);
     command
         .args(arguments)
         .env("PATH", path_for(binary))
@@ -853,6 +905,34 @@ impl Drop for Workspace {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn npm_cmd_files_run_their_script_with_node() {
+        // As npm's cmd-shim writes it: node.exe is named before the script.
+        let shim = "@ECHO off\r\nIF EXIST \"%dp0%\\node.exe\" (\r\n  SET \"_prog=%dp0%\\node.exe\"\r\n)\r\n\
+                    endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \
+                    \"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js\" %*\r\n";
+        assert_eq!(
+            shim_script(shim).as_deref(),
+            Some("node_modules\\@anthropic-ai\\claude-code\\cli.js")
+        );
+        let folder = tempfile::tempdir().unwrap();
+        let script = folder
+            .path()
+            .join("node_modules/@anthropic-ai/claude-code/cli.js");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(&script, "").unwrap();
+        std::fs::write(folder.path().join("node.exe"), "").unwrap();
+        let cmd = folder.path().join("claude.cmd");
+        std::fs::write(&cmd, shim).unwrap();
+        assert_eq!(
+            npm_shim(&cmd),
+            Some((folder.path().join("node.exe"), script))
+        );
+        // Not a shim: the program itself runs.
+        assert_eq!(shim_script("@echo off\r\nclaude.exe %*"), None);
+        assert_eq!(npm_shim(&folder.path().join("node.exe")), None);
+    }
     use crate::protocol::{BlobRef, CaptureKind, CaptureMode, ReviewItem};
 
     fn test_job() -> Job<'static> {

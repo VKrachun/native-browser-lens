@@ -466,6 +466,16 @@ fn open_in(launch: &Launch, url: &str) -> Result<(), String> {
         let mut c = Command::new("open");
         c.args(["-a", launch.mac_app, url]);
         c
+    } else if cfg!(windows) && launch.windows == "chromium" {
+        // Chromium registers no App Paths entry, so `start chromium` finds nothing (and still
+        // reports success): its chrome.exe runs from the folder its installer uses.
+        let exe = std::env::var_os("LOCALAPPDATA")
+            .map(|l| std::path::PathBuf::from(l).join(r"Chromium\Application\chrome.exe"))
+            .filter(|p| p.is_file())
+            .ok_or("Lens cannot find Chromium's chrome.exe")?;
+        let mut c = Command::new(exe);
+        c.arg(url);
+        c
     } else if cfg!(windows) {
         let mut c = Command::new("cmd");
         // The URL in quotes, so cmd never splits it at `&`; a URL has no `"` of its own.
