@@ -24,9 +24,8 @@ fn review(client: &mut Client, id: &str) -> io::Result<Review> {
 /// `lens reviews [--json]`: newest first, with the VibeQ task each was filed as.
 pub fn reviews(paths: &Paths, json: bool) -> io::Result<()> {
     let mut client = Client::connect(paths)?;
-    let Reply::Reviews(reviews) = ask(&mut client, Request::ListReviews)? else {
-        return Err(io::Error::other("unexpected reply"));
-    };
+    let reviews =
+        crate::mcp::all_reviews(|request| client.call(request)).map_err(io::Error::other)?;
     let mut out = io::stdout().lock();
     if json {
         serde_json::to_writer_pretty(&mut out, &reviews)?;
@@ -175,12 +174,10 @@ pub fn verify(
     let mut out = io::stdout().lock();
     serde_json::to_writer_pretty(&mut out, &verdict)?;
     writeln!(out)?;
-    // A script or CI job reads the exit status: the fix is proven only when the steps ran and no
+    // A script or CI job reads the exit status: the fix is proven only when every step ran and no
     // recorded failure came back.
-    let still = verdict["stillFailing"]
-        .as_array()
-        .is_some_and(|a| !a.is_empty());
-    if verdict["stepsRan"] != true || still {
+    let listed = |key: &str| verdict[key].as_array().is_some_and(|a| !a.is_empty());
+    if verdict["stepsRan"] != true || listed("stillFailing") || listed("skippedSteps") {
         drop(out);
         std::process::exit(1);
     }

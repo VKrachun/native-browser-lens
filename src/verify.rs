@@ -100,9 +100,13 @@ pub fn verify(
         &format!("{{ path: '{name}-reproduced.png' }}"),
         "{ path: test.info().outputPath('reproduced.png') }",
     );
-    if !spec.contains("async ({ page }) => {") {
+    if !spec
+        .lines()
+        .any(|l| l.trim_start().starts_with("await page."))
+    {
         return Err("Lens recorded no steps to repeat for this capture".into());
     }
+    let skipped = skipped_steps(&spec);
     // A folder of its own for each run: two runs at once, or files someone keeps in
     // .lens/verify, are never overwritten or removed.
     let folder = project
@@ -184,6 +188,8 @@ pub fn verify(
     }
     let verdict = if !passed {
         "The steps did not run through: see errors. The defect, or a changed page, stops them."
+    } else if !skipped.is_empty() {
+        "Inconclusive: the test could not repeat every step the person took (see skippedSteps), so the defect may not have had its chance."
     } else if !still.is_empty() {
         "The steps ran, but a failure the person recorded happened again: see stillFailing."
     } else if !unknown.is_empty() {
@@ -195,7 +201,9 @@ pub fn verify(
         "review": review.id,
         "capture": n,
         "baseUrl": base_url,
+        "project": project.display().to_string(),
         "stepsRan": passed,
+        "skippedSteps": skipped,
         "verdict": verdict,
         "errors": errors,
         "recordedFindings": recorded,
@@ -205,6 +213,31 @@ pub fn verify(
         "failedRequestsNow": requests,
         "consoleErrorsNow": console,
     }))
+}
+
+/// The steps the test does not really take: ones Lens could not write (a file upload, a private
+/// option, an element it could not find), private values the environment does not give, and a
+/// stop before another site. A run without them proves nothing about the defect.
+fn skipped_steps(spec: &str) -> Vec<String> {
+    let mut skipped = Vec::new();
+    for line in spec.lines().map(str::trim) {
+        if let Some(step) = line.strip_prefix(crate::repro::SKIPPED_STEP) {
+            skipped.push(step.to_string());
+        } else if line.starts_with("throw new Error(") {
+            skipped.push("the steps on another site".into());
+        } else if let Some(at) = line.find("process.env.LENS_PRIVATE_") {
+            let name: String = line[at + "process.env.".len()..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if !std::env::var(&name).is_ok_and(|v| !v.is_empty()) {
+                skipped.push(format!(
+                    "a private value: set {name} for the MCP server or lens verify"
+                ));
+            }
+        }
+    }
+    skipped
 }
 
 /// Runs the test with the project's Playwright. Returns the JSON report and what the test noted.
@@ -321,6 +354,16 @@ fn last_lines(text: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn steps_the_test_cannot_take_are_named() {
+        let spec = "  await page.goto(\"/cart\");\n  // Skipped step: the person chose files here (a.png): await x.setInputFiles([...]);\n  await page.locator(\"#pin\").fill(process.env.LENS_PRIVATE_9 ?? ''); // A private value\n  throw new Error(\"Lens stops here\");\n  await page.click();";
+        let skipped = skipped_steps(spec);
+        assert_eq!(skipped.len(), 3, "{skipped:?}");
+        assert!(skipped[0].starts_with("the person chose files"));
+        assert!(skipped[1].contains("LENS_PRIVATE_9"));
+        assert!(skipped_steps("  await page.goto(\"/cart\");\n  await page.click();").is_empty());
+    }
 
     #[test]
     fn the_test_gets_its_listeners() {
