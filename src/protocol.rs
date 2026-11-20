@@ -830,6 +830,11 @@ pub struct NewCapture {
     /// Screenshots taken during the recording, after the person's steps.
     #[serde(default)]
     pub shots: Vec<Shot>,
+    /// The browser could not take the screenshot (Firefox without access to all sites): Lens
+    /// renders it, and the step shots, from the recording.
+    #[serde(default)]
+    #[ts(optional, as = "Option<bool>")]
+    pub render_screenshot: bool,
 }
 
 /// A real screenshot of the tab, taken while it was recorded.

@@ -688,6 +688,25 @@ impl Store {
         Ok(Ok(out))
     }
 
+    /// A capture's screenshot and step shots, rendered later from its replay. False when the
+    /// capture is gone.
+    pub fn replace_pictures(
+        &self,
+        id: i64,
+        screenshot: &BlobRef,
+        shots: &[crate::protocol::Shot],
+    ) -> rusqlite::Result<bool> {
+        Ok(self.db.execute(
+            "UPDATE captures SET screenshot_sha256 = ?2, screenshot_size = ?3, shots = ?4 WHERE id = ?1",
+            params![
+                id,
+                screenshot.sha256,
+                screenshot.size as i64,
+                serde_json::to_string(shots).expect("shots serialize")
+            ],
+        )? > 0)
+    }
+
     /// Stores a review; `review.id` is replaced by the new row's ID.
     pub fn create_review(&mut self, mut review: Review) -> rusqlite::Result<Review> {
         let voice: Vec<crate::attachments::VoiceSource> = self
@@ -839,6 +858,12 @@ impl Store {
             .query_map([key], |row| row.get(0))?
             .next()
             .transpose()
+    }
+
+    pub fn delete_setting(&self, key: &str) -> rusqlite::Result<()> {
+        self.db
+            .execute("DELETE FROM settings WHERE key = ?1", [key])
+            .map(drop)
     }
 
     pub fn set_setting(&self, key: &str, value: &str) -> rusqlite::Result<()> {

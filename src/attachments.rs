@@ -4,6 +4,7 @@ use std::{
     fs, io,
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 use zip::{ZipWriter, write::SimpleFileOptions};
 
@@ -95,7 +96,7 @@ pub fn save(
                 if let Some(ffmpeg) = crate::investigate::program("ffmpeg") {
                     command.env("LENS_FFMPEG", ffmpeg);
                 }
-                render(command, staging.path())?;
+                render(command, staging.path(), Duration::from_secs(20 * 60))?;
                 (format!("lens-review-{}-capture-{id}", review.id), "mp4")
             }
         };
@@ -129,9 +130,51 @@ fn private_dir(parent: &Path) -> io::Result<tempfile::TempDir> {
     builder.tempdir_in(parent)
 }
 
-/// Runs the MP4 renderer and stops it after 20 minutes: a stuck browser or encoder must not hold
-/// the review page and the staging files forever.
-fn render(mut command: Command, staging: &Path) -> io::Result<()> {
+/// Whether the optional replay tools (Node.js, playwright-core, rrweb-player) are installed.
+pub fn tools_ready(tools: &Path) -> bool {
+    tools.join("node_modules/playwright-core").is_dir()
+        && tools.join("node_modules/rrweb-player").is_dir()
+        && crate::investigate::program("node").is_some()
+}
+
+/// Pictures rendered from a recording (rrweb events), for a browser that could not take them: a
+/// PNG of the end, and a WebP at each time in `times` (Unix ms). Offline, like the MP4 render.
+pub fn stills(
+    recording: &[u8],
+    times: &[i64],
+    tools: &Path,
+) -> io::Result<(Vec<u8>, Vec<Vec<u8>>)> {
+    let work = tools.with_file_name("attachments");
+    fs::create_dir_all(&work)?;
+    let staging = private_dir(&work)?;
+    let source = staging.path().join("recording.json");
+    fs::write(&source, recording)?;
+    let at = staging.path().join("times.json");
+    fs::write(&at, serde_json::to_vec(times)?)?;
+    let script = staging.path().join("render.cjs");
+    fs::write(&script, include_bytes!("review-video.cjs"))?;
+    let node = crate::investigate::program("node")
+        .ok_or_else(|| io::Error::other("Install Node.js to render pictures from the replay."))?;
+    let mut command = Command::new(&node);
+    command
+        .env("PATH", crate::investigate::path_for(&node))
+        .arg(script)
+        .arg("--stills")
+        .arg(tools)
+        .arg(source)
+        .arg(at)
+        .arg(staging.path());
+    render(command, staging.path(), Duration::from_secs(3 * 60))?;
+    let screenshot = fs::read(staging.path().join("screenshot.png"))?;
+    let shots = (0..times.len())
+        .map(|n| fs::read(staging.path().join(format!("shot-{n}.webp"))))
+        .collect::<io::Result<_>>()?;
+    Ok((screenshot, shots))
+}
+
+/// Runs the renderer and stops it after `limit`: a stuck browser or encoder must not hold the
+/// review page and the staging files forever.
+fn render(mut command: Command, staging: &Path, limit: Duration) -> io::Result<()> {
     let log = staging.join("render.log");
     command
         .stdin(std::process::Stdio::null())
@@ -145,8 +188,8 @@ fn render(mut command: Command, staging: &Path) -> io::Result<()> {
     }
     let mut child = command
         .spawn()
-        .map_err(|e| io::Error::other(format!("Install Node.js to render MP4 files: {e}")))?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20 * 60);
+        .map_err(|e| io::Error::other(format!("Install Node.js to render the replay: {e}")))?;
+    let deadline = std::time::Instant::now() + limit;
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
@@ -154,9 +197,10 @@ fn render(mut command: Command, staging: &Path) -> io::Result<()> {
         if std::time::Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(io::Error::other(
-                "The MP4 render took longer than 20 minutes and was stopped.",
-            ));
+            return Err(io::Error::other(format!(
+                "The render took longer than {} minutes and was stopped.",
+                limit.as_secs() / 60
+            )));
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
     };
@@ -165,7 +209,7 @@ fn render(mut command: Command, staging: &Path) -> io::Result<()> {
     }
     let message = fs::read_to_string(&log).unwrap_or_default();
     Err(io::Error::other(match message.trim() {
-        "" => "The MP4 render failed.".to_owned(),
+        "" => "The render failed.".to_owned(),
         text => text.to_owned(),
     }))
 }

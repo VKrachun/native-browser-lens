@@ -77,7 +77,9 @@ function writeVoice(spans, tracks, output) {
   }
 }
 
-async function render(tools, recording, ranges, output) {
+// The bundled player and its browser, for one recording: offline, every request aborted, and a
+// deny-by-default CSP, so recorded pages (untrusted) reach neither the network nor the disk.
+async function open(tools, events) {
   const load = createRequire(path.join(tools, 'package.json'));
   let chromium, playerDir;
   try {
@@ -86,25 +88,14 @@ async function render(tools, recording, ranges, output) {
   } catch {
     throw new Error('Install the optional video tools: npm install --prefix "' + tools + '" playwright-core@1.65.0 rrweb-player@2.2.2');
   }
-  if (spawnSync(FFMPEG, ['-version'], { stdio: 'ignore' }).status !== 0) throw new Error('Install FFmpeg to save an MP4.');
-  const events = JSON.parse(fs.readFileSync(recording, 'utf8'));
   if (!events.some(e => e.type === 2) || events.length < 2) throw new Error('The reviewed recording has no replayable snapshot.');
   const view = events.find(e => e.type === 4 && e.data.width > 0 && e.data.height > 0)?.data;
   const scale = view ? Math.min(1, 1600 / view.width, 1000 / view.height) : 1;
   const even = n => Math.max(2, 2 * Math.round(n / 2));
   const viewport = { width: even((view?.width || 1280) * scale), height: even((view?.height || 720) * scale) };
-  const start = events[0].timestamp;
-  const end = events.at(-1).timestamp;
-  const { kept, voice } = JSON.parse(fs.readFileSync(ranges, 'utf8'));
-  const spans = (kept.length ? kept : [{ from: start, to: end }])
-    .map(({ from, to }) => ({ from: Math.max(start, from), to: Math.min(end, to) }))
-    .filter(({ from, to }) => from <= to);
-  if (!spans.length) throw new Error('No kept frames in this recording.');
-  const pcm = path.join(path.dirname(ranges), 'voice.s16le');
-  const hasVoice = writeVoice(spans, voice, pcm);
   // Recorded pages are untrusted: the renderer keeps Chromium's process sandbox on every system.
   const browser = await chromium.launch({ chromiumSandbox: true }).catch(error => {
-    throw new Error(`Chromium did not start with its sandbox, so Lens did not render the MP4: ${error.message}`);
+    throw new Error(`Chromium did not start with its sandbox, so Lens did not render the replay: ${error.message}`);
   });
   try {
     const context = await browser.newContext({ viewport, offline: true, serviceWorkers: 'block' });
@@ -123,6 +114,25 @@ async function render(tools, recording, ranges, output) {
         loadTimeout: 0, UNSAFE_replayCanvas: false,
       } });
     }, { events, viewport });
+    return { browser, context, page, start: events[0].timestamp, end: events.at(-1).timestamp };
+  } catch (error) {
+    await browser.close();
+    throw error;
+  }
+}
+
+async function render(tools, recording, ranges, output) {
+  if (spawnSync(FFMPEG, ['-version'], { stdio: 'ignore' }).status !== 0) throw new Error('Install FFmpeg to save an MP4.');
+  const events = JSON.parse(fs.readFileSync(recording, 'utf8'));
+  const { browser, page, start, end } = await open(tools, events);
+  try {
+    const { kept, voice } = JSON.parse(fs.readFileSync(ranges, 'utf8'));
+    const spans = (kept.length ? kept : [{ from: start, to: end }])
+      .map(({ from, to }) => ({ from: Math.max(start, from), to: Math.min(end, to) }))
+      .filter(({ from, to }) => from <= to);
+    if (!spans.length) throw new Error('No kept frames in this recording.');
+    const pcm = path.join(path.dirname(ranges), 'voice.s16le');
+    const hasVoice = writeVoice(spans, voice, pcm);
     // Each kept interval starts with a seek. The recorder clock cannot advance while encoding a frame.
     async function* frames() {
       for (const { from, to } of spans) {
@@ -149,5 +159,42 @@ async function render(tools, recording, ranges, output) {
     await browser.close();
   }
 }
-module.exports = { writeVoice, wavData };
-if (require.main === module) render(...process.argv.slice(2)).catch(error => { console.error(error.message); process.exitCode = 1; });
+
+// Still pictures from the replay, for a browser that could not take screenshots (Firefox without
+// access to all sites): `screenshot.png` at the end of the recording, and `shot-N.webp` at each time
+// in `times` (Unix ms), as the extension's own step shots are.
+async function stills(tools, recording, times, output) {
+  const events = JSON.parse(fs.readFileSync(recording, 'utf8'));
+  const at = JSON.parse(fs.readFileSync(times, 'utf8'));
+  const { browser, context, page, start, end } = await open(tools, events);
+  try {
+    // A screenshot shows the page, not the replay's drawn pointer.
+    await page.addStyleTag({ content: '.replayer-mouse,.replayer-mouse-tail{display:none!important}' });
+    const still = async time => {
+      await page.evaluate(offset => window.player.goto(offset, false), Math.min(end, Math.max(start, time)) - start);
+      return page.screenshot({ type: 'png', timeout: 15000 });
+    };
+    fs.writeFileSync(path.join(output, 'screenshot.png'), await still(end));
+    // WebP like the browser's step shots; a blank page of its own encodes it, apart from the replay.
+    const encoder = await context.newPage();
+    for (const [n, time] of at.entries()) {
+      const png = (await still(time)).toString('base64');
+      const webp = await encoder.evaluate(async png => {
+        const bitmap = await createImageBitmap(await (await fetch('data:image/png;base64,' + png)).blob());
+        const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+        canvas.getContext('2d').drawImage(bitmap, 0, 0);
+        const blob = await canvas.convertToBlob({ type: 'image/webp', quality: 0.7 });
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        let binary = '';
+        for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+        return btoa(binary);
+      }, png);
+      fs.writeFileSync(path.join(output, `shot-${n}.webp`), Buffer.from(webp, 'base64'));
+    }
+  } finally {
+    await browser.close();
+  }
+}
+
+module.exports = { writeVoice, wavData, stills };
+if (require.main === module) (process.argv[2] === '--stills' ? stills(...process.argv.slice(3)) : render(...process.argv.slice(2))).catch(error => { console.error(error.message); process.exitCode = 1; });

@@ -10,6 +10,7 @@ use crate::{export, filing, handoff, investigate, ipc, render, repro, secrets, s
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use interprocess::local_socket::{Stream, prelude::*};
+use std::collections::BTreeMap;
 use std::fs::{File, TryLockError};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -116,6 +117,43 @@ fn saved_token() -> Result<Option<String>, ProtocolError> {
 
 /// A screenshot of a 4K display at 2x is about 10 MiB of PNG; the request limit leaves room for base64.
 const MAX_SCREENSHOT_BYTES: usize = 12 * 1024 * 1024;
+
+/// The screenshot of a capture whose pictures wait for the replay tools; it says so.
+const PENDING_SCREENSHOT: &[u8] = include_bytes!("../assets/pending-screenshot.png");
+
+/// The setting that marks a capture whose pictures wait to be rendered from its replay.
+fn pending_pictures(capture: i64) -> String {
+    format!("pictures.pending.{capture}")
+}
+
+/// When the browser would have taken its step shots: a moment after the last of a quick series of
+/// clicks and keys, as the extension's SHOT_DELAY_MS does. At most MAX_SHOTS, the latest kept.
+fn step_shot_times(actions: &[crate::protocol::Action]) -> Vec<i64> {
+    const DELAY_MS: i64 = 700;
+    let steps: Vec<i64> = actions
+        .iter()
+        .filter(|a| {
+            matches!(
+                a.kind,
+                ActionKind::Click
+                    | ActionKind::Press
+                    | ActionKind::Select
+                    | ActionKind::Check
+                    | ActionKind::Uncheck
+            )
+        })
+        .map(|a| a.timestamp)
+        .collect();
+    let mut times: Vec<i64> = steps
+        .iter()
+        .enumerate()
+        .filter(|(n, at)| steps.get(n + 1).is_none_or(|next| next - *at > DELAY_MS))
+        .map(|(_, at)| at + DELAY_MS)
+        .collect();
+    let extra = times.len().saturating_sub(MAX_SHOTS);
+    times.drain(..extra);
+    times
+}
 
 /// Returns `Ok(())` at once when another daemon already holds the lock: the caller then connects to it.
 /// Appends one line to `lensd.log`; the daemon has no terminal once a service or browser starts it.
@@ -499,7 +537,13 @@ impl Daemon {
                 false => return Err(not_found("no such project")),
             },
             Request::CreateCapture(capture) => {
+                // Rendering takes seconds: other requests must not wait on the store meanwhile.
+                drop(store);
+                let rendering = capture.render_screenshot
+                    && capture.screenshot.is_empty()
+                    && capture.screenshot_blob.is_none();
                 let screenshot = match &capture.screenshot_blob {
+                    _ if rendering => PENDING_SCREENSHOT.to_vec(),
                     // One byte past the limit is enough to refuse it below.
                     Some(blob) => {
                         self.blobs
@@ -544,6 +588,25 @@ impl Daemon {
                     }
                     None => None,
                 };
+                // No screenshot from the browser: the replay's end, and a picture after each step.
+                let mut shots = self.checked_shots(&capture.shots)?;
+                let mut screenshot = screenshot;
+                let mut pending = false;
+                if rendering && let Some(recording) = &recording {
+                    let times = if capture.kind == CaptureKind::Session {
+                        step_shot_times(&capture.evidence.actions)
+                    } else {
+                        Vec::new()
+                    };
+                    match self.render_pictures(&recording.sha256, &times) {
+                        Ok((png, rendered)) => (screenshot, shots) = (png, rendered),
+                        Err(reason) => {
+                            log(&self.paths, &format!("pictures from the replay: {reason}"));
+                            pending = true;
+                        }
+                    }
+                }
+                let mut store = self.lock_store();
                 let row = CaptureRow {
                     created_at: now_ms(),
                     page_url: page_url.into(),
@@ -559,17 +622,34 @@ impl Daemon {
                     recording,
                     kind: capture.kind,
                     started_at: capture.started_at,
-                    shots: self.checked_shots(&capture.shots)?,
+                    shots,
                 };
                 let saved = store
                     .create_capture(capture.observation, row)
                     .map_err(storage)?
                     .ok_or_else(|| not_found("no such observation"))?;
+                if pending {
+                    store
+                        .set_setting(&pending_pictures(saved.id), "1")
+                        .map_err(storage)?;
+                }
+                drop(store);
                 self.auto_title(saved.observation);
                 Reply::Capture(saved)
             }
             Request::ListCaptures { observation } => {
-                Reply::Captures(store.list_captures(observation).map_err(storage)?)
+                let captures = store.list_captures(observation).map_err(storage)?;
+                // The review page opens: pictures that waited for the replay tools are made now.
+                for capture in &captures {
+                    if store
+                        .setting(&pending_pictures(capture.id))
+                        .map_err(storage)?
+                        .is_some()
+                    {
+                        self.render_pending_soon(capture.id);
+                    }
+                }
+                Reply::Captures(captures)
             }
             Request::GetCapture { id } => Reply::Capture(
                 store
@@ -1563,6 +1643,102 @@ impl Daemon {
     }
 
     /// Shots from UploadChunk: stored WebP images, at most MAX_SHOTS.
+    /// The PNG screenshot and the step shots rendered from a stored recording, checked as the
+    /// browser's are. An error when the replay tools are missing or the render fails.
+    fn render_pictures(
+        &self,
+        recording: &str,
+        times: &[i64],
+    ) -> Result<(Vec<u8>, Vec<Shot>), String> {
+        let tools = self.paths.data.join("video-tools");
+        if !crate::attachments::tools_ready(&tools) {
+            return Err("the replay tools are not installed".into());
+        }
+        let events = self.blobs.read_all(recording).map_err(|e| e.to_string())?;
+        let (png, webps) =
+            crate::attachments::stills(&events, times, &tools).map_err(|e| e.to_string())?;
+        if !png.starts_with(b"\x89PNG\r\n\x1a\n") || png.len() > MAX_SCREENSHOT_BYTES {
+            return Err("the rendered screenshot is not a PNG of at most 12 MiB".into());
+        }
+        let shots = times
+            .iter()
+            .zip(webps)
+            .map(|(at, webp)| {
+                Ok(Shot {
+                    at: *at,
+                    image: self
+                        .blobs
+                        .put(&webp, "image/webp")
+                        .map_err(|e| e.to_string())?,
+                    reason: "step".into(),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let shots = self.checked_shots(&shots).map_err(|e| e.message)?;
+        Ok((png, shots))
+    }
+
+    /// Renders a capture's pending pictures on a thread of its own, once at a time for each
+    /// capture, and again only ten minutes after a failure (the review page asks every few seconds).
+    fn render_pending_soon(&self, id: i64) {
+        static TRIED: Mutex<BTreeMap<i64, std::time::Instant>> = Mutex::new(BTreeMap::new());
+        {
+            let mut tried = TRIED.lock().unwrap_or_else(|e| e.into_inner());
+            if tried
+                .get(&id)
+                .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(600))
+            {
+                return;
+            }
+            tried.insert(id, std::time::Instant::now());
+        }
+        if !crate::attachments::tools_ready(&self.paths.data.join("video-tools")) {
+            return;
+        }
+        let Some(daemon) = self.me() else { return };
+        std::thread::spawn(move || {
+            let Ok(Some(capture)) = daemon.lock_store().get_capture(id) else {
+                return;
+            };
+            let Some(recording) = &capture.recording else {
+                return;
+            };
+            let times = if capture.kind == CaptureKind::Session {
+                daemon
+                    .blobs
+                    .read_all(&capture.evidence.sha256)
+                    .ok()
+                    .and_then(|bytes| repro::parse(&bytes))
+                    .map(|evidence| step_shot_times(&evidence.actions))
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            match daemon.render_pictures(&recording.sha256, &times) {
+                Ok((png, shots)) => {
+                    let Ok(screenshot) = daemon.blobs.put(&png, "image/png") else {
+                        return;
+                    };
+                    let store = daemon.lock_store();
+                    // Shots the browser took stay; only a capture without any gets the rendered ones.
+                    let shots = if capture.shots.is_empty() {
+                        shots
+                    } else {
+                        capture.shots.clone()
+                    };
+                    if store.replace_pictures(id, &screenshot, &shots).is_ok() {
+                        let _ = store.delete_setting(&pending_pictures(id));
+                        TRIED.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+                    }
+                }
+                Err(reason) => log(
+                    &daemon.paths,
+                    &format!("pictures of capture {id}: {reason}"),
+                ),
+            }
+        });
+    }
+
     fn checked_shots(&self, shots: &[Shot]) -> Result<Vec<Shot>, ProtocolError> {
         if shots.len() > MAX_SHOTS {
             return Err(bad(format!("a capture keeps at most {MAX_SHOTS} shots")));
@@ -2825,6 +3001,101 @@ mod tests {
         ] {
             assert!(normalize_origin(bad).is_err(), "{bad} was accepted");
         }
+    }
+
+    #[test]
+    fn a_capture_without_a_screenshot_gets_one_from_its_replay() {
+        let (_dir, daemon) = daemon();
+        let at = 1_700_000_000_000_i64;
+        let events = serde_json::json!([
+            { "type": 4, "data": { "href": "https://shop.test/", "width": 800, "height": 600 }, "timestamp": at },
+            { "type": 2, "timestamp": at + 1, "data": { "initialOffset": { "left": 0, "top": 0 },
+              "node": { "type": 0, "id": 1, "childNodes": [
+                { "type": 1, "id": 2, "name": "html", "publicId": "", "systemId": "" },
+                { "type": 2, "id": 3, "tagName": "html", "attributes": {}, "childNodes": [
+                  { "type": 2, "id": 4, "tagName": "head", "attributes": {}, "childNodes": [] },
+                  { "type": 2, "id": 5, "tagName": "body", "attributes": {}, "childNodes": [
+                    { "type": 3, "id": 6, "textContent": "Cart" }] }] }] } } },
+            { "type": 5, "data": { "tag": "lens-end", "payload": {} }, "timestamp": at + 3000 }
+        ]);
+        let recording = daemon
+            .blobs
+            .put(events.to_string().as_bytes(), "application/json")
+            .unwrap();
+        let click = |t: i64| {
+            serde_json::json!({ "kind": "click", "timestamp": t, "url": "https://shop.test/",
+                "target": null, "value": null, "masked": false })
+        };
+        let request = |id: u32| {
+            serde_json::json!({ "id": id, "method": "createCapture", "params": {
+                "observation": null, "pageUrl": "https://shop.test/", "pageTitle": "Cart",
+                "renderScreenshot": true,
+                "evidence": { "mode": "limited", "page": null, "gaps": [], "events": [],
+                    "actions": [click(at + 100), click(at + 1500)] },
+                "recording": recording, "kind": "session", "startedAt": at
+            } })
+            .to_string()
+        };
+        // Without the replay tools: a picture that says so, and a mark to render it later.
+        let reply = ask(&daemon, &request(1));
+        assert_eq!(reply["status"], "ok", "{reply}");
+        let capture = &reply["result"]["data"];
+        let sha = capture["screenshot"]["sha256"].as_str().unwrap();
+        assert_eq!(daemon.blobs.read_all(sha).unwrap(), PENDING_SCREENSHOT);
+        let id = capture["id"].as_i64().unwrap();
+        assert!(
+            daemon
+                .lock_store()
+                .setting(&pending_pictures(id))
+                .unwrap()
+                .is_some()
+        );
+        // With them (the e2e tools, when this computer has them): the replay's own pictures.
+        let tools = std::env::var_os("LENS_E2E_VIDEO_TOOLS")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                directories::BaseDirs::new().map(|b| b.data_dir().join("sirv-lens/video-tools"))
+            })
+            .filter(|t| crate::attachments::tools_ready(t));
+        let Some(tools) = tools else { return };
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&tools, daemon.paths.data.join("video-tools")).unwrap();
+        #[cfg(windows)]
+        return;
+        let reply = ask(&daemon, &request(2));
+        let capture = &reply["result"]["data"];
+        let png = daemon
+            .blobs
+            .read_all(capture["screenshot"]["sha256"].as_str().unwrap())
+            .unwrap();
+        assert!(
+            png.starts_with(b"\x89PNG") && png != PENDING_SCREENSHOT,
+            "{reply}"
+        );
+        assert_eq!(
+            capture["shots"].as_array().map(Vec::len),
+            Some(2),
+            "{reply}"
+        );
+    }
+
+    #[test]
+    fn step_shots_follow_a_series_of_steps() {
+        let action = |kind: ActionKind, timestamp: i64| Action {
+            kind,
+            timestamp,
+            url: "https://shop.test/".into(),
+            target: None,
+            value: None,
+            masked: false,
+        };
+        let actions = [
+            action(ActionKind::Click, 1000),
+            action(ActionKind::Fill, 1200),
+            action(ActionKind::Press, 1500),
+            action(ActionKind::Click, 5000),
+        ];
+        assert_eq!(step_shot_times(&actions), vec![2200, 5700]);
     }
 
     #[test]

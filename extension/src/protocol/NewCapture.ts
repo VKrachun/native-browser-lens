@@ -24,4 +24,9 @@ startedAt: number,
 /**
  * Screenshots taken during the recording, after the person's steps.
  */
-shots: Array<Shot>, };
+shots: Array<Shot>, 
+/**
+ * The browser could not take the screenshot (Firefox without access to all sites): Lens
+ * renders it, and the step shots, from the recording.
+ */
+renderScreenshot?: boolean, };
