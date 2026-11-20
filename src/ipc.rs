@@ -7,6 +7,7 @@ use std::io;
 #[cfg(unix)]
 pub fn listen(paths: &Paths) -> io::Result<Listener> {
     use interprocess::local_socket::GenericFilePath;
+    paths.check_socket_folder()?;
     let path = paths.socket();
     // Only the lock holder calls this, so a socket file left here belongs to a dead daemon.
     match std::fs::remove_file(&path) {
@@ -27,6 +28,7 @@ pub fn listen(paths: &Paths) -> io::Result<Listener> {
 #[cfg(unix)]
 pub fn connect(paths: &Paths) -> io::Result<Stream> {
     use interprocess::local_socket::GenericFilePath;
+    paths.check_socket_folder()?;
     Stream::connect(paths.socket().as_path().to_fs_name::<GenericFilePath>()?)
 }
 

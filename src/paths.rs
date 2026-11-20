@@ -57,10 +57,47 @@ impl Paths {
         for dir in [&self.data, &self.runtime, &self.blobs(), &self.logs] {
             private_dir(dir)?;
         }
-        // The short socket folder, when the runtime folder's path is too long (see `socket`).
+        // The short socket folder, when the runtime folder's path is too long (see `socket`). It
+        // sits in a shared temporary folder: made without following links, and checked.
         #[cfg(unix)]
-        if let Some(folder) = self.socket().parent().map(PathBuf::from) {
-            private_dir(&folder)?;
+        if let Some(folder) = self.socket_folder() {
+            use std::os::unix::fs::DirBuilderExt;
+            match std::fs::DirBuilder::new().mode(0o700).create(&folder) {
+                Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e),
+                _ => {}
+            }
+            self.check_socket_folder()?;
+        }
+        Ok(())
+    }
+
+    /// The socket's folder when it is not the private runtime folder.
+    #[cfg(unix)]
+    fn socket_folder(&self) -> Option<PathBuf> {
+        let folder = self.socket().parent().map(PathBuf::from)?;
+        (folder != self.runtime).then_some(folder)
+    }
+
+    /// Another account could make the shared-temporary socket folder first, or put a link there:
+    /// then it is refused, by the daemon before it listens and by a client before it connects.
+    #[cfg(unix)]
+    pub fn check_socket_folder(&self) -> io::Result<()> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let Some(folder) = self.socket_folder() else {
+            return Ok(());
+        };
+        let meta = std::fs::symlink_metadata(&folder)?;
+        // SAFETY: getuid has no preconditions and cannot fail.
+        let uid = unsafe { libc::getuid() };
+        if !meta.file_type().is_dir() || meta.uid() != uid || meta.permissions().mode() & 0o077 != 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} is not a private folder of this account; remove it, then start Lens again",
+                    folder.display()
+                ),
+            ));
         }
         Ok(())
     }
