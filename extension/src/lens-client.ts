@@ -34,6 +34,7 @@ type ReplyTo = {
   saveEdits: 'capture';
   readBlob: 'blob';
   listReviews: 'reviews';
+  listReviewsPage: 'reviews';
   getReview: 'review';
   createReview: 'review';
   exportReview: 'exported';

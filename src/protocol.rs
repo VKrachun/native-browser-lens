@@ -135,6 +135,13 @@ pub enum Request {
     /// at the observation's current revision. The person must confirm they checked the screenshots.
     CreateReview(ReviewRequest),
     ListReviews,
+    /// Up to `limit` reviews older than `before` (all when null), newest first: one page of
+    /// ListReviews, which can outgrow a reply.
+    ListReviewsPage {
+        #[ts(type = "number | null")]
+        before: Option<i64>,
+        limit: u32,
+    },
     GetReview {
         #[ts(type = "number")]
         review: i64,

@@ -173,11 +173,11 @@ pub fn playwright(
                     "  // Lens redacted part of the next URL; put the real value back."
                 );
             }
-            if caused && current.is_some() {
-                let _ = writeln!(out, "  await page.waitForURL({});", js(&action.url));
-            } else {
-                let _ = writeln!(out, "  await page.goto({});", js(&action.url));
-            }
+            let _ = writeln!(
+                out,
+                "{}",
+                navigation(&action.url, caused && current.is_some())
+            );
             current = Some(action.url.clone());
         }
         if action.kind != ActionKind::Navigate {
@@ -186,7 +186,7 @@ pub fn playwright(
         }
     }
     if current.is_none() {
-        let _ = writeln!(out, "  await page.goto({});", js(page_url));
+        let _ = writeln!(out, "{}", navigation(page_url, false));
     }
     let _ = writeln!(
         out,
@@ -198,6 +198,36 @@ pub fn playwright(
     );
     out
 }
+
+/// How a test reaches `url`. After a click or a key, the page usually gets there itself: wait for
+/// it. Timing alone cannot tell (the person may have typed an address after opening a menu), so a
+/// wait that sees no navigation goes there after five seconds instead of failing.
+pub fn navigation(url: &str, caused: bool) -> String {
+    if caused {
+        format!(
+            "  await page.waitForURL({0}, {{ timeout: 5000 }}).catch(() => page.goto({0}));",
+            js(url)
+        )
+    } else {
+        format!("  await page.goto({});", js(url))
+    }
+}
+
+/// The URL a `navigation` line goes to, and whether it waits for the page to get there itself.
+pub fn navigation_target(line: &str) -> Option<(String, bool)> {
+    let (rest, caused) = match line.strip_prefix("  await page.goto(") {
+        Some(rest) => (rest, false),
+        None => (line.strip_prefix("  await page.waitForURL(")?, true),
+    };
+    let url = serde_json::Deserializer::from_str(rest)
+        .into_iter::<String>()
+        .next()?
+        .ok()?;
+    Some((url, caused))
+}
+
+/// The start of each step a test cannot repeat, so a check can count them.
+pub const SKIPPED_STEP: &str = "// Skipped step: ";
 
 fn step(out: &mut String, action: &Action) {
     let target = action.target.as_ref().map(locator);
@@ -212,8 +242,8 @@ fn step(out: &mut String, action: &Action) {
         (ActionKind::Press, None) => format!("await page.keyboard.press({});", js(value)),
         (ActionKind::Select, Some(t)) if action.masked => {
             format!(
-                "// {}",
-                comment(&format!("The person chose a private option in {t}."))
+                "{SKIPPED_STEP}{}",
+                comment(&format!("the person chose a private option in {t}."))
             )
         }
         (ActionKind::Select, Some(t)) => {
@@ -222,9 +252,9 @@ fn step(out: &mut String, action: &Action) {
         (ActionKind::Check, Some(t)) => format!("await {t}.check();"),
         (ActionKind::Uncheck, Some(t)) => format!("await {t}.uncheck();"),
         (ActionKind::Upload, Some(t)) => format!(
-            "// {}",
+            "{SKIPPED_STEP}{}",
             comment(&format!(
-                "The person chose files here ({value}): await {t}.setInputFiles([...]);"
+                "the person chose files here ({value}): await {t}.setInputFiles([...]);"
             ))
         ),
         (ActionKind::Scroll, _) => match value.parse::<f64>() {
@@ -234,7 +264,7 @@ fn step(out: &mut String, action: &Action) {
             _ => return,
         },
         _ => format!(
-            "// Lens could not locate this step: {}",
+            "{SKIPPED_STEP}Lens could not locate it: {}",
             comment(&describe(action))
         ),
     };
@@ -853,6 +883,18 @@ mod tests {
     }
 
     #[test]
+    fn navigation_lines_read_back() {
+        for caused in [false, true] {
+            let line = navigation("https://shop.test/a?q=\"x\")", caused);
+            assert_eq!(
+                navigation_target(&line),
+                Some(("https://shop.test/a?q=\"x\")".to_string(), caused))
+            );
+        }
+        assert_eq!(navigation_target("  await page.screenshot();"), None);
+    }
+
+    #[test]
     fn the_test_repeats_the_steps() {
         let script = playwright(
             &checkout(),
@@ -867,7 +909,7 @@ mod tests {
             "  await page.getByRole(\"textbox\", { name: \"Coupon\", exact: true }).fill(\"SAVE10\");",
             "  await page.getByRole(\"button\", { name: \"Pay\", exact: true }).click();",
             "  // Lens recorded: HTTP 500 from POST https://shop.test/api/price",
-            "  await page.waitForURL(\"https://shop.test/receipt\");",
+            "  await page.waitForURL(\"https://shop.test/receipt\", { timeout: 5000 }).catch(() => page.goto(\"https://shop.test/receipt\"));",
             "await page.screenshot({ path: 'capture-1-reproduced.png' });",
         ] {
             assert!(

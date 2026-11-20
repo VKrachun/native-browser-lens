@@ -52,6 +52,44 @@ pub struct SearchArguments {
     days: Option<u32>,
 }
 
+/// Every review, newest first, a page at a time: the whole list in one reply can outgrow the
+/// daemon's 1 MiB limit.
+pub fn all_reviews(
+    mut call: impl FnMut(Request) -> Result<Reply, String>,
+) -> Result<Vec<ReviewSummary>, String> {
+    const PAGE: u32 = 100;
+    let mut all: Vec<ReviewSummary> = Vec::new();
+    loop {
+        let before = all.last().map(|r| r.id);
+        let Reply::Reviews(page) = call(Request::ListReviewsPage {
+            before,
+            limit: PAGE,
+        })?
+        else {
+            return Err("unexpected reply".into());
+        };
+        let done = page.len() < PAGE as usize;
+        all.extend(page);
+        if done {
+            return Ok(all);
+        }
+    }
+}
+
+/// Most reviews one listing or search returns; the rest are named by count.
+const MAX_LISTED: usize = 100;
+
+/// The reviews and, when there are more, a line that says how many and how to narrow them.
+fn listing(mut reviews: Vec<ReviewSummary>) -> (String, Option<String>) {
+    let more = reviews.len().saturating_sub(MAX_LISTED);
+    reviews.truncate(MAX_LISTED);
+    let text = serde_json::to_string_pretty(&reviews).expect("summaries serialize");
+    let note = (more > 0).then(|| {
+        format!("{more} older reviews are not listed: search_reviews with text, site or days finds them.")
+    });
+    (text, note)
+}
+
 /// The reviews that match every given field, newest first.
 fn search(reviews: Vec<ReviewSummary>, query: &SearchArguments, now_ms: i64) -> Vec<ReviewSummary> {
     let lower = |s: &str| s.to_lowercase();
@@ -157,6 +195,10 @@ pub struct FileArgument {
     /// A file name from get_review, such as capture-1.png, capture-1-timeline.txt or
     /// capture-1.spec.ts.
     file: String,
+    /// For a text file larger than one answer (a HAR can be): the byte to start at. The answer
+    /// says where the next part starts.
+    #[serde(default)]
+    offset: Option<usize>,
 }
 
 fn failure(message: impl Into<String>) -> ErrorData {
@@ -196,10 +238,8 @@ impl LensMcp {
     }
 
     fn summaries(&self) -> Result<Vec<ReviewSummary>, ErrorData> {
-        match self.call(Request::ListReviews)? {
-            Reply::Reviews(reviews) => Ok(reviews),
-            _ => Err(failure("unexpected reply")),
-        }
+        all_reviews(|request| self.call(request).map_err(|e| e.message.to_string()))
+            .map_err(failure)
     }
 
     /// Reviews whose title, page or VibeQ task matches, newest first. Every field is optional.
@@ -208,12 +248,13 @@ impl LensMcp {
         &self,
         Parameters(query): Parameters<SearchArguments>,
     ) -> Result<CallToolResult, ErrorData> {
-        let found: Vec<_> = search(self.summaries()?, &query, crate::daemon::now_ms());
-        let text = serde_json::to_string_pretty(&found).expect("summaries serialize");
-        Ok(CallToolResult::success(vec![
+        let (text, more) = listing(search(self.summaries()?, &query, crate::daemon::now_ms()));
+        let mut content = vec![
             ContentBlock::text(format!("Each title and pageUrl is {UNTRUSTED}")),
             ContentBlock::text(text),
-        ]))
+        ];
+        content.extend(more.map(ContentBlock::text));
+        Ok(CallToolResult::success(content))
     }
 
     fn bytes(&self, blob: &crate::protocol::BlobRef) -> Result<Vec<u8>, ErrorData> {
@@ -313,7 +354,8 @@ impl LensMcp {
             serde_json::from_slice(&bytes).map_err(|e| failure(e.to_string()))?;
         let project = match project {
             Some(folder) => std::path::PathBuf::from(folder),
-            None => std::env::current_dir().map_err(|e| failure(e.to_string()))?,
+            None => project_folder(&std::env::current_dir().map_err(|e| failure(e.to_string()))?)
+                .map_err(failure)?,
         };
         let item = item.clone();
         let verdict = tokio::task::spawn_blocking(move || {
@@ -323,7 +365,9 @@ impl LensMcp {
         .map_err(|e| failure(e.to_string()))?
         .map_err(failure)?;
         Ok(CallToolResult::success(vec![
-            ContentBlock::text(format!("Page URLs and console text below are {UNTRUSTED}")),
+            ContentBlock::text(format!(
+                "Page URLs, console text and Playwright's errors (they quote the page) below are {UNTRUSTED}"
+            )),
             ContentBlock::text(serde_json::to_string_pretty(&verdict).expect("JSON serializes")),
         ]))
     }
@@ -331,14 +375,13 @@ impl LensMcp {
     /// Reviews a person approved, newest first: what an agent may read.
     #[tool(annotations(read_only_hint = true))]
     async fn list_reviews(&self) -> Result<CallToolResult, ErrorData> {
-        let Reply::Reviews(reviews) = self.call(Request::ListReviews)? else {
-            return Err(failure("unexpected reply"));
-        };
-        let text = serde_json::to_string_pretty(&reviews).expect("summaries serialize");
-        Ok(CallToolResult::success(vec![
+        let (text, more) = listing(self.summaries()?);
+        let mut content = vec![
             ContentBlock::text(format!("Each title and pageUrl is {UNTRUSTED}")),
             ContentBlock::text(text),
-        ]))
+        ];
+        content.extend(more.map(ContentBlock::text));
+        Ok(CallToolResult::success(content))
     }
 
     /// One review: title, the person's notes, and per capture the page, what failed, and the files
@@ -366,7 +409,11 @@ impl LensMcp {
     #[tool(annotations(read_only_hint = true))]
     async fn read_review_file(
         &self,
-        Parameters(FileArgument { review, file }): Parameters<FileArgument>,
+        Parameters(FileArgument {
+            review,
+            file,
+            offset,
+        }): Parameters<FileArgument>,
     ) -> Result<CallToolResult, ErrorData> {
         let found = self.review(review)?;
         if let Some(note) = file
@@ -448,22 +495,87 @@ impl LensMcp {
         } else {
             bytes
         };
-        let mut text = String::from_utf8_lossy(&bytes).into_owned();
-        if text.len() > MAX_TEXT_BYTES {
-            let cut = (0..=MAX_TEXT_BYTES)
-                .rev()
-                .find(|&i| text.is_char_boundary(i))
-                .unwrap_or(0);
-            text.truncate(cut);
-            text.push_str(&format!(
-                "\n[cut at {MAX_TEXT_BYTES} bytes of {}]",
-                bytes.len()
-            ));
-        }
-        Ok(CallToolResult::success(vec![
+        let text = String::from_utf8_lossy(&bytes);
+        let (part, next) = text_part(&text, offset.unwrap_or(0));
+        let mut content = vec![
             ContentBlock::text(format!("{file} is {UNTRUSTED}")),
-            ContentBlock::text(text),
-        ]))
+            ContentBlock::text(part.to_string()),
+        ];
+        // Apart from the text, so the parts join into the whole file (a HAR stays valid JSON).
+        if let Some(next) = next {
+            content.push(ContentBlock::text(format!(
+                "This is bytes {} to {next} of {}. For the rest, call read_review_file again with offset {next}.",
+                offset.unwrap_or(0).min(text.len()),
+                text.len()
+            )));
+        }
+        Ok(CallToolResult::success(content))
+    }
+}
+
+/// At most MAX_TEXT_BYTES of `text` from byte `offset` (both rounded down to a character), and
+/// where the next part starts when there is more.
+fn text_part(text: &str, offset: usize) -> (&str, Option<usize>) {
+    let boundary = |at: usize| {
+        (0..=at.min(text.len()))
+            .rev()
+            .find(|&i| text.is_char_boundary(i))
+            .unwrap_or(0)
+    };
+    let start = boundary(offset);
+    let end = boundary(start.saturating_add(MAX_TEXT_BYTES));
+    (&text[start..end], (end < text.len()).then_some(end))
+}
+
+/// The project verify_fix runs in when the agent names none: the folder the agent works in, when
+/// it has a Playwright config; else the one project below it that has one. Several below (a
+/// monorepo root): which one is the agent's to say, not Lens's to guess.
+fn project_folder(cwd: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let configured = |folder: &std::path::Path| {
+        ["ts", "js", "mjs", "cjs", "mts", "cts"]
+            .iter()
+            .any(|ext| folder.join(format!("playwright.config.{ext}")).is_file())
+    };
+    if configured(cwd) {
+        return Ok(cwd.to_path_buf());
+    }
+    // Two levels down covers apps/web and packages/shop; dependencies and hidden folders are not projects.
+    let children = |folder: &std::path::Path| -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(folder)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_dir()
+                    && p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| !n.starts_with('.') && n != "node_modules")
+            })
+            .collect()
+    };
+    let mut found: Vec<_> = children(cwd)
+        .into_iter()
+        .flat_map(|child| {
+            let mut here = vec![child.clone()];
+            here.extend(children(&child));
+            here
+        })
+        .filter(|p| configured(p))
+        .collect();
+    found.sort();
+    match found.len() {
+        0 => Ok(cwd.to_path_buf()),
+        1 => Ok(found.remove(0)),
+        _ => Err(format!(
+            "{} has several Playwright projects: {}. Call verify_fix again with project set to the one that serves base_url.",
+            cwd.display(),
+            found
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
     }
 }
 
@@ -737,6 +849,78 @@ pub fn run(paths: &Paths) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn large_files_come_in_parts_that_join() {
+        let text = "é".repeat(MAX_TEXT_BYTES); // two bytes each: twice one part
+        let mut joined = String::new();
+        let mut offset = 0;
+        loop {
+            let (part, next) = text_part(&text, offset);
+            joined.push_str(part);
+            match next {
+                Some(next) => offset = next,
+                None => break,
+            }
+        }
+        assert_eq!(joined, text);
+        assert_eq!(text_part("abc", 1), ("bc", None));
+        assert_eq!(text_part("abc", 99), ("", None));
+    }
+
+    #[test]
+    fn the_review_list_comes_a_page_at_a_time() {
+        let summary = |id| ReviewSummary {
+            id,
+            observation: 1,
+            revision: 1,
+            created_at: 0,
+            page_url: None,
+            title: String::new(),
+            captures: 1,
+            vibeq_task_id: None,
+            vibeq_task_url: None,
+        };
+        let all: Vec<_> = (1..=250).rev().map(summary).collect();
+        let mut asked = 0;
+        let found = all_reviews(|request| {
+            asked += 1;
+            let Request::ListReviewsPage { before, limit } = request else {
+                return Err("wrong request".into());
+            };
+            Ok(Reply::Reviews(
+                all.iter()
+                    .filter(|r| before.is_none_or(|b| r.id < b))
+                    .take(limit as usize)
+                    .cloned()
+                    .collect(),
+            ))
+        })
+        .unwrap();
+        assert_eq!((found.len(), asked), (250, 3));
+        assert_eq!((found[0].id, found[249].id), (250, 1));
+    }
+
+    #[test]
+    fn a_monorepo_root_does_not_choose_for_the_agent() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(project_folder(root.path()).unwrap(), root.path());
+        std::fs::create_dir_all(root.path().join("apps/web")).unwrap();
+        std::fs::write(root.path().join("apps/web/playwright.config.ts"), "").unwrap();
+        assert_eq!(
+            project_folder(root.path()).unwrap(),
+            root.path().join("apps/web")
+        );
+        std::fs::create_dir_all(root.path().join("shop")).unwrap();
+        std::fs::write(root.path().join("shop/playwright.config.mjs"), "").unwrap();
+        assert!(
+            project_folder(root.path())
+                .unwrap_err()
+                .contains("several Playwright projects")
+        );
+        std::fs::write(root.path().join("playwright.config.js"), "").unwrap();
+        assert_eq!(project_folder(root.path()).unwrap(), root.path());
+    }
 
     #[test]
     fn file_names_map_to_captures() {

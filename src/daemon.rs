@@ -912,6 +912,16 @@ impl Daemon {
                 )
             }
             Request::ListReviews => Reply::Reviews(store.list_reviews().map_err(storage)?),
+            // ponytail: reads every review for each page; a keyset query if lists reach the 100,000s.
+            Request::ListReviewsPage { before, limit } => Reply::Reviews(
+                store
+                    .list_reviews()
+                    .map_err(storage)?
+                    .into_iter()
+                    .filter(|r| before.is_none_or(|b| r.id < b))
+                    .take(limit.min(500) as usize)
+                    .collect(),
+            ),
             Request::GetReview { review } => Reply::Review(
                 store
                     .get_review(review)

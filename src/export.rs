@@ -214,44 +214,111 @@ pub fn project_test(
             har = Some(contents);
         }
     }
+    let map = OriginMap::new(&spec, &item.page_url, base_url);
     (
-        for_project(&spec, &item.page_url, base_url, n, name, review.id),
-        har,
+        for_project(&spec, &map, n, name, review.id),
+        har.map(|bytes| map.har(bytes)),
     )
 }
 
-fn for_project(
-    spec: &str,
-    page_url: &str,
-    base_url: Option<&str>,
-    n: usize,
-    name: &str,
-    review: i64,
-) -> String {
-    let mut out = spec.to_string();
-    let origin = url::Url::parse(page_url)
-        .ok()
-        .map(|u| u.origin().ascii_serialization())
-        .filter(|o| o != "null");
-    // The base goes into JavaScript strings that verify_fix runs: only an http(s) origin and
-    // path, as the URL parser writes them (quotes and backslashes cannot survive it).
-    let base = base_url
-        .and_then(|b| url::Url::parse(b.trim()).ok())
-        .filter(|u| matches!(u.scheme(), "http" | "https") && u.host().is_some());
-    let base = base.map(|u| {
-        format!(
-            "{}{}",
-            u.origin().ascii_serialization(),
-            u.path().trim_end_matches('/')
-        )
-    });
-    if let Some(origin) = &origin {
-        out = match base.as_deref() {
-            Some(base) => out.replace(&format!("\"{origin}"), &format!("\"{base}")),
-            _ => out
-                .replace(&format!("\"{origin}/"), "\"/")
-                .replace(&format!("\"{origin}\""), "\"/\""),
+/// Where a project test sends the recorded site: the origin of its first page goes to the dev
+/// server's base URL (or to relative paths, for the project's baseURL). Another origin has no
+/// counterpart on the dev server: production, or a payment or sign-in site.
+struct OriginMap {
+    home: Option<String>,
+    base: Option<String>,
+}
+
+impl OriginMap {
+    fn new(spec: &str, page_url: &str, base_url: Option<&str>) -> Self {
+        let origin = |url: &str| {
+            url::Url::parse(url)
+                .ok()
+                .map(|u| u.origin().ascii_serialization())
+                .filter(|o| o != "null")
         };
+        // The first page the test opens, not the capture's last page: a session that ends on a
+        // checkout site began on the shop.
+        let home = spec
+            .lines()
+            .find_map(repro::navigation_target)
+            .and_then(|(url, _)| origin(&url))
+            .or_else(|| origin(page_url));
+        // The base goes into JavaScript strings that verify_fix runs: only an http(s) origin and
+        // path, as the URL parser writes them (quotes and backslashes cannot survive it).
+        let base = base_url
+            .and_then(|b| url::Url::parse(b.trim()).ok())
+            .filter(|u| matches!(u.scheme(), "http" | "https") && u.host().is_some())
+            .map(|u| {
+                format!(
+                    "{}{}",
+                    u.origin().ascii_serialization(),
+                    u.path().trim_end_matches('/')
+                )
+            });
+        Self { home, base }
+    }
+
+    /// The URL on the dev server; None when it is on another site.
+    fn map(&self, url: &str) -> Option<String> {
+        // Not a URL (rare): the line stays as it was recorded.
+        let Ok(parsed) = url::Url::parse(url) else {
+            return Some(url.into());
+        };
+        if Some(parsed.origin().ascii_serialization()) != self.home {
+            return None;
+        }
+        let rest = &parsed[url::Position::BeforePath..];
+        Some(match &self.base {
+            Some(base) => format!("{base}{rest}"),
+            None if rest.is_empty() => "/".into(),
+            None => rest.into(),
+        })
+    }
+
+    /// The HAR with the recorded site's requests on the dev server, so routeFromHAR matches them.
+    /// Requests to other sites (a CDN, a payment API) keep their address.
+    fn har(&self, bytes: Vec<u8>) -> Vec<u8> {
+        let Ok(mut har) = serde_json::from_slice::<Value>(&bytes) else {
+            return bytes;
+        };
+        if self.base.is_none() {
+            return bytes;
+        }
+        for entry in har["log"]["entries"].as_array_mut().into_iter().flatten() {
+            let url = &mut entry["request"]["url"];
+            if let Some(mapped) = url.as_str().and_then(|u| self.map(u)) {
+                *url = Value::String(mapped);
+            }
+        }
+        serde_json::to_vec_pretty(&har).expect("HAR serializes")
+    }
+}
+
+fn for_project(spec: &str, map: &OriginMap, n: usize, name: &str, review: i64) -> String {
+    // Only the pages the test opens move to the dev server: text the person typed keeps its URLs.
+    let mut out = String::new();
+    for line in spec.lines() {
+        match repro::navigation_target(line) {
+            Some((url, caused)) => match map.map(&url) {
+                Some(mapped) => out.push_str(&repro::navigation(&mapped, caused)),
+                None => {
+                    let site = url::Url::parse(&url)
+                        .map(|u| u.origin().ascii_serialization())
+                        .unwrap_or(url);
+                    let message = format!(
+                        "Lens stops here: the recording goes on at {site}, a site this test does not run on. \
+                         A test must not act on it; do the rest of the steps by hand."
+                    );
+                    out.push_str(&format!(
+                        "  throw new Error({});",
+                        serde_json::to_string(&message).expect("strings serialize")
+                    ));
+                }
+            },
+            None => out.push_str(line),
+        }
+        out.push('\n');
     }
     for (from, to) in [
         (format!("capture-{n}.spec.ts"), format!("{name}.spec.ts")),
@@ -280,8 +347,8 @@ fn for_project(
             }
         })
         .collect();
-    let recorded = origin.as_deref().unwrap_or("the recorded site");
-    let target = match &base {
+    let recorded = map.home.as_deref().unwrap_or("the recorded site");
+    let target = match &map.base {
         Some(base) => format!("runs against {base}"),
         None => "uses the baseURL in playwright.config".to_string(),
     };
@@ -450,45 +517,63 @@ mod tests {
 
 #[cfg(test)]
 mod project_tests {
+    fn project(spec: &str, base: Option<&str>, name: &str) -> String {
+        let map = super::OriginMap::new(spec, "https://other.example/end", base);
+        super::for_project(spec, &map, 1, name, 7)
+    }
+
     #[test]
     fn a_project_test_points_at_the_dev_server_and_asks_for_private_values() {
-        let spec = "  await page.goto(\"https://app.example.com/cart\");\n  await page.getByRole('textbox', { name: 'Card' }).fill(''); // The person typed a private value here: type a valid one.\n  // await page.routeFromHAR('capture-1.har', { notFound: 'fallback' });\n  await page.goto(\"https://other.example/x\");";
-        let local = super::for_project(
+        let spec = "  await page.goto(\"https://app.example.com/cart\");\n  await page.getByRole('textbox', { name: 'Note' }).fill(\"see https://app.example.com/x\");\n  await page.getByRole('textbox', { name: 'Card' }).fill(''); // The person typed a private value here: type a valid one.\n  // await page.routeFromHAR('capture-1.har', { notFound: 'fallback' });\n  await page.waitForURL(\"https://app.example.com/pay\", { timeout: 5000 }).catch(() => page.goto(\"https://app.example.com/pay\"));\n  await page.goto(\"https://other.example/x\");";
+        let local = project(
             spec,
-            "https://app.example.com/cart",
             Some("http://localhost:3000/"),
-            1,
             "lens-review-7-capture-1",
-            7,
         );
         assert!(local.contains("page.goto(\"http://localhost:3000/cart\")"));
+        assert!(local.contains("waitForURL(\"http://localhost:3000/pay\", { timeout: 5000 }).catch(() => page.goto(\"http://localhost:3000/pay\"))"));
         assert!(local.contains("fill(process.env.LENS_PRIVATE_1 ?? '')"));
         assert!(local.contains("routeFromHAR('lens-review-7-capture-1.har'"));
         assert!(
-            local.contains("\"https://other.example/x\""),
-            "other sites stay"
+            local.contains("fill(\"see https://app.example.com/x\")"),
+            "typed text keeps its URLs"
         );
-        let relative = super::for_project(spec, "https://app.example.com/cart", None, 1, "t", 7);
+        // The first page decides, not the capture's last page; the test stops before another site.
+        assert!(!local.contains("page.goto(\"https://other.example/x\")"));
+        assert!(local.contains(
+            "throw new Error(\"Lens stops here: the recording goes on at https://other.example"
+        ));
+        let relative = project(spec, None, "t");
         assert!(relative.contains("page.goto(\"/cart\")"));
         assert!(relative.contains("uses the baseURL in playwright.config"));
-        let hostile = super::for_project(
-            spec,
-            "https://app.example.com/cart",
-            Some("http://evil.test/\"+alert(1)+\""),
-            1,
-            "t",
-            7,
-        );
+        let hostile = project(spec, Some("http://evil.test/\"+alert(1)+\""), "t");
         assert!(!hostile.contains("\"+alert(1)+\""));
         assert!(hostile.contains("page.goto(\"http://evil.test/%22+alert(1)+%22/cart\")"));
-        let not_web = super::for_project(
+        let not_web = project(spec, Some("javascript:alert(1)"), "t");
+        assert!(not_web.contains("page.goto(\"/cart\")"));
+    }
+
+    #[test]
+    fn the_har_follows_the_test_to_the_dev_server() {
+        let spec = "  await page.goto(\"https://app.example.com/cart\");";
+        let map = super::OriginMap::new(
             spec,
             "https://app.example.com/cart",
-            Some("javascript:alert(1)"),
-            1,
-            "t",
-            7,
+            Some("http://localhost:3000"),
         );
-        assert!(not_web.contains("page.goto(\"/cart\")"));
+        let har = serde_json::json!({ "log": { "entries": [
+            { "request": { "url": "https://app.example.com/api/price?c=1" } },
+            { "request": { "url": "https://cdn.example.net/a.js" } },
+        ] } });
+        let mapped: serde_json::Value =
+            serde_json::from_slice(&map.har(serde_json::to_vec(&har).unwrap())).unwrap();
+        assert_eq!(
+            mapped["log"]["entries"][0]["request"]["url"],
+            "http://localhost:3000/api/price?c=1"
+        );
+        assert_eq!(
+            mapped["log"]["entries"][1]["request"]["url"],
+            "https://cdn.example.net/a.js"
+        );
     }
 }
