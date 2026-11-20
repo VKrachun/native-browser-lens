@@ -47,7 +47,7 @@
         <tr><td><strong>Console messages</strong>: errors and warnings of the page</td><td>On allowed sites, while Lens collects or records</td></tr>
         <tr><td><strong>Your voice</strong>, from the microphone</td><td>Only while you record with "Record my voice" turned on</td><td>The audio stays on your computer. Lens writes it down there with the Whisper speech model; no audio is ever sent anywhere</td></tr>
         <tr><td><strong>Your own input</strong>: titles, notes, tags, drawings, highlights and black-out masks</td><td>When you add them</td><td>The data folder on your computer</td></tr>
-        <tr><td><strong>Settings</strong>: allowed sites, preferences, and the address of your VibeQ workspace</td><td>When you set them</td><td>The browser's extension storage and the data folder. Your VibeQ sign-in token is kept in your operating system's secret store</td></tr>
+        <tr><td><strong>Settings</strong>: allowed sites, preferences, and the addresses you choose for issue trackers</td><td>When you set them</td><td>The browser's extension storage and the data folder. Your VibeQ sign-in token is kept in your operating system's secret store</td></tr>
       </tbody>
     </table>
     <p>The data folder is <code>~/Library/Application Support/Sirv Lens</code> on macOS, <code>~/.local/share/sirv-lens</code> on Linux and <code>%LOCALAPPDATA%\Sirv\Lens</code> on Windows.</p>
@@ -55,6 +55,7 @@
     <h2>When data leaves your computer</h2>
     <p>Only in these cases, and each one starts with an action of yours:</p>
     <ul>
+      <li><strong>Opening a tracker draft.</strong> When you open a Linear or GitHub draft, the title and summary from your review travel in the URL and can appear in browser history. Lens copies longer text to your clipboard for pasting. For Jira Cloud and Basecamp, Lens opens your destination and copies the summary. You submit the task and choose any files to attach.</li>
       <li><strong>Filing to VibeQ.</strong> When you press "File to VibeQ", Lens sends the task (title, notes, findings, tags), the structured record, the screenshots and the page recording to the VibeQ address you configured, signed in as you. Before filing, Lens may search that VibeQ for similar tasks. If you choose "Put Sirvant to work", Lens asks your VibeQ to start its agent on the task. VibeQ is run by its own operator under its own terms.</li>
       <li><strong>Exporting.</strong> "Export" writes the same files to a folder on your computer. Where they go from there is up to you.</li>
       <li><strong>Your AI assistant, if you have one.</strong> If Claude Code or Codex is installed and signed in on your computer, Lens uses it to write titles and findings, to split long recordings into tasks and to check for duplicates. Lens passes it text only: your transcript, the steps, the page text, your notes and, for the duplicate check, the titles and descriptions of similar VibeQ tasks. The tool sends that text to Anthropic or OpenAI under your own account and their terms. No audio and no screenshots are sent for these. The separate "Draft the report" action, which you start yourself, also passes the screenshots. You choose the assistant in Settings; without one installed, nothing is sent.</li>

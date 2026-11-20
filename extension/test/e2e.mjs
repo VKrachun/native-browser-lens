@@ -223,9 +223,19 @@ try {
   // The setup card lists only the open steps; the background script announced the extension, so its step leaves.
   const setup = panel.getByRole('region', { name: 'Setup' });
   await setup.waitFor({ timeout: 15_000 });
-  // Setup shows only what the panel cannot: starting at login (a button), and VibeQ (optional).
+  // Setup shows only what the panel cannot: starting at login.
   await setup.getByRole('button', { name: 'Turn on' }).waitFor({ timeout: 15_000 });
   if (await setup.getByText(/Browser extension|A site to collect on/).count()) throw new Error('setup repeats what the panel shows');
+
+  const onboarding = panel.getByRole('region', { name: 'Default destination' });
+  const firstChoice = onboarding.getByLabel('Destination', { exact: true });
+  await firstChoice.waitFor();
+  if (await firstChoice.inputValue() || await firstChoice.locator('option[value=vibeq]').count()) {
+    throw new Error('Unexpected initial default');
+  }
+  await firstChoice.selectOption('linear');
+  await onboarding.getByRole('button', { name: 'Save default' }).click();
+  await onboarding.waitFor({ state: 'detached' });
 
   // Track the site: a project for its origin, and the debugger attaches to the tab.
   await panel.getByRole('button', { name: 'Collect evidence on this site' }).click();
@@ -378,6 +388,61 @@ try {
   }
   await freeze.click();
   await review.getByRole('list', { name: 'Reviewed captures' }).getByRole('img').first().waitFor({ timeout: 15_000 });
+  // Intercept the draft before it leaves the test browser. Opening a draft cannot file a task.
+  if (await review.getByLabel('Destination', { exact: true }).count()) throw new Error('Review asks for the tracker again');
+  await context.route('https://linear.app/new?**', (route) => route.fulfill({ body: 'Draft' }));
+  const [draftTab] = await Promise.all([
+    context.waitForEvent('page'),
+    review.getByRole('button', { name: 'Open draft in Linear' }).click(),
+  ]);
+  await draftTab.waitForURL('https://linear.app/new?**');
+  const draftUrl = new URL(draftTab.url());
+  if (!draftUrl.searchParams.get('title') || !draftUrl.searchParams.get('description')?.includes('HTTP 500')) {
+    throw new Error('The draft is missing reviewed evidence');
+  }
+  await draftTab.close();
+  const settings = await context.newPage();
+  await settings.goto(`chrome-extension://${extensionId}/options.html`);
+  const destinations = settings.getByLabel('Destination', { exact: true });
+  await settings.getByRole('option', { name: 'Linear' }).waitFor({ state: 'attached' });
+  if (await destinations.inputValue() !== 'linear') throw new Error('Settings did not inherit onboarding');
+  const wizardPage = await context.newPage();
+  const wizardLink = execFileSync(bin, ['setup-page'], { env, encoding: 'utf8' }).trim();
+  await wizardPage.goto(wizardLink);
+  await wizardPage.waitForFunction(() => document.querySelector('#tracker')?.value === 'linear');
+  await context.grantPermissions(['clipboard-read'], { origin: site });
+  for (const [key, label, address, button, target] of [
+    ['jira', 'Jira Cloud site', 'https://lens-test.atlassian.net', 'Copy and open Jira Cloud', 'https://lens-test.atlassian.net/secure/CreateIssue!default.jspa'],
+    ['basecamp', 'Basecamp to-do list or form URL', 'https://app.basecamp.com/1/buckets/2/todolists/3', 'Copy and open Basecamp', 'https://app.basecamp.com/1/buckets/2/todolists/3/todos/new'],
+    ['github', 'GitHub repository', 'https://github.com/lens-test/reviews', 'Open draft in GitHub Issues', 'https://github.com/lens-test/reviews/issues/new?**'],
+  ]) {
+    if (key === 'jira') {
+      await wizardPage.getByLabel('Default destination').selectOption(key);
+      await wizardPage.getByLabel(label).fill(address);
+      await wizardPage.getByRole('button', { name: 'Save default' }).click();
+      await wizardPage.getByText('Default saved.').waitFor();
+      await wizardPage.close();
+    } else {
+      await settings.bringToFront();
+      await destinations.selectOption(key);
+      await settings.getByLabel(label).fill(address);
+      await settings.getByRole('button', { name: 'Save default' }).click();
+      await settings.getByText('Default saved.').waitFor();
+    }
+    await review.bringToFront();
+    await context.route(target, (route) => route.fulfill({ body: 'Draft' }));
+    const [tab] = await Promise.all([context.waitForEvent('page'), review.getByRole('button', { name: button }).click()]);
+    await tab.waitForURL(target);
+    if (key === 'github' && !new URL(tab.url()).searchParams.get('body')?.includes('HTTP 500')) throw new Error('Missing issue body');
+    await tab.close();
+    if (key !== 'github') {
+      await shop.bringToFront();
+      if (!(await shop.evaluate(() => navigator.clipboard.readText())).includes('HTTP 500')) {
+        throw new Error('Missing clipboard summary for ' + key);
+      }
+    }
+  }
+  if (vibeq.submits) throw new Error('Opening a draft submitted a task');
   await review.getByRole('button', { name: 'Export to Downloads' }).click();
   const exportStatus = review.getByRole('status', { name: 'Export' });
   await exportStatus.waitFor({ timeout: 15_000 });
@@ -433,10 +498,9 @@ try {
   if (!isolated) rmSync(folder, { recursive: true, force: true });
 
   // File to VibeQ: the first reply is lost; filing again finishes without a second task.
-  const settings = await context.newPage();
-  await settings.goto(`chrome-extension://${extensionId}/options.html`);
   // Sign in through VibeQ: nobody is signed in yet, so Lens opens VibeQ and waits for the session.
   const vibeqOrigin = `http://127.0.0.1:${fakeVibeq.address().port}`;
+  await settings.getByText('Other integrations', { exact: true }).click();
   await settings.getByLabel('VibeQ address').fill(vibeqOrigin);
   if (process.env.E2E_GALLERY) {
     mkdirSync(process.env.E2E_GALLERY, { recursive: true });
@@ -458,6 +522,13 @@ try {
   await review.reload();
   await review.getByRole('button', { name: 'Create review' }).click();
   await review.getByRole('list', { name: 'Reviewed captures' }).getByRole('img').first().waitFor({ timeout: 15_000 });
+  // Explicit tracker choices survive sign-in and reload. Connected teams can still select VibeQ.
+  if (await destinations.inputValue() !== 'github') throw new Error('Lost preferred tracker');
+  await settings.bringToFront();
+  await destinations.selectOption('vibeq');
+  await settings.getByRole('button', { name: 'Save default' }).click();
+  await settings.getByText('Default saved.').waitFor();
+  await review.bringToFront();
   // Before filing, Lens looks for the same problem in VibeQ; the model judged task-9 the same.
   if (summaries) {
     const duplicates = review.getByRole('region', { name: 'Duplicates' });

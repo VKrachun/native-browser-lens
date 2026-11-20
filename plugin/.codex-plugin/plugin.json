@@ -1,6 +1,6 @@
 {
   "name": "sirv-lens",
-  "version": "0.12.12",
+  "version": "0.12.13",
   "description": "Read the browser defects you recorded with Sirv Lens: steps, network and console evidence, your voice, screenshots and a Playwright test. Reproduce them, fix them, and prove the fix on your dev server.",
   "author": { "name": "Igor Varyvoda" },
   "homepage": "https://lens.sirv.studio",

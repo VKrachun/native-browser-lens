@@ -13,6 +13,7 @@ import { AlertIcon, DoneIcon, LensMark, LinkIcon } from '@/ui/icons';
 import '@/ui/base.css';
 import { followSystemTheme } from '@/ui/theme';
 import './style.css';
+import { DestinationForm } from '@/ui/Destination';
 import { AppStatus } from '@/ui/AppStatus';
 
 const DEFAULT_VIBEQ = 'https://work.sirv.studio';
@@ -38,10 +39,14 @@ function Settings() {
         {version && <span className="small muted num">Lens {version}</span>}
       </header>
       <StatusLine client={client} />
-      <VibeQ client={client} />
+      <DestinationForm client={client} />
       <Voice client={client} />
       <Models client={client} />
       <CodingAgents client={client} />
+      <details className="card optional-integrations">
+        <summary>Other integrations</summary>
+        <VibeQ client={client} />
+      </details>
       <Updates client={client} />
       <section className="card settings-section" aria-label="Privacy">
         <h2>What Lens reads</h2>
@@ -63,19 +68,13 @@ function Settings() {
 function StatusLine({ client }: { client: LensClient }) {
   const [items, setItems] = useState<{ label: string; ok: boolean; target: string }[] | null>(null);
   const load = useCallback(async () => {
-    const [vibeq, speech, agents, setup] = await Promise.all([
-      client.request({ method: 'getVibeQ' }).catch(() => null),
+    const [speech, agents, setup] = await Promise.all([
       client.request({ method: 'speechStatus' }).catch(() => null),
       client.request({ method: 'listAgents' }).catch(() => null),
       client.request({ method: 'setupStatus' }).catch(() => null),
     ]);
     const ready = agents?.filter((a) => a.state === 'ready').map((a) => (a.agent === 'codex' ? 'Codex' : 'Claude Code')) ?? [];
     setItems([
-      {
-        label: vibeq?.hasToken ? `VibeQ: ${vibeq.account ?? 'signed in'}` : 'VibeQ: not signed in',
-        ok: !!vibeq?.hasToken,
-        target: 'VibeQ',
-      },
       {
         label: speech?.model.state === 'ready' ? `Voice: ready (${speech.engines[0] ?? 'CPU'})` : 'Voice: needs the speech model',
         ok: speech?.model.state === 'ready',
@@ -133,6 +132,7 @@ function VibeQ({ client }: { client: LensClient }) {
   const save = useCallback(
     async (endpoint: string, token: string) => {
       setSettings(await client.request({ method: 'setVibeQ', params: { endpoint, token } }));
+      window.dispatchEvent(new Event('lens-destination-changed'));
       setWaitingFor(null);
       setProblem(null);
     },
@@ -206,6 +206,7 @@ function VibeQ({ client }: { client: LensClient }) {
   async function signOut() {
     try {
       setSettings(await client.request({ method: 'setVibeQ', params: { endpoint: settings!.endpoint!, token: '' } }));
+      window.dispatchEvent(new Event('lens-destination-changed'));
       setProblem(null);
     } catch (error) {
       setProblem((error as Error).message);
@@ -220,7 +221,7 @@ function VibeQ({ client }: { client: LensClient }) {
     <section className="card settings-section" aria-label="VibeQ">
       <div className="section">
         <h2>VibeQ</h2>
-        <p className="small muted">Where Lens files the defects you review. Without it, you can still export them.</p>
+        <p className="small muted">Connect your workspace to file reviewed evidence and check for duplicate tasks.</p>
       </div>
       {signedIn ? (
         <div className="account" role="status" aria-label="VibeQ account">

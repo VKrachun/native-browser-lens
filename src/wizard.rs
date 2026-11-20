@@ -12,7 +12,7 @@
 use crate::daemon::Daemon;
 use crate::investigate::{Agent, AgentInfo};
 use crate::paths::Paths;
-use crate::protocol::{Outcome, Reply, Request, SetupStatus, SpeechStatus, VibeQSettings};
+use crate::protocol::{Outcome, Reply, Request, SetupStatus, SpeechStatus};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -98,12 +98,25 @@ pub fn serve(daemon: Arc<Daemon>, paths: &Paths) -> std::io::Result<Arc<Wizard>>
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "camelCase")]
 enum Action {
-    OpenExtensions { browser: String },
-    OpenStore { browser: String },
-    OpenSettings { browser: String },
-    ShowFolder { firefox: bool },
+    OpenExtensions {
+        browser: String,
+    },
+    OpenStore {
+        browser: String,
+    },
+    OpenSettings {
+        browser: String,
+    },
+    ShowFolder {
+        firefox: bool,
+    },
     InstallSpeech,
-    SetSummaryAgent { agent: Option<Agent> },
+    SetDestination {
+        choice: crate::protocol::TaskDestination,
+    },
+    SetSummaryAgent {
+        agent: Option<Agent>,
+    },
     ConnectAgents,
 }
 
@@ -255,9 +268,18 @@ fn status(daemon: &Daemon, paths: &Paths) -> Value {
         Ok(Reply::SummaryAgent(agent)) => agent,
         _ => None,
     };
-    let vibeq: Option<VibeQSettings> = match ask(daemon, Request::GetVibeQ) {
-        Ok(Reply::VibeQ(settings)) => Some(settings),
+    let destination = match ask(daemon, Request::GetDestination) {
+        Ok(Reply::Destination(settings)) => Some(settings),
         _ => None,
+    };
+    let signed_in = destination.as_ref().is_some_and(|d| d.vibeq_connected);
+    let account = if signed_in {
+        match ask(daemon, Request::GetVibeQ) {
+            Ok(Reply::VibeQ(settings)) => settings.account,
+            _ => None,
+        }
+    } else {
+        None
     };
     let platform = if cfg!(target_os = "macos") {
         "macos"
@@ -291,9 +313,10 @@ fn status(daemon: &Daemon, paths: &Paths) -> Value {
         "browsers": browsers,
         "speech": speech,
         "agents": agents,
+        "vibeq": { "signedIn": signed_in, "account": account },
+        "destination": destination,
         "summaryAgent": summary_agent,
         "codingAgentsConnected": crate::agents::connected(),
-        "vibeq": vibeq.map(|v| json!({ "signedIn": v.has_token, "account": v.account })),
         "folders": {
             "chromium": paths.data.join("extension").display().to_string(),
             "firefox": paths.data.join("extension-firefox").join("manifest.json").display().to_string(),
@@ -333,6 +356,14 @@ fn act(daemon: &Daemon, paths: &Paths, action: Action) -> Result<(), String> {
             crate::setup::open_url(&folder.display().to_string()).map_err(|e| e.to_string())
         }
         Action::InstallSpeech => ask(daemon, Request::InstallSpeech).map(drop),
+        Action::SetDestination { choice } => ask(
+            daemon,
+            Request::SetDestination {
+                choice,
+                only_if_unset: false,
+            },
+        )
+        .map(drop),
         Action::SetSummaryAgent { agent } => {
             ask(daemon, Request::SetSummaryAgent { agent }).map(drop)
         }

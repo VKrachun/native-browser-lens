@@ -18,6 +18,8 @@ type ReplyTo = {
   listIssues: 'issues';
   splitIntoTasks: 'split';
   findDuplicates: 'duplicates';
+  getDestination: 'destination';
+  setDestination: 'destination';
   getSummaryAgent: 'summaryAgent';
   setSummaryAgent: 'done';
   getObservation: 'observation';

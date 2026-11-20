@@ -114,3 +114,11 @@
 .status-line .pill:disabled {
   cursor: default;
 }
+
+.optional-integrations > summary {
+  padding: 16px;
+  cursor: pointer;
+}
+.optional-integrations .settings-section {
+  border: 0;
+}

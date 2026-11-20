@@ -140,15 +140,9 @@ pub fn steps(status: &SetupStatus) -> Vec<Step> {
         )
     });
 
-    steps.push(if status.vibeq_configured {
-        step("VibeQ", Mark::Done, "address saved".into())
-    } else {
-        step(
-            "VibeQ",
-            Mark::Optional,
-            "to file tasks: Lens Settings, then Sign in with VibeQ".into(),
-        )
-    });
+    if status.vibeq_configured {
+        steps.push(step("VibeQ", Mark::Done, "address saved".into()));
+    }
     steps
 }
 

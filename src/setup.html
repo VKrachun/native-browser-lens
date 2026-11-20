@@ -44,6 +44,14 @@
   .body { color: var(--muted); font-size: 14px; }
   .body p { margin: 4px 0; }
   .body strong { color: var(--text); font-weight: 600; }
+  #destination { grid-template-columns: 1fr; display: grid; gap: 8px; margin-bottom: 16px; }
+  #destination h2 { margin: 0; font-size: 16px; }
+  #destination p { margin: 0; }
+  #destination form, #destination label { display: grid; gap: 5px; }
+  #destination form { gap: 10px; }
+  #destination select, #destination input { font: inherit; border: 1px solid var(--border); border-radius: 7px; padding: 7px; color: var(--text); background: var(--card); }
+  #destination [hidden] { display: none; }
+  #destination button { justify-self: start; }
   .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
   button, .btn { font: inherit; font-size: 14px; border-radius: 9px; padding: 7px 13px; border: 1px solid var(--border); background: var(--card); color: var(--text); cursor: pointer; }
   button:hover:not(:disabled) { border-color: var(--primary); }
@@ -79,6 +87,24 @@
   <p class="lede" id="lede">Lens runs in the background and starts with your computer. A few steps are left; each turns green by itself when it is done.</p>
   <div class="offline" id="offline" hidden>Lens does not answer. Open Sirv Lens from your applications, then this page continues.</div>
   <div class="progress" aria-hidden="true"><div class="bar"><span id="bar" style="width:0"></span></div><span id="count"></span></div>
+  <section id="destination" class="step" aria-labelledby="destination-title">
+    <h2 id="destination-title">Where do you track issues?</h2>
+    <p class="note">Choose once for every Lens review on this computer. You can change this in Settings.</p>
+    <form id="destination-form">
+      <label>Default destination
+        <select id="tracker" required>
+          <option value="" disabled selected>Choose a destination</option>
+          <option value="linear">Linear</option><option value="jira">Jira Cloud</option>
+          <option value="basecamp">Basecamp</option><option value="github">GitHub Issues</option>
+          <option value="clipboard">Clipboard</option>
+        </select>
+      </label>
+      <label id="tracker-address-field" hidden><span id="tracker-address-label"></span><input type="url" id="tracker-address"></label>
+      <button id="save-destination" type="submit" disabled>Save default</button>
+      <p class="error" role="alert" id="destination-error"></p>
+      <p class="note" role="status" id="destination-saved"></p>
+    </form>
+  </section>
   <ol class="steps" id="steps" aria-live="polite"></ol>
   <footer>You can come back here any time: the Lens icon in the <span id="tray">menu bar</span>, then <strong>Set up Lens</strong>.</footer>
 </main>
@@ -152,8 +178,69 @@ function mb(bytes) { return Math.round(bytes / 1e6) + " MB"; }
 const BROWSERS = { chrome: "Chrome", chromium: "Chromium", edge: "Edge", brave: "Brave", firefox: "Firefox" };
 function browserName(key) { return BROWSERS[key] || key; }
 
+const tracker = document.getElementById("tracker");
+const address = document.getElementById("tracker-address");
+const saveDestination = document.getElementById("save-destination");
+const destinationError = document.getElementById("destination-error");
+const destinationSaved = document.getElementById("destination-saved");
+const addressFields = {
+  jira: ["Jira Cloud site", "https://team.atlassian.net"],
+  github: ["GitHub repository", "https://github.com/owner/repo"],
+  basecamp: ["Basecamp to-do list or form URL", "https://app.basecamp.com/…"],
+};
+let editingDestination = false;
+let savingDestination = false;
+
+function renderDestination() {
+  const settings = data?.destination;
+  if (!settings) return;
+  const vibeq = tracker.querySelector('option[value="vibeq"]');
+  if (!vibeq && settings.vibeqConnected) tracker.add(new Option("VibeQ", "vibeq"));
+  if (vibeq && !settings.vibeqConnected) vibeq.remove();
+  if (!editingDestination) {
+    tracker.value = settings.choice?.tracker || "";
+    address.value = settings.choice?.address || "";
+  }
+  const field = addressFields[tracker.value];
+  document.getElementById("tracker-address-field").hidden = !field;
+  address.required = !!field;
+  if (field) {
+    document.getElementById("tracker-address-label").textContent = field[0];
+    address.placeholder = field[1];
+  }
+  saveDestination.disabled = savingDestination || !tracker.value || (!!field && !address.value.trim());
+}
+
+function editDestination() {
+  editingDestination = true;
+  destinationError.textContent = "";
+  destinationSaved.textContent = "";
+  renderDestination();
+}
+tracker.addEventListener("change", () => {
+  address.value = tracker.value === data?.destination?.choice?.tracker ? data.destination.choice.address : "";
+  editDestination();
+});
+address.addEventListener("input", editDestination);
+document.getElementById("destination-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (savingDestination) return;
+  savingDestination = true;
+  tracker.disabled = address.disabled = true;
+  await act("destination", { action: "setDestination", choice: { tracker: tracker.value, address: address.value.trim() } });
+  savingDestination = false;
+  tracker.disabled = address.disabled = false;
+  if (errors.destination) destinationError.textContent = errors.destination;
+  else {
+    editingDestination = false;
+    destinationSaved.textContent = "Default saved.";
+  }
+  renderDestination();
+});
+
 function render() {
   if (!data) return;
+  renderDestination();
   const s = data.setup || {};
   const steps = [];
   let done = 0, total = 0;
@@ -270,15 +357,6 @@ function render() {
   steps.push(step(6, "Coding agents", data.codingAgentsConnected ? "done" : "optional", { text: data.codingAgentsConnected ? "connected" : "optional", kind: data.codingAgentsConnected ? "ok" : "" },
     el("p", {}, "Let Claude Code, Codex, Cursor and Gemini CLI read your recordings, reproduce them and prove a fix."),
     el("div", { class: "row" }, button(data.codingAgentsConnected ? "Connect again" : "Connect coding agents", "agents", { action: "connectAgents" }, !data.codingAgentsConnected)), error("agents")));
-
-  // 7. VibeQ (optional).
-  const vibeq = data.vibeq || {};
-  const chromium = browsers.find((b) => !b.firefox && current && b.name.toLowerCase().includes(current.client.browser)) || browsers.find((b) => !b.firefox);
-  steps.push(step(7, "VibeQ", vibeq.signedIn ? "done" : "optional", { text: vibeq.signedIn ? "signed in" + (vibeq.account ? " as " + vibeq.account : "") : "optional", kind: vibeq.signedIn ? "ok" : "" },
-    el("p", {}, "File recordings as VibeQ tasks with one click."),
-    !vibeq.signedIn && current && chromium ? el("div", { class: "row" }, button("Open Lens Settings to sign in", "settings", { action: "openSettings", browser: chromium.name })) : null,
-    !vibeq.signedIn && !current ? el("p", { class: "note" }, "First add the extension; then sign in from Lens Settings.") : null,
-    error("settings")));
 
   const list = document.getElementById("steps");
   const focused = document.activeElement && document.activeElement.closest(".step") ? [...list.children].indexOf(document.activeElement.closest(".step")) : -1;

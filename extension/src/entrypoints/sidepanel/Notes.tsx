@@ -24,7 +24,7 @@ function TagChips({ tags, onChange }: { tags: string[]; onChange: (tags: string[
       <input
         className="tag-draft"
         aria-label="Add a tag"
-        placeholder={tags.length ? 'Add a tag' : 'Tags for VibeQ, like assets, bug'}
+        placeholder={tags.length ? 'Add a tag' : 'Add a tag, like assets or bug'}
         value={draft}
         onChange={(e) => setDraft(e.target.value.replace(',', ''))}
         onKeyDown={(e) => {

@@ -41,6 +41,27 @@ const TOKEN_ACCOUNT: &str = "vibeq-token";
 /// keyring runs. People use Settings.
 const TOKEN_ENV: &str = "LENS_VIBEQ_TOKEN";
 
+fn vibeq_connected(store: &Store) -> Result<bool, ProtocolError> {
+    Ok(store.setting("vibeq.endpoint").map_err(storage)?.is_some()
+        && saved_token().ok().flatten().is_some())
+}
+
+fn destination_settings(store: &Store) -> Result<DestinationSettings, ProtocolError> {
+    let vibeq_connected = vibeq_connected(store)?;
+    let saved = store.setting("task.destination").map_err(storage)?;
+    let choice: Option<TaskDestination> = match saved {
+        Some(json) => serde_json::from_str(&json).map_err(storage)?,
+        None => vibeq_connected.then(|| TaskDestination {
+            tracker: Tracker::Vibeq,
+            address: String::new(),
+        }),
+    };
+    Ok(DestinationSettings {
+        choice: choice.filter(|c| c.tracker != Tracker::Vibeq || vibeq_connected),
+        vibeq_connected,
+    })
+}
+
 fn vibeq_settings(store: &Store) -> Result<VibeQSettings, ProtocolError> {
     let has_token = saved_token().ok().flatten().is_some();
     Ok(VibeQSettings {
@@ -727,6 +748,30 @@ impl Daemon {
                 drop(store);
                 self.update(true)?;
                 Reply::Updates(self.update_state(&self.lock_store())?)
+            }
+            Request::GetDestination => Reply::Destination(destination_settings(&store)?),
+            Request::SetDestination {
+                choice,
+                only_if_unset,
+            } => {
+                if !only_if_unset
+                    || store
+                        .setting("task.destination")
+                        .map_err(storage)?
+                        .is_none()
+                {
+                    let choice = crate::destination::normalize(choice).map_err(bad)?;
+                    if choice.tracker == Tracker::Vibeq && !vibeq_connected(&store)? {
+                        return Err(bad("Connect VibeQ in Settings first."));
+                    }
+                    store
+                        .set_setting(
+                            "task.destination",
+                            &serde_json::to_string(&choice).map_err(storage)?,
+                        )
+                        .map_err(storage)?;
+                }
+                Reply::Destination(destination_settings(&store)?)
             }
             Request::GetSummaryAgent => Reply::SummaryAgent(summary_agent(&store)),
             Request::SetSummaryAgent { agent } => {
@@ -2208,6 +2253,37 @@ mod tests {
 
     fn ask(daemon: &Daemon, json: &str) -> serde_json::Value {
         serde_json::from_slice(&daemon.answer(json.as_bytes()).0).unwrap()
+    }
+
+    #[test]
+    fn invalid_settings_and_browser_migration_preserve_the_saved_default_after_restart() {
+        let (dir, daemon) = daemon();
+        let send = |tracker: &str, address: &str, only_if_unset: bool| {
+            let request = serde_json::json!({"id": 1, "method": "setDestination", "params": {
+                "choice": {"tracker": tracker, "address": address}, "onlyIfUnset": only_if_unset
+            }});
+            ask(&daemon, &request.to_string())
+        };
+        assert_eq!(
+            send("jira", "https://team.atlassian.net", false)["status"],
+            "ok"
+        );
+        assert_eq!(send("github", "invalid", false)["status"], "error");
+        assert_eq!(
+            send("linear", "", true)["result"]["data"]["choice"]["tracker"],
+            "jira"
+        );
+        let paths = daemon.paths.clone();
+        drop(daemon);
+        let restarted = Daemon::new(
+            Store::open(&dir.path().join("lens.sqlite")).unwrap(),
+            &paths,
+        );
+        let settings = ask(&restarted, r#"{"id":2,"method":"getDestination"}"#);
+        assert_eq!(
+            settings["result"]["data"]["choice"]["address"],
+            "https://team.atlassian.net"
+        );
     }
 
     #[test]

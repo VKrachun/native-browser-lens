@@ -10,6 +10,7 @@ import type { BlobRef } from '@/protocol/BlobRef';
 import { Notes } from './Notes';
 import { VoiceNotes } from './Voice';
 import { RecordControls, SCREEN_ACCESS_REFUSED, useScreenAccess, useStored, type PanelMode } from './Record';
+import { DestinationForm } from '@/ui/Destination';
 import { InstallApp, SetupCard, appMissing } from './Onboarding';
 
 type Connection = { state: 'connecting' } | { state: 'ready'; hello: Hello } | { state: 'failed'; message: string };
@@ -203,6 +204,7 @@ export function App() {
               </span>
             </div>
           )}
+          <DestinationForm client={client} onboarding />
           <SetupCard client={client} refresh={site?.mode ? 1 : 0} />
 
           <section className="card site" aria-label="This site">
@@ -375,7 +377,7 @@ function Observations({
     else days.push([day, [o]]);
   }
   async function remove(o: ObservationSummary) {
-    if (!confirm(`Delete “${o.title}” with its recordings and notes? Tasks already filed stay in VibeQ.`)) return;
+    if (!confirm(`Delete “${o.title}” with its recordings and notes? Tasks already filed stay in your tracker.`)) return;
     await client.request({ method: 'deleteObservation', params: { id: o.id } }).catch(() => {});
     onChanged();
   }
@@ -467,8 +469,8 @@ function Observations({
                       href={o.taskUrl}
                       target="_blank"
                       rel="noreferrer"
-                      aria-label={`Open the VibeQ task of ${o.title}`}
-                      title="Open the VibeQ task"
+                      aria-label={`Open the filed task of ${o.title}`}
+                      title="Open the filed task"
                     >
                       <LinkIcon />
                     </a>
@@ -526,7 +528,7 @@ function Detail({
         </button>
         {observation.taskUrl?.startsWith('https://') ? (
           <a className="pill" data-tone="success" href={observation.taskUrl} target="_blank" rel="noreferrer" title={observation.taskUrl}>
-            Filed · Open in VibeQ
+            Filed · Open task
           </a>
         ) : (
           observation.status !== 'draft' && (

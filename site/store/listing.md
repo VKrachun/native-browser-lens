@@ -20,8 +20,8 @@ Lens turns "this looks broken" into a task that a developer or a coding agent ca
 Open the Lens side panel on the site you test, press Record and talk. Lens keeps your clicks, keys and page changes, the network and the console, and your voice. Press Stop and Lens opens the recording: a replay of the page with your words, written down on your computer.
 
 - Trim and cut, draw on the page, highlight an element, and black out anything private.
-- With your own Claude Code or Codex (optional), Lens writes the title and findings, splits a long recording into one task per problem, and checks VibeQ for duplicates.
-- File to VibeQ with the steps, the screenshots and the replay, or export a folder with a report, a structured record and a Playwright test.
+- With your own Claude Code or Codex (optional), Lens writes the title and findings and splits a long recording into one task per problem.
+- Prepare an issue in Linear or GitHub Issues, or copy the review summary into Jira Cloud or Basecamp. Export the screenshots, replay and Playwright test when you need attachments.
 - Coding agents read reviewed recordings from Lens over MCP.
 
 Private by default

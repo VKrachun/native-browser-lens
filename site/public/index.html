@@ -90,9 +90,9 @@
           <div class="step-text">
             <span class="step-no">03 File</span>
             <h3>File it, or put an agent on it</h3>
-            <p>With your Claude Code or Codex, Lens writes the title and findings and checks VibeQ for the same problem. Then it files the task with the steps, the screenshots and the replay.</p>
+            <p>Take the reviewed title and findings to Linear, Jira Cloud, Basecamp or GitHub Issues. You choose when to submit the task.</p>
             <ul>
-              <li>Hand it off in the same click: Claude Code, Codex, T3 Code or Zeron opens on the VibeQ task, in your project's folder.</li>
+              <li>Hand the review to Claude Code, Codex, T3 Code or Zeron in your project’s folder.</li>
               <li>Prefer files? Export it to a folder with a Playwright test.</li>
             </ul>
           </div>
@@ -107,7 +107,7 @@
       <div>
         <div class="block-head">
           <h2>What a coding agent gets</h2>
-          <p>Every task carries one structured record. An agent reads it the way you would read the bug, and can repeat it.</p>
+          <p>Each exported capture has a structured record. An agent reads it the way you would read the bug, and can repeat it.</p>
         </div>
         <ul>
           <li><strong>Steps with real locators</strong><span>Role, name, test ID and CSS for each click and field, so a test can find the element again.</span></li>
@@ -116,7 +116,7 @@
           <li><strong>Your words, on the same clock</strong><span>What you said, where you said it, corrected if Whisper misheard.</span></li>
           <li><strong>A replay and screenshots</strong><span>The DOM recording and a shot after each step, with your masks burned in.</span></li>
         </ul>
-        <p class="mcp">Working locally? One click in Settings, or <code>lens agents connect</code>, gives Claude Code, Codex, Cursor and Gemini CLI the Lens skill and MCP server: they find a review by its VibeQ task and read it straight from Lens. No MCP? <code>lens review &lt;id&gt;</code> and <code>lens export &lt;id&gt;</code> work from any shell.</p>
+        <p class="mcp">Working locally? One click in Settings, or <code>lens agents connect</code>, gives Claude Code, Codex, Cursor and Gemini CLI the Lens skill and MCP server: they can find a review and read it straight from Lens. No MCP? <code>lens review &lt;id&gt;</code> and <code>lens export &lt;id&gt;</code> work from any shell.</p>
       </div>
 <pre class="record" aria-label="An excerpt of a Lens record"><code><span class="cmt">// capture-1.lens.json (excerpt)</span>
 {
@@ -193,7 +193,7 @@
       <details><summary>Is Lens free?</summary><p>Yes.</p></details>
       <details><summary>Why is there an app and an extension?</summary><p>The extension records the page. The app keeps the recordings on your computer, writes down your voice with Whisper, files tasks and serves recordings to coding agents. Browsers do not let an extension do all of that on its own.</p></details>
       <details><summary>Which browsers work?</summary><p>Chrome, Edge, Brave and Chromium, with network bodies and screenshots after each step. Firefox works too, with request details limited by what Firefox lets extensions see.</p></details>
-      <details><summary>Where do tasks go?</summary><p>Today Lens files to VibeQ, and exports any recording to a folder with a report, the screenshots, the record and a Playwright test. More trackers are planned.</p></details>
+      <details><summary>Where do tasks go?</summary><p>Open a draft in Linear or GitHub Issues, or copy the summary into a Jira Cloud issue or Basecamp to-do. Use Clipboard for another tracker. Export to Downloads gives you the full evidence to attach.</p></details>
       <details><summary>Do I need an AI subscription?</summary><p>No. With Claude Code or Codex installed and signed in, Lens writes titles and findings, splits long recordings and checks for duplicates. Without them you write the title yourself; everything else works.</p></details>
       <details><summary>Does anything go to Sirv?</summary><p>No. Lens has no server of its own. See the <a href="/privacy">privacy policy</a>.</p></details>
     </div>

@@ -94,8 +94,14 @@ Coding agents read the defects a person reviewed, reproduce them and prove the f
 Every tool only reads, except `verify_fix`, which runs the project's Playwright in a scratch
 folder (`.lens/verify`) and removes it. Page text in every answer is marked as untrusted data.
 
-## VibeQ
+## Issue trackers
 
-Add the VibeQ address and your personal token in Lens Settings. The token stays in the system
+Choose your default destination during setup or in Lens Settings. Every review uses it. Linear and GitHub Issues open a draft with the
+reviewed title and summary. Jira Cloud opens its create form with the summary on the clipboard.
+For Basecamp, paste a to-do list or new to-do form URL, then paste the summary into the to-do.
+The Lens app shares your choice across browsers on this computer. Use Clipboard for another tracker, or Export
+to Downloads for the screenshots, recording and full report.
+
+For VibeQ, open **Settings → Other integrations** and sign in. The token stays in the system
 secret store; `LENS_VIBEQ_TOKEN` overrides it for CI and automation. Filing a review again after
 an error is always safe: Lens reconciles with VibeQ first and never creates a second task.

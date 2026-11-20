@@ -11,6 +11,33 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_REPLY_BYTES: usize = 1024 * 1024;
 pub const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum Tracker {
+    Linear,
+    Jira,
+    Basecamp,
+    Github,
+    Clipboard,
+    Vibeq,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TaskDestination {
+    pub tracker: Tracker,
+    pub address: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct DestinationSettings {
+    pub choice: Option<TaskDestination>,
+    pub vibeq_connected: bool,
+}
+
 #[derive(Debug, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct RequestFrame {
@@ -134,6 +161,12 @@ pub enum Request {
     ListAgents,
     /// The agent for titles, findings, splits and duplicate checks; null is automatic.
     GetSummaryAgent,
+    GetDestination,
+    SetDestination {
+        choice: TaskDestination,
+        #[serde(default, rename = "onlyIfUnset")]
+        only_if_unset: bool,
+    },
     SetSummaryAgent {
         agent: Option<crate::investigate::Agent>,
     },
@@ -405,6 +438,7 @@ pub enum Reply {
     Split(Vec<Observation>),
     Duplicates(Vec<crate::investigate::Duplicate>),
     SummaryAgent(Option<crate::investigate::Agent>),
+    Destination(DestinationSettings),
     Agents(Vec<crate::investigate::AgentInfo>),
     Done,
     Setup(Box<SetupStatus>),

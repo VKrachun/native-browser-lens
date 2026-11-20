@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react';
 import type { LensClient } from '@/lens-client';
 import type { SetupStatus } from '@/protocol/SetupStatus';
 import { CopyIcon, DoneIcon } from '@/ui/icons';
-import { useStored } from './Record';
 
 const REPO = 'https://github.com/VKrachun/native-browser-lens/releases';
 const RELEASES = `${REPO}/latest/download`;
@@ -71,16 +70,10 @@ export function InstallApp({ reason }: { reason: string }) {
   );
 }
 
-/**
- * What is left to set up, as actions. The panel itself covers the extension, the site and the
- * first recording, so only what lives elsewhere shows: starting at login, and VibeQ (optional,
- * dismissible).
- */
 export function SetupCard({ client, refresh }: { client: LensClient; refresh: number }) {
   const [status, setStatus] = useState<SetupStatus | null>(null);
   const [turningOn, setTurningOn] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
-  const [vibeqHidden, setVibeqHidden] = useStored('lens.setup.vibeqHidden', false);
   useEffect(() => {
     let alive = true;
     const load = () =>
@@ -97,10 +90,7 @@ export function SetupCard({ client, refresh }: { client: LensClient; refresh: nu
   }, [client, refresh]);
   if (!status) return null;
   const login = status.steps.find((s) => s.name === 'Starts at login');
-  const vibeq = status.steps.find((s) => s.name === 'VibeQ');
-  const needsLogin = login?.mark === 'todo';
-  const needsVibeq = vibeq?.mark === 'optional' && !vibeqHidden;
-  if (!needsLogin && !needsVibeq) return null;
+  if (login?.mark !== 'todo') return null;
 
   async function turnOn() {
     setTurningOn(true);
@@ -117,39 +107,15 @@ export function SetupCard({ client, refresh }: { client: LensClient; refresh: nu
   return (
     <section className="card setup" aria-label="Setup">
       <ul>
-        {needsLogin && (
-          <li data-mark="todo">
-            <span className="setup-text">
-              <strong>Start Lens at login</strong>
-              <span className="small muted">So recordings and filing keep working after a restart.</span>
-            </span>
-            <button type="button" className="btn btn-secondary btn-sm" onClick={() => void turnOn()} disabled={turningOn}>
-              {turningOn ? 'Turning on…' : 'Turn on'}
-            </button>
-          </li>
-        )}
-        {needsVibeq && (
-          <li data-mark="optional">
-            <span className="setup-text">
-              <strong>File tasks to VibeQ</strong>
-              <span className="small muted">Optional. Without it, you can still export reviews.</span>
-            </span>
-            <span className="setup-actions">
-              <button type="button" className="btn btn-secondary btn-sm" onClick={() => void browser.runtime.openOptionsPage()}>
-                Sign in
-              </button>
-              <button
-                type="button"
-                className="btn btn-ghost btn-sm"
-                aria-label="Hide the VibeQ suggestion"
-                title="Hide"
-                onClick={() => setVibeqHidden(true)}
-              >
-                Not now
-              </button>
-            </span>
-          </li>
-        )}
+        <li data-mark="todo">
+          <span className="setup-text">
+            <strong>Start Lens at login</strong>
+            <span className="small muted">So recordings and filing keep working after a restart.</span>
+          </span>
+          <button type="button" className="btn btn-secondary btn-sm" onClick={() => void turnOn()} disabled={turningOn}>
+            {turningOn ? 'Turning on…' : 'Turn on'}
+          </button>
+        </li>
       </ul>
       {problem && (
         <p role="alert" className="small">

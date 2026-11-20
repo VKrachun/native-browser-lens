@@ -4,6 +4,7 @@ mod bundle;
 mod cli;
 mod client;
 mod daemon;
+mod destination;
 mod digest;
 mod export;
 mod filing;

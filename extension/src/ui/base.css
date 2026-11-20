@@ -537,3 +537,10 @@ textarea.title-input {
   field-sizing: content;
   line-height: 1.25;
 }
+
+.destination-settings, .destination-settings form, .destination-settings label {
+  display: grid;
+  gap: 8px;
+}
+.destination-settings { padding: 16px; }
+.destination-settings button { justify-self: start; }

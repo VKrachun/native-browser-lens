@@ -14,6 +14,8 @@ import type { Locator } from '@/protocol/Locator';
 import type { VoiceNote } from '@/protocol/VoiceNote';
 import type { ReviewVoice } from '@/protocol/ReviewVoice';
 import { AlertIcon, DoneIcon, DraftIcon, ExportIcon, FileIcon, MaskIcon } from '@/ui/icons';
+import { useDestination } from '@/ui/Destination';
+import { TrackerDraft } from './TrackerDraft';
 import { RecordingEditor } from './RecordingEditor';
 import { Handoff, handoffName, useHandoff } from './Handoff';
 import { Notes } from '../sidepanel/Notes';
@@ -38,6 +40,9 @@ export function Review({ observation: id }: { observation: number }) {
   const [exported, setExported] = useState<string | null>(null);
   const [members, setMembers] = useState<Member[] | null>(null);
   const [assignee, setAssignee] = useState('');
+  const { settings: destinations, error: destinationError } = useDestination(client);
+  const defaultChoice = destinations?.choice;
+  const destination = defaultChoice?.tracker;
   const [filing, setFiling] = useState<Filing | null>(null);
   const [sending, setSending] = useState(false);
   /** Put Sirvant, VibeQ's agent, to work right after filing; remembered for the next review. */
@@ -201,14 +206,15 @@ export function Review({ observation: id }: { observation: number }) {
   useEffect(() => {
     if (!review) return;
     client
-      .request({ method: 'listMembers' })
-      .then(setMembers)
-      .catch(() => setMembers([]));
-    client
       .request({ method: 'listAgents' })
       .then(setAgents)
       .catch(() => setAgents([]));
   }, [client, review]);
+
+  useEffect(() => {
+    if (!review || destination !== 'vibeq') return;
+    client.request({ method: 'listMembers' }).then(setMembers).catch(() => setMembers([]));
+  }, [client, review, destination]);
 
   async function draft(agent: Agent) {
     if (!review) return;
@@ -381,7 +387,7 @@ export function Review({ observation: id }: { observation: number }) {
               <span>{problem}</span>
             </div>
           )}
-          {!filing && <Duplicates client={client} id={id} />}
+          {destination === 'vibeq' && !filing && <Duplicates client={client} id={id} />}
           <Handoff state={handoff} review={review.id} />
 
           <footer className="action-bar">
@@ -402,59 +408,65 @@ export function Review({ observation: id }: { observation: number }) {
               <ExportIcon />
               Export to Downloads
             </button>
-            {members && members.length > 0 && (
-              <label className="assign">
-                <span className="small muted">Assign to</span>
-                <select
-                  className="select"
-                  value={assignee}
-                  onChange={(e) => setAssignee(e.target.value)}
-                  disabled={filing !== null}
+            {destination === 'vibeq' ? <>
+              {members && members.length > 0 && (
+                <label className="assign">
+                  <span className="small muted">Assign to</span>
+                  <select
+                    className="select"
+                    value={assignee}
+                    onChange={(e) => setAssignee(e.target.value)}
+                    disabled={filing !== null}
+                  >
+                    <option value="">Nobody</option>
+                    {members.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              {filing?.taskUrl ? (
+                !sirvant && (
+                  <button type="button" className="btn btn-secondary" onClick={() => void startSirvant()} disabled={starting}>
+                    {starting ? 'Starting Sirvant…' : 'Put Sirvant to work'}
+                  </button>
+                )
+              ) : (
+                <label className="check" title="VibeQ's agent takes the task and starts on it. VibeQ operators only.">
+                  <input type="checkbox" checked={sirvantNext} onChange={(e) => setSirvantNext(e.target.checked)} />
+                  <span>Then put Sirvant to work</span>
+                </label>
+              )}
+              {!filing?.taskUrl && handoff.app && (
+                <label
+                  className="check"
+                  title={handoff.ready ? 'Files the task, then hands it off with its VibeQ link.' : 'Choose the project folder under Hand off first.'}
                 >
-                  <option value="">Nobody</option>
-                  {members.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            )}
-            {filing?.taskUrl ? (
-              !sirvant && (
-                <button type="button" className="btn btn-secondary" onClick={() => void startSirvant()} disabled={starting}>
-                  {starting ? 'Starting Sirvant…' : 'Put Sirvant to work'}
-                </button>
-              )
-            ) : (
-              <label className="check" title="VibeQ's agent takes the task and starts on it. VibeQ operators only.">
-                <input type="checkbox" checked={sirvantNext} onChange={(e) => setSirvantNext(e.target.checked)} />
-                <span>Then put Sirvant to work</span>
-              </label>
-            )}
-            {!filing?.taskUrl && handoff.app && (
-              <label
-                className="check"
-                title={handoff.ready ? 'Files the task, then hands it off with its VibeQ link.' : 'Choose the project folder under Hand off first.'}
+                  <input
+                    type="checkbox"
+                    checked={handoff.afterFiling && handoff.ready}
+                    disabled={!handoff.ready}
+                    onChange={(e) => handoff.setAfterFiling(e.target.checked)}
+                  />
+                  <span>Then hand off to {handoffName(handoff.app)}</span>
+                </label>
+              )}
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={file}
+                disabled={sending || (filing !== null && filing.missingFiles === 0)}
               >
-                <input
-                  type="checkbox"
-                  checked={handoff.afterFiling && handoff.ready}
-                  disabled={!handoff.ready}
-                  onChange={(e) => handoff.setAfterFiling(e.target.checked)}
-                />
-                <span>Then hand off to {handoffName(handoff.app)}</span>
-              </label>
-            )}
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={file}
-              disabled={sending || (filing !== null && filing.missingFiles === 0)}
-            >
-              <FileIcon />
-              {sending ? 'Filing…' : filing ? 'Filed' : 'File to VibeQ'}
-            </button>
+                <FileIcon />
+                {sending ? 'Filing…' : filing ? 'Filed' : 'File to VibeQ'}
+              </button>
+            </> : destination && defaultChoice ? (
+              <TrackerDraft key={destination + defaultChoice.address + review.id} tracker={destination} address={defaultChoice.address} review={review} />
+            ) : destinationError ? <span role="alert">{destinationError}</span> : destinations ? (
+              <button type="button" className="btn btn-primary" onClick={() => void browser.runtime.openOptionsPage()}>Choose default destination</button>
+            ) : null}
           </footer>
         </>
       ) : (
