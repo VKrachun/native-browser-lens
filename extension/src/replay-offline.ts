@@ -27,11 +27,15 @@ const FETCHED = new Set(['src', 'href', 'xlink:href', 'poster', 'data', 'backgro
  * CSS escape: the policy the replay's page gets (offlineEvents) is what makes this safe.
  */
 export function offlineCss(text: string): string {
-  if (!/url\(|@import|image-set|['"]/i.test(text)) return text;
+  if (!/url\(|@import|image-set/i.test(text)) return text;
+  // Each pattern has one way to match (a backslash is only ever an escape), so page text cannot
+  // make it run for long.
   return text
     .replace(/@import[^;]*;?/gi, '')
-    .replace(/url\(\s*(['"]?)((?:\\.|(?!\1\s*\)).)*?)\1\s*\)/gi, (whole, _q, inner: string) => (harmless(inner) ? whole : 'none'))
-    .replace(/(['"])((?:\\.|(?!\1).)*)\1/g, (whole, _q, inner: string) => (/^\s*(?:[a-z][\w+.-]*:|\/\/|\\\\)/i.test(inner) && !harmless(inner) ? '""' : whole));
+    .replace(/url\(\s*(['"]?)((?:\\[\s\S]|(?!\1\s*\))[^\\])*?)\1\s*\)/gi, (whole, _q, inner: string) => (harmless(inner) ? whole : 'none'))
+    .replace(/image-set\(([^()]*)\)/gi, (_whole, inside: string) =>
+      `image-set(${inside.replace(/(['"])((?:\\[\s\S]|(?!\1)[^\\\n])*)\1/g, (quoted, _q, inner: string) => (harmless(inner) ? quoted : '""'))})`,
+    );
 }
 
 type Attributes = Record<string, unknown>;
@@ -118,22 +122,27 @@ export const OFFLINE_POLICY =
   "default-src 'none'; img-src data: blob:; media-src data: blob:; font-src data:; style-src 'unsafe-inline' data: blob:; frame-src about: data:";
 let policyId = 2 ** 30;
 
-/** A full snapshot (rrweb type 2) with the policy as the first element of its head. */
+/**
+ * A full snapshot (rrweb type 2) with the policy as the first element of the head of its root
+ * <html>; a head is made when there is none. A snapshot without a root <html> is not replayed:
+ * the policy would have no place, and its page would load freely.
+ */
 function withPolicy(event: unknown): unknown {
   const record = event as { type?: number; data?: { node?: unknown } };
   if (record?.type !== 2 || !record.data?.node) return event;
-  type Node = { type?: number; tagName?: string; childNodes?: Node[] };
-  const find = (node: Node, tag: string): Node | undefined => {
-    if (node.tagName?.toLowerCase() === tag) return node;
-    for (const child of node.childNodes ?? []) {
-      const found = find(child, tag);
-      if (found) return found;
-    }
-    return undefined;
-  };
-  const head = find(record.data.node as Node, 'head');
-  if (!head) return event;
-  const meta = { type: 2, tagName: 'meta', attributes: { 'http-equiv': 'Content-Security-Policy', content: OFFLINE_POLICY }, childNodes: [], id: policyId++ };
+  type Node = { type?: number; tagName?: string; childNodes?: Node[]; attributes?: Record<string, unknown>; id?: number };
+  const root = record.data.node as Node;
+  const html = (root.childNodes ?? []).find((n) => n.tagName?.toLowerCase() === 'html');
+  const meta: Node = { type: 2, tagName: 'meta', attributes: { 'http-equiv': 'Content-Security-Policy', content: OFFLINE_POLICY }, childNodes: [], id: policyId++ };
+  if (!html) {
+    root.childNodes = [{ type: 2, tagName: 'html', attributes: {}, id: policyId++, childNodes: [{ type: 2, tagName: 'head', attributes: {}, id: policyId++, childNodes: [meta] }] }];
+    return event;
+  }
+  let head = (html.childNodes ?? []).find((n) => n.tagName?.toLowerCase() === 'head');
+  if (!head) {
+    head = { type: 2, tagName: 'head', attributes: {}, childNodes: [], id: policyId++ };
+    html.childNodes = [head, ...(html.childNodes ?? [])];
+  }
   head.childNodes = [meta, ...(head.childNodes ?? [])];
   return event;
 }

@@ -26,7 +26,7 @@ it('leaves a full snapshot with nothing to fetch, but links and inlined images a
         node: {
           type: 0,
           id: 1,
-          childNodes: [
+          childNodes: [{ type: 2, id: 100, tagName: 'html', attributes: {}, childNodes: [{ type: 2, id: 101, tagName: 'body', attributes: {}, childNodes: [
             { type: 2, id: 2, tagName: 'img', attributes: { src: 'https://x.test/a.png', srcset: 'https://x.test/a2.png 2x', alt: 'A' }, childNodes: [] },
             { type: 2, id: 3, tagName: 'img', attributes: { src: 'data:image/png;base64,AAAA', rr_dataURL: 'data:image/png;base64,BBBB' }, childNodes: [] },
             { type: 2, id: 4, tagName: 'a', attributes: { href: 'https://x.test/next', style: 'background:url(https://x.test/bg.png)' }, childNodes: [] },
@@ -35,12 +35,14 @@ it('leaves a full snapshot with nothing to fetch, but links and inlined images a
             { type: 2, id: 7, tagName: 'video', attributes: { src: 'https://x.test/v.mp4', poster: 'https://x.test/p.png' }, childNodes: [] },
             { type: 2, id: 8, tagName: 'style', attributes: {}, childNodes: [{ type: 3, id: 9, textContent: 'h{background:url("https://x.test/h.png")}', isStyle: true }] },
             { type: 2, id: 10, tagName: 'meta', attributes: { 'http-equiv': 'refresh', content: '0;url=https://x.test/' }, childNodes: [] },
-          ],
+          ] }] }],
         },
       },
     },
   ]) as { data: { node: { childNodes: { attributes: Record<string, unknown>; childNodes: { textContent?: string }[] }[] } } }[];
-  const [img, inlined, link, sheet, frame, video, style, meta] = snapshot!.data.node.childNodes;
+  // The root <html> gets a head with the policy; the body follows it.
+  const html = snapshot!.data.node.childNodes[0] as unknown as { childNodes: { childNodes: NonNullable<typeof snapshot>["data"]["node"]["childNodes"] }[] };
+  const [img, inlined, link, sheet, frame, video, style, meta] = html.childNodes[1]!.childNodes;
   expect(img!.attributes.src).toMatch(BLANK);
   expect(img!.attributes).not.toHaveProperty('srcset');
   expect(img!.attributes.alt).toBe('A');
@@ -93,4 +95,20 @@ it('gives every full snapshot the offline policy and drops srcdoc', () => {
   const html = out.data.node.childNodes[0] as { childNodes: { tagName: string; childNodes: { tagName: string; attributes: Record<string, string> }[] }[] };
   expect(html.childNodes[0]!.childNodes[0]!.attributes).toEqual({ 'http-equiv': 'Content-Security-Policy', content: OFFLINE_POLICY });
   expect(html.childNodes[1]!.childNodes[0]!.attributes).toEqual({ src: 'about:blank' });
+});
+
+it('keeps quoted text outside image-set and makes a head when there is none', () => {
+  expect(offlineCss('see "https://x.test" here')).toBe('see "https://x.test" here');
+  const started = Date.now();
+  offlineCss('url("' + '\\'.repeat(50000) + 'x');
+  offlineCss('image-set("' + '\\a'.repeat(50000));
+  expect(Date.now() - started).toBeLessThan(500);
+  const snapshot = { type: 2, data: { node: { type: 0, childNodes: [{ type: 2, tagName: 'html', childNodes: [{ type: 2, tagName: 'body', childNodes: [] }] }] } } };
+  const out = (offlineEvents([snapshot]) as typeof snapshot[])[0]!;
+  const html = out.data.node.childNodes[0] as unknown as { childNodes: { tagName: string; childNodes: { attributes: Record<string, string> }[] }[] };
+  expect(html.childNodes[0]!.tagName).toBe('head');
+  expect(html.childNodes[0]!.childNodes[0]!.attributes.content).toBe(OFFLINE_POLICY);
+  const bare = { type: 2, data: { node: { type: 0, childNodes: [{ type: 2, tagName: 'body', childNodes: [] }] } } };
+  const emptied = (offlineEvents([bare]) as typeof bare[])[0]!;
+  expect(JSON.stringify(emptied)).not.toContain('body');
 });
