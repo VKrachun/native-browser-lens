@@ -64,15 +64,16 @@ pub fn all_reviews(
         let Reply::Reviews(page) = call(Request::ListReviewsPage {
             before,
             limit: PAGE,
+            observation: None,
         })?
         else {
             return Err("unexpected reply".into());
         };
-        let done = page.len() < PAGE as usize;
-        all.extend(page);
-        if done {
+        // A short page is not the end: the reply limit can end a page early.
+        if page.is_empty() {
             return Ok(all);
         }
+        all.extend(page);
     }
 }
 
@@ -885,7 +886,7 @@ mod tests {
         let mut asked = 0;
         let found = all_reviews(|request| {
             asked += 1;
-            let Request::ListReviewsPage { before, limit } = request else {
+            let Request::ListReviewsPage { before, limit, .. } = request else {
                 return Err("wrong request".into());
             };
             Ok(Reply::Reviews(
@@ -897,7 +898,7 @@ mod tests {
             ))
         })
         .unwrap();
-        assert_eq!((found.len(), asked), (250, 3));
+        assert_eq!((found.len(), asked), (250, 4));
         assert_eq!((found[0].id, found[249].id), (250, 1));
     }
 

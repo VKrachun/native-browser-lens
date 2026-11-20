@@ -136,11 +136,16 @@ pub enum Request {
     CreateReview(ReviewRequest),
     ListReviews,
     /// Up to `limit` reviews older than `before` (all when null), newest first: one page of
-    /// ListReviews, which can outgrow a reply.
+    /// ListReviews, which can outgrow a reply. A page can hold fewer than `limit` (the reply
+    /// limit ends it); only an empty page ends the list.
     ListReviewsPage {
         #[ts(type = "number | null")]
         before: Option<i64>,
         limit: u32,
+        /// Only this observation's reviews; all when null.
+        #[serde(default)]
+        #[ts(type = "number | null")]
+        observation: Option<i64>,
     },
     GetReview {
         #[ts(type = "number")]

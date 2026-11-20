@@ -64,9 +64,12 @@ export function Review({ observation: id }: { observation: number }) {
   // reload the page shows that review again, so filing again finishes the same submission.
   const restoreUnfinished = useCallback(
     async (revision: number) => {
-      const all = await client.request({ method: 'listReviews' }).catch(() => []);
+      // This observation's reviews only: the whole list can outgrow a reply.
+      const mine = await client
+        .request({ method: 'listReviewsPage', params: { before: null, limit: 50, observation: id } })
+        .catch(() => []);
       // Newest first: only the latest filed review of these notes counts.
-      for (const summary of all.filter((r) => r.observation === id && r.revision === revision)) {
+      for (const summary of mine.filter((r) => r.revision === revision)) {
         const earlier = await client.request({ method: 'getFiling', params: { review: summary.id } }).catch(() => null);
         if (!earlier) continue;
         if (earlier.taskUrl && earlier.missingFiles === 0) return;

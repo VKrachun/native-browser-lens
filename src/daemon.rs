@@ -922,15 +922,17 @@ impl Daemon {
             }
             Request::ListReviews => Reply::Reviews(store.list_reviews().map_err(storage)?),
             // ponytail: reads every review for each page; a keyset query if lists reach the 100,000s.
-            Request::ListReviewsPage { before, limit } => Reply::Reviews(
-                store
-                    .list_reviews()
-                    .map_err(storage)?
-                    .into_iter()
-                    .filter(|r| before.is_none_or(|b| r.id < b))
-                    .take(limit.min(500) as usize)
-                    .collect(),
-            ),
+            Request::ListReviewsPage {
+                before,
+                limit,
+                observation,
+            } => {
+                let mut page = store
+                    .reviews_page(before, observation, limit.min(500))
+                    .map_err(storage)?;
+                fit_page(&mut page);
+                Reply::Reviews(page)
+            }
             Request::GetReview { review } => Reply::Review(
                 store
                     .get_review(review)
@@ -1200,14 +1202,11 @@ impl Daemon {
                 let mut attempt = match existing {
                     Some(attempt) => attempt,
                     None => {
-                        if filed
-                            .as_ref()
-                            .is_some_and(|f| f.reviewed_revision > found.revision)
+                        // Before any file is staged: retries of a frozen attempt come above.
+                        if let Some(why) =
+                            filing::refused(&found, filed.as_ref(), &client.endpoint())
                         {
-                            return Err(ProtocolError::new(
-                                ErrorCode::Conflict,
-                                "newer notes are already filed; review again to file this",
-                            ));
+                            return Err(ProtocolError::new(ErrorCode::Conflict, why));
                         }
                         let attempt = filing::prepare(
                             &found,
@@ -2421,6 +2420,20 @@ fn plain(text: &str) -> String {
         .to_string()
 }
 
+/// Long page URLs can make even a hundred summaries pass the reply limit: the page ends early
+/// (never empty, so a list always moves on), and the next one starts below its last review.
+fn fit_page(page: &mut Vec<crate::protocol::ReviewSummary>) {
+    let mut size = 0;
+    let fits = page
+        .iter()
+        .take_while(|r| {
+            size += serde_json::to_vec(r).map_or(0, |b| b.len()) + 1;
+            size <= MAX_REPLY_BYTES / 2
+        })
+        .count();
+    page.truncate(fits.max(1));
+}
+
 /// The person's choice of agent for summaries and duplicate checks; None is automatic.
 fn summary_agent(store: &Store) -> Option<investigate::Agent> {
     match store.setting("agent.summary").ok().flatten().as_deref() {
@@ -2684,6 +2697,31 @@ mod tests {
             &[capture, later],
         );
         assert_eq!((edits.len(), leave), (1, vec![2]));
+    }
+
+    #[test]
+    fn a_page_of_long_urls_ends_before_the_reply_limit() {
+        let summary = |id| crate::protocol::ReviewSummary {
+            id,
+            observation: 1,
+            revision: 1,
+            created_at: 0,
+            page_url: Some(format!("https://a.test/{}", "x".repeat(11 * 1024))),
+            title: String::new(),
+            captures: 1,
+            vibeq_task_id: None,
+            vibeq_task_url: None,
+        };
+        let mut page: Vec<_> = (1..=100).rev().map(summary).collect();
+        fit_page(&mut page);
+        let bytes = serde_json::to_vec(&page).unwrap().len();
+        assert!(
+            !page.is_empty() && page.len() < 100 && bytes < MAX_REPLY_BYTES,
+            "{bytes}"
+        );
+        let mut one = vec![summary(1)];
+        fit_page(&mut one);
+        assert_eq!(one.len(), 1);
     }
 
     fn daemon() -> (tempfile::TempDir, Daemon) {

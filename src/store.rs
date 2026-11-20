@@ -145,7 +145,23 @@ const MIGRATIONS: &[&str] = &[
         audio_size, state, language, segments, detail FROM voice_notes;
     DROP TABLE voice_notes;
     ALTER TABLE voice_notes_new RENAME TO voice_notes;
-    CREATE INDEX voice_notes_by_observation ON voice_notes(observation_id);",
+    CREATE INDEX voice_notes_by_observation ON voice_notes(observation_id);
+    -- Before this, a deleted newest row gave its ID to the next one, so IDs above today's highest
+    -- may have been used and still be named elsewhere (a VibeQ observation, an export folder, a
+    -- page). New IDs start a thousand above: more deletes of the newest rows in a row than that,
+    -- before this update, is not a case Lens expects. A new notebook (no rows, no settings) has
+    -- used no ID and starts at 1.
+    DELETE FROM sqlite_sequence
+        WHERE name IN ('observations', 'captures', 'reviews', 'voice_notes');
+    INSERT INTO sqlite_sequence (name, seq)
+        SELECT 'observations', COALESCE(MAX(id), 0) + 1000 * (EXISTS (SELECT 1 FROM settings)
+            OR EXISTS (SELECT 1 FROM observations)) FROM observations
+        UNION ALL SELECT 'captures', COALESCE(MAX(id), 0) + 1000 * (EXISTS (SELECT 1 FROM settings)
+            OR EXISTS (SELECT 1 FROM observations)) FROM captures
+        UNION ALL SELECT 'reviews', COALESCE(MAX(id), 0) + 1000 * (EXISTS (SELECT 1 FROM settings)
+            OR EXISTS (SELECT 1 FROM observations)) FROM reviews
+        UNION ALL SELECT 'voice_notes', COALESCE(MAX(id), 0) + 1000 * (EXISTS (SELECT 1 FROM settings)
+            OR EXISTS (SELECT 1 FROM observations)) FROM voice_notes;",
 ];
 
 /// A stored body this Lens cannot read (a newer Lens wrote it, say) is left out, and says so in
@@ -165,6 +181,11 @@ pub struct Filed {
     pub reviewed_revision: u32,
     /// The VibeQ project of the first filing: amendments stay in it (VibeQ keys a task by it).
     pub project_id: String,
+    /// The newest review filed: an older one would send what that review left out (a mask
+    /// added since, say).
+    pub review: i64,
+    /// The VibeQ of the first filing: the task lives there, so amendments go there too.
+    pub endpoint: String,
 }
 
 /// One task of a split: its title, notes and tags, and edits by original capture ID.
@@ -737,10 +758,25 @@ impl Store {
     }
 
     pub fn list_reviews(&self) -> rusqlite::Result<Vec<ReviewSummary>> {
-        let mut statement = self
-            .db
-            .prepare("SELECT body FROM reviews ORDER BY id DESC")?;
-        let bodies = statement.query_map([], |row| row.get::<_, String>(0))?;
+        self.reviews_page(None, None, u32::MAX)
+    }
+
+    /// Up to `limit` reviews older than `before`, of one observation or all, newest first. Only
+    /// the page's own rows are read.
+    pub fn reviews_page(
+        &self,
+        before: Option<i64>,
+        observation: Option<i64>,
+        limit: u32,
+    ) -> rusqlite::Result<Vec<ReviewSummary>> {
+        let mut statement = self.db.prepare(
+            "SELECT body FROM reviews WHERE (?1 IS NULL OR id < ?1)
+             AND (?2 IS NULL OR observation_id = ?2) ORDER BY id DESC LIMIT ?3",
+        )?;
+        let bodies = statement
+            .query_map(params![before, observation, i64::from(limit)], |row| {
+                row.get::<_, String>(0)
+            })?;
         let mut reviews = Vec::new();
         let bodies: Vec<String> = bodies.collect::<rusqlite::Result<_>>()?;
         for body in bodies {
@@ -856,16 +892,20 @@ impl Store {
     /// What this observation's filings, finished or not, decide for the next one.
     pub fn filed(&self, observation: i64) -> rusqlite::Result<Option<Filed>> {
         let mut statement = self.db.prepare(
-            "SELECT f.body, json_extract(r.body, '$.revision') FROM filings f
+            "SELECT f.body, json_extract(r.body, '$.revision'), f.review_id FROM filings f
              JOIN reviews r ON r.id = f.review_id
              WHERE f.observation_id = ?1 ORDER BY f.review_id",
         )?;
         let rows = statement.query_map([observation], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<u32>>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<u32>>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
         })?;
         let mut found: Option<Filed> = None;
         for row in rows {
-            let (body, reviewed) = row?;
+            let (body, reviewed, review) = row?;
             let Ok(attempt) = serde_json::from_str::<Attempt>(&body) else {
                 continue;
             };
@@ -873,7 +913,10 @@ impl Store {
                 vibeq_revision: 0,
                 reviewed_revision: 0,
                 project_id: attempt.submission.project_id.clone(),
+                review,
+                endpoint: attempt.endpoint.clone(),
             });
+            filed.review = filed.review.max(review);
             filed.vibeq_revision = filed.vibeq_revision.max(attempt.submission.revision);
             filed.reviewed_revision = filed.reviewed_revision.max(reviewed.unwrap_or(0));
         }
@@ -1264,7 +1307,9 @@ mod tests {
             Some(Filed {
                 vibeq_revision: 4,
                 reviewed_revision: 2,
-                project_id: "first".into()
+                project_id: "first".into(),
+                review: 11,
+                endpoint: "https://v.test".into(),
             })
         );
     }
@@ -1318,8 +1363,49 @@ mod tests {
             ],
             [0, 0, 0, 0]
         );
-        // The highest ID was 2 and is gone: the next observation still gets a new one.
-        assert_eq!(store.create_observation("c", None, 3).unwrap().id, 3);
+        // The highest ID was 2 and is gone: the next observation gets one no earlier Lens gave,
+        // even one deleted before the update (3, say).
+        assert_eq!(store.create_observation("c", None, 3).unwrap().id, 1003);
+    }
+
+    #[test]
+    fn review_pages_filter_in_the_query() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("lens.sqlite")).unwrap();
+        let (a, b) = (
+            store.create_observation("a", None, 1).unwrap().id,
+            store.create_observation("b", None, 1).unwrap().id,
+        );
+        for (id, observation) in [(1, a), (2, b), (3, a), (4, a)] {
+            store
+                .db
+                .execute(
+                    "INSERT INTO reviews (id, observation_id, body) VALUES (?1, ?2, ?3)",
+                    params![
+                        id,
+                        observation,
+                        serde_json::json!({"id": id, "observation": observation, "revision": 1,
+                            "createdAt": 0, "title": "t", "tags": [], "notes": "", "items": [],
+                            "voice": []})
+                        .to_string()
+                    ],
+                )
+                .unwrap();
+        }
+        let ids = |page: Vec<ReviewSummary>| page.into_iter().map(|r| r.id).collect::<Vec<_>>();
+        assert_eq!(ids(store.reviews_page(None, None, 2).unwrap()), [4, 3]);
+        assert_eq!(ids(store.reviews_page(Some(3), None, 10).unwrap()), [2, 1]);
+        assert_eq!(
+            ids(store.reviews_page(None, Some(a), 10).unwrap()),
+            [4, 3, 1]
+        );
+    }
+
+    #[test]
+    fn a_new_notebook_starts_at_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("lens.sqlite")).unwrap();
+        assert_eq!(store.create_observation("a", None, 1).unwrap().id, 1);
     }
 
     #[test]

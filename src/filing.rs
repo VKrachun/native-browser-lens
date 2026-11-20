@@ -144,6 +144,28 @@ pub fn prepare(
 
 /// The VibeQ revision of a new filing of `review`. A review with changed masks or cuts has the
 /// notes' revision of the one filed before it, so the count goes on from the filed one.
+/// Why a new filing of `review` must not go, given what is filed of its observation already.
+/// An older review would replace a newer one in the task (and send a screenshot a mask now
+/// covers); an amendment sent to another VibeQ would start a second task there.
+pub fn refused(
+    review: &Review,
+    filed: Option<&crate::store::Filed>,
+    endpoint: &str,
+) -> Option<String> {
+    let filed = filed?;
+    if filed.review > review.id || filed.reviewed_revision > review.revision {
+        return Some(
+            "a newer review of this is filed already; create a review again to file it".into(),
+        );
+    }
+    (filed.endpoint != endpoint).then(|| {
+        format!(
+            "this task is in the VibeQ at {}; switch back to that address in Lens Settings to file the change",
+            filed.endpoint
+        )
+    })
+}
+
 pub fn next_revision(review: &Review, filed: Option<&crate::store::Filed>) -> u64 {
     filed
         .map_or(0, |f| f.vibeq_revision)
@@ -550,8 +572,38 @@ mod tests {
             vibeq_revision: 3,
             reviewed_revision: 2,
             project_id: "p".into(),
+            review: 6,
+            endpoint: "https://v.test".into(),
         };
         assert_eq!(next_revision(&review, Some(&filed)), 4);
+    }
+
+    #[test]
+    fn older_reviews_and_other_vibeqs_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (review, _) = review(dir.path());
+        let filed = |id, endpoint: &str| crate::store::Filed {
+            vibeq_revision: 3,
+            reviewed_revision: 2,
+            project_id: "p".into(),
+            review: id,
+            endpoint: endpoint.into(),
+        };
+        assert_eq!(refused(&review, None, "https://v.test"), None);
+        // Review 7 after review 6 is an amendment; before review 8 it is out of date.
+        assert_eq!(
+            refused(&review, Some(&filed(6, "https://v.test")), "https://v.test"),
+            None
+        );
+        assert!(refused(&review, Some(&filed(8, "https://v.test")), "https://v.test").is_some());
+        assert!(
+            refused(
+                &review,
+                Some(&filed(6, "https://v.test")),
+                "https://other.test"
+            )
+            .is_some_and(|why| why.contains("https://v.test"))
+        );
     }
 
     #[test]
