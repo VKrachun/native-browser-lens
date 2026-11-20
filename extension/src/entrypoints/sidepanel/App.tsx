@@ -233,7 +233,7 @@ export function App() {
               <AlertIcon />
               <span>
                 {connection.hello.protocol < PROTOCOL_VERSION
-                  ? 'The Lens app is older than this extension. Run the install line again to update it.'
+                  ? 'The Lens app is older than this extension. Download the newest Lens app from lens.sirv.studio.'
                   : 'This extension is older than the Lens app. Update the extension.'}
               </span>
             </div>
@@ -498,10 +498,10 @@ function Observations({
                       </span>
                     )}
                   </button>
-                  {o.taskUrl?.startsWith('https://') && (
+                  {originOf(o.taskUrl ?? undefined) && (
                     <a
                       className="btn btn-ghost btn-icon btn-sm obs-task"
-                      href={o.taskUrl}
+                      href={o.taskUrl ?? undefined}
                       target="_blank"
                       rel="noreferrer"
                       aria-label={`Open the filed task of ${o.title}`}
@@ -561,8 +561,8 @@ function Detail({
           <BackIcon size={14} />
           All recordings
         </button>
-        {observation.taskUrl?.startsWith('https://') ? (
-          <a className="pill" data-tone="success" href={observation.taskUrl} target="_blank" rel="noreferrer" title={observation.taskUrl}>
+        {originOf(observation.taskUrl ?? undefined) ? (
+          <a className="pill" data-tone="success" href={observation.taskUrl ?? undefined} target="_blank" rel="noreferrer" title={observation.taskUrl ?? undefined}>
             Filed · Open task
           </a>
         ) : (

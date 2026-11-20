@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { basecampNotes, draftTarget } from './tracker-drafts';
+import { basecampNotes, draftDescription, draftTarget } from './tracker-drafts';
 
 it.each([
   ['linear', '', 'https://linear.app/new', 'description'],
@@ -39,4 +39,13 @@ it('copies readable Basecamp findings and preserves the author’s notes', () =>
     id: 1, observation: 1, revision: 1, createdAt: 0, title: 'Popover', tags: [], items: [], voice: [],
     notes: 'Findings (written by Claude Haiku from the recording; check them):\n- Escape fails\\.\n- Ctrl\\+K fails\\.\n\nMy own notes.',
   })).toBe('• Escape fails.\n• Ctrl+K fails.\n\nMy own notes.');
+});
+
+it('keeps what the person said in the draft', () => {
+  const review = {
+    id: 1, observation: 1, revision: 1, createdAt: 0, title: 'Cart', tags: [], items: [], notes: '',
+    voice: [{ startedAt: 0, durationMs: 1000, language: 'en', segments: [{ startMs: 0, endMs: 900, text: ' Open the cart twice. ' }] }],
+  } as unknown as Parameters<typeof basecampNotes>[0];
+  expect(basecampNotes(review)).toBe('Spoken notes:\nOpen the cart twice.');
+  expect(draftDescription(review)).toContain('Open the cart twice.');
 });

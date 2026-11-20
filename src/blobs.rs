@@ -12,6 +12,14 @@ pub struct Blobs {
 
 static TEMPORARY: AtomicU64 = AtomicU64::new(0);
 
+/// A blob stored again is new again: the sweep gives its next record the same hour as a new blob.
+fn fresh(path: &std::path::Path) {
+    let _ = std::fs::File::options()
+        .append(true)
+        .open(path)
+        .and_then(|f| f.set_modified(std::time::SystemTime::now()));
+}
+
 impl Blobs {
     pub fn new(root: PathBuf) -> Self {
         Self { root }
@@ -23,7 +31,9 @@ impl Blobs {
             .map(|b| format!("{b:02x}"))
             .collect();
         let path = self.path(&sha256)?;
-        if !path.exists() {
+        if path.exists() {
+            fresh(&path);
+        } else {
             let folder = path.parent().expect("blob path has a folder");
             std::fs::create_dir_all(folder)?;
             let temporary = folder.join(format!(
@@ -73,6 +83,7 @@ impl Blobs {
             .collect();
         let path = self.path(&sha256)?;
         if path.exists() {
+            fresh(&path);
             std::fs::remove_file(file)?;
         } else {
             std::fs::create_dir_all(path.parent().expect("blob path has a folder"))?;

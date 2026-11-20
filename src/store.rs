@@ -85,6 +85,8 @@ pub struct TaskPlan {
     pub notes: String,
     pub tags: Vec<String>,
     pub edits: Vec<(i64, Edits)>,
+    /// Captures of the original that this task leaves out.
+    pub leave: Vec<i64>,
 }
 
 /// Copies every capture and voice note of `from` to `to`, in ID order.
@@ -534,7 +536,9 @@ impl Store {
             copy_children(&tx, id, copy)?;
             // Copies come in the originals' order: the nth copy is the nth original's.
             for (original, new) in originals.iter().zip(ids(&tx, copy)?) {
-                if let Some((_, edits)) = plan.edits.iter().find(|(c, _)| c == original) {
+                if plan.leave.contains(original) {
+                    tx.execute("DELETE FROM captures WHERE id = ?1", [new])?;
+                } else if let Some((_, edits)) = plan.edits.iter().find(|(c, _)| c == original) {
                     tx.execute(
                         "UPDATE captures SET edits = ?2 WHERE id = ?1",
                         params![new, serde_json::to_string(edits).expect("edits serialize")],
@@ -1164,6 +1168,7 @@ mod tests {
             notes: format!("{title} notes"),
             tags: vec!["bug".into()],
             edits: vec![(capture.id, edits)],
+            leave: Vec::new(),
         };
         let plans = [
             plan("Comments", trim(1000, 4000)),

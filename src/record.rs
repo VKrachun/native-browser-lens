@@ -312,7 +312,9 @@ fn assemble(review: &Review, item: &ReviewItem, n: usize, evidence: &Evidence) -
     for note in &review.voice {
         for segment in &note.segments {
             let t = note.started_at + segment.start_ms;
-            if t < start - 60_000 || t > end + 5_000 || !kept(item, t) {
+            // The middle of the words decides, as for the transcript (see spoken_in_kept).
+            let middle = note.started_at + (segment.start_ms + segment.end_ms) / 2;
+            if t < start - 60_000 || t > end + 5_000 || !kept(item, middle) {
                 continue;
             }
             let mut step = json!({ "kind": "say", "value": segment.text.trim() });

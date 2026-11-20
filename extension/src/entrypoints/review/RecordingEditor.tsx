@@ -179,19 +179,24 @@ export function RecordingEditor({
     return () => cancelAnimationFrame(frame);
   }, [span, playing, edits, voice, capture.startedAt]);
 
-  // The voice recordings, loaded once.
+  // The voice recordings. A changed list (a corrected transcript, a deleted note) loads them again:
+  // the old elements go with their revoked URLs, so none plays a revoked or deleted note.
   useEffect(() => {
+    let live = true;
     const urls: string[] = [];
+    const elements = audio.current;
     for (const note of voice) {
-      if (audio.current.has(note.id)) continue;
       void client.readBlob(note.audio).then((blob) => {
+        if (!live) return;
         const url = URL.createObjectURL(blob);
         urls.push(url);
-        audio.current.set(note.id, new Audio(url));
+        elements.set(note.id, new Audio(url));
       });
     }
     return () => {
-      for (const element of audio.current.values()) element.pause();
+      live = false;
+      for (const element of elements.values()) element.pause();
+      elements.clear();
       urls.forEach(URL.revokeObjectURL);
     };
   }, [client, voice]);

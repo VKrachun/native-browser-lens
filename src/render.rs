@@ -34,6 +34,10 @@ pub fn mask_webp(webp: &[u8], areas: &[crate::protocol::Area]) -> Result<Vec<u8>
     let mut decoder = image_webp::WebPDecoder::new(std::io::Cursor::new(webp))
         .map_err(|e| format!("the shot cannot be read: {e}"))?;
     let (width, height) = decoder.dimensions();
+    // A few bytes can claim a huge image: a step shot is a viewport, never more than 64 MP.
+    if u64::from(width) * u64::from(height) > 64 << 20 {
+        return Err("the shot is too large".into());
+    }
     let channels = if decoder.has_alpha() { 4 } else { 3 };
     let mut pixels = vec![0u8; width as usize * height as usize * channels];
     decoder

@@ -15,16 +15,22 @@ const RUN: Duration = Duration::from_secs(240);
 /// The dev server's URLs and console text go to the agent: query values, credentials and
 /// secret-looking text are redacted first (failures compare by path), and the lists are bounded.
 const WATCH: &str = r#"
-const lensSeen = { requests: [] as { status: number; method: string; url: string }[], console: [] as string[] };
+const lensSeen = { requests: [] as { status: number; method: string; url: string }[], console: [] as string[], keys: [] as string[] };
 const lensUrl = (u: string) => { try { const x = new URL(u); x.username = ''; x.password = ''; x.hash = ''; for (const k of [...x.searchParams.keys()]) x.searchParams.set(k, 'REDACTED'); return x.toString(); } catch { return '[unreadable URL]'; } };
 const lensText = (t: string) => t.slice(0, 1000)
   .replace(/\b(Bearer|Basic)\s+\S+/gi, '$1 [REDACTED]')
+  .replace(/((?:set-)?cookie["']?\s{0,8}[:=]\s{0,8})[^\n]*/gi, '$1[REDACTED]')
   .replace(/((?:authorization|cookie|password|passwd|secret|token|api[_-]?key|session[_-]?id|csrf|xsrf)["']?\s{0,8}[:=]\s{0,8})[^\s,;}]+/gi, '$1[REDACTED]')
   .replace(/\beyJ[\w-]+\.[\w-]+\.[\w-]+/g, '[REDACTED]')
   .replace(/\b(?:\d[ -]?){12,18}\d\b/g, '[REDACTED]')
   .replace(/https?:\/\/[^\s"')]+/g, (u) => lensUrl(u));
-const lensRequest = (status: number, method: string, url: string) => { if (lensSeen.requests.length < 100) lensSeen.requests.push({ status, method, url: lensUrl(url) }); };
-const lensConsole = (text: string) => { if (lensSeen.console.length < 100) lensSeen.console.push(lensText(text)); };
+const lensRequest = (status: number, method: string, url: string) => {
+  let key = '';
+  try { key = `${status} ${new URL(url).pathname}`; } catch {}
+  if (key && !lensSeen.keys.includes(key) && lensSeen.keys.length < 5000) lensSeen.keys.push(key);
+  if (lensSeen.requests.length < 100) lensSeen.requests.push({ status, method, url: lensUrl(url) });
+};
+const lensConsole = (text: string) => { const clean = lensText(text); if (lensSeen.console.length < 500 && !lensSeen.console.includes(clean)) lensSeen.console.push(clean); };
 test.afterEach(() => writeFileSync(process.env.LENS_VERIFY_OUT ?? 'lens-verify.json', JSON.stringify(lensSeen)));
 "#;
 const LISTEN: &str = "  page.on('response', (r) => { if (r.status() >= 400) lensRequest(r.status(), r.request().method(), r.url()); });
@@ -131,13 +137,15 @@ pub fn verify(
                 .collect()
         })
         .unwrap_or_default();
-    let now: Vec<String> = requests
-        .iter()
-        .filter_map(|r| {
-            let path = url::Url::parse(r["url"].as_str()?).ok()?.path().to_string();
-            Some(format!("{} {path}", r["status"].as_u64()?))
+    // Every failed request's status and path, not only the first hundred that are listed.
+    let now: Vec<String> = watched["keys"]
+        .as_array()
+        .map(|keys| {
+            keys.iter()
+                .filter_map(|k| k.as_str().map(String::from))
+                .collect()
         })
-        .collect();
+        .unwrap_or_default();
     let mut still = Vec::new();
     let mut gone = Vec::new();
     for finding in &recorded {
@@ -146,7 +154,10 @@ pub fn verify(
             None => finding
                 .strip_prefix("Console error: ")
                 .or_else(|| finding.strip_prefix("Exception: "))
-                .is_some_and(|text| console.iter().any(|c| c.contains(text.trim()))),
+                .is_some_and(|text| {
+                    let text = without_queries(text.trim());
+                    console.iter().any(|c| without_queries(c).contains(&text))
+                }),
         };
         if again {
             still.push(finding.clone());
@@ -247,6 +258,17 @@ fn errors(report: &Value) -> Vec<String> {
     found
 }
 
+/// The text with the query of each URL left out: the live text has its values redacted.
+fn without_queries(text: &str) -> String {
+    text.split(' ')
+        .map(|word| match (word.contains("://"), word.find('?')) {
+            (true, Some(at)) => &word[..at],
+            _ => word,
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn strip_ansi(text: &str) -> String {
     let mut out = String::new();
     let mut chars = text.chars().peekable();
@@ -297,6 +319,10 @@ mod tests {
             key_of_finding("Request failed: net::ERR_FAILED https://app.example.com/api/x")
                 .as_deref(),
             Some("0 /api/x")
+        );
+        assert_eq!(
+            without_queries("GET https://a.test/x?id=REDACTED failed"),
+            without_queries("GET https://a.test/x?id=7 failed")
         );
         assert_eq!(strip_ansi("\u{1b}[31mExpected\u{1b}[39m 1"), "Expected 1");
         let report = json!({ "suites": [{ "specs": [{ "tests": [{ "results": [{ "error": { "message": "\u{1b}[2mTimeout\u{1b}[22m" }, "errors": [{ "message": "\u{1b}[2mTimeout\u{1b}[22m" }] }] }] }] }] });

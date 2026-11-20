@@ -215,7 +215,17 @@ pub fn setup(paths: &Paths) -> io::Result<()> {
         };
         if open.name == "Browser extension" && !opened {
             opened = true;
-            let _ = open_url(CHROME_STORE);
+            println!("\nChrome, Edge, Brave: {CHROME_STORE}\nFirefox: {FIREFOX_STORE}");
+            let firefox_only = crate::register::check(paths, std::path::Path::new(""))
+                .iter()
+                // Snap and Flatpak browsers (named with a bracket) cannot start Lens.
+                .filter(|b| b.installed && !b.name.contains('('))
+                .all(|b| b.name.starts_with("Firefox"));
+            let _ = open_url(if firefox_only {
+                FIREFOX_STORE
+            } else {
+                CHROME_STORE
+            });
         }
         if matches!(
             open.name.as_str(),
@@ -272,7 +282,7 @@ fn open_steps(paths: &Paths) -> io::Result<bool> {
         std::thread::sleep(Duration::from_millis(250));
     }
     Err(io::Error::other(
-        "the Lens app did not start; run lens doctor in a terminal to see why",
+        "the Lens app did not start. Restart the computer, then open Sirv Lens again",
     ))
 }
 
@@ -287,7 +297,7 @@ fn welcome(paths: &Paths, problem: Option<&str>, connected: bool) -> String {
     // Firefox only where it is installed: one browser's steps are enough to read.
     let firefox = crate::register::check(paths, std::path::Path::new(""))
         .iter()
-        .any(|b| b.name.starts_with("Firefox") && b.installed);
+        .any(|b| b.name.starts_with("Firefox") && b.installed && !b.name.contains('('));
     if !firefox
         && let (Some(start), Some(end)) =
             (page.find("<!--firefox-->"), page.find("<!--/firefox-->"))
@@ -299,7 +309,12 @@ fn welcome(paths: &Paths, problem: Option<&str>, connected: bool) -> String {
     } else {
         "system tray"
     };
-    let (headline, lede) = if connected {
+    let (headline, lede) = if problem.is_some() {
+        (
+            "Lens could not finish its setup.".to_string(),
+            "Open Sirv Lens again. If this page comes back, the reason is below.".to_string(),
+        )
+    } else if connected {
         (
             "Lens is ready.".to_string(),
             format!(

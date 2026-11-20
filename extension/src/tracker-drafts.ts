@@ -21,8 +21,17 @@ function literal(text: string): string {
   return [fence, text, fence].join('\n');
 }
 
+/** What the person said, one line for each part: often the only steps a reporter gives. */
+function spoken(review: Review): string {
+  return review.voice
+    .flatMap((note) => note.segments.map((segment) => segment.text.trim()))
+    .filter(Boolean)
+    .join('\n');
+}
+
 export function draftDescription(review: Review): string {
-  const parts = [review.notes.trim()];
+  const said = spoken(review);
+  const parts = [review.notes.trim(), said && `Spoken notes:\n\n${literal(said)}`];
   for (const item of review.items) {
     const evidence = [item.pageUrl, ...item.findings, ...item.annotations.map((note) => note.text)].filter(Boolean);
     if (evidence.length) parts.push(literal(evidence.join('\n')));
@@ -33,7 +42,8 @@ export function draftDescription(review: Review): string {
 /** Basecamp's Notes field accepts plain text. Keep full request URLs in the exported evidence. */
 export function basecampNotes(review: Review, includesZip = false): string {
   const { findings, rest } = splitNotes(review.notes);
-  const sections = [findings?.map((finding) => `• ${finding}`).join('\n'), rest.trim()];
+  const said = spoken(review);
+  const sections = [findings?.map((finding) => `• ${finding}`).join('\n'), rest.trim(), said && `Spoken notes:\n${said}`];
   for (const item of review.items) {
     const evidence = [
       item.pageUrl && `Page: ${item.pageUrl.split(/[?#]/, 1)[0]}`,

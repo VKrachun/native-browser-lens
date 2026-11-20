@@ -53,6 +53,8 @@ fn has_token() -> bool {
 
 fn token_changed() {
     *HAS_TOKEN.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    // Read it again now, off the store lock that the settings pages hold.
+    std::thread::spawn(has_token);
 }
 
 fn vibeq_connected(store: &Store) -> Result<bool, ProtocolError> {
@@ -668,7 +670,18 @@ impl Daemon {
                         .filter(|a| inside(a.at))
                         .cloned()
                         .collect();
-                    let (screen, pointing) = self.recording_notes(&capture, &kept);
+                    // A mask hides pixels only: the replay would show the same text. The stored
+                    // marks decide, not the page that asked (it can be stale).
+                    let masked = capture
+                        .annotations
+                        .iter()
+                        .any(|s| matches!(s, Shape::Mask { .. }));
+                    // Screen text and pointed-at names come from the replay: masked, none of it.
+                    let (screen, pointing) = if masked {
+                        Default::default()
+                    } else {
+                        self.recording_notes(&capture, &kept)
+                    };
                     let before = parsed.actions.len() + parsed.events.len();
                     let shared = repro::for_review(parsed, request.typed_values, &kept);
                     let cut =
@@ -678,8 +691,10 @@ impl Daemon {
                     // Only a recording's shots are shown for checking (the editor's filmstrip); a
                     // moment capture leaves with its own screenshot only.
                     for shot in capture.shots.iter().filter(|s| {
+                        // The editor shows shots with their replay only: none without it.
                         request.typed_values
                             && capture.kind == CaptureKind::Session
+                            && capture.recording.is_some()
                             && inside(s.at)
                             && !capture.edits.hidden_shots.contains(&s.at)
                     }) {
@@ -697,15 +712,7 @@ impl Daemon {
                             .put(&shared, "application/json")
                             .map_err(storage)?,
                         recording: match &capture.recording {
-                            // A mask hides pixels only: the replay would show the same text. The
-                            // stored marks decide, not the page that asked (it can be stale).
-                            Some(recording)
-                                if request.recordings.contains(id)
-                                    && !capture
-                                        .annotations
-                                        .iter()
-                                        .any(|s| matches!(s, Shape::Mask { .. })) =>
-                            {
+                            Some(recording) if request.recordings.contains(id) && !masked => {
                                 Some(self.kept_recording(recording, &kept)?)
                             }
                             _ => None,
@@ -1069,6 +1076,13 @@ impl Daemon {
                 let account = match input.token.as_deref().map(str::trim) {
                     // A token belongs to its VibeQ: a new address without a new token signs out,
                     // so the old token never goes to the new host.
+                    None if moved
+                        && std::env::var(TOKEN_ENV).is_ok_and(|t| !t.trim().is_empty()) =>
+                    {
+                        return Err(bad(
+                            "LENS_VIBEQ_TOKEN is set for the current VibeQ; unset it before you change the address",
+                        ));
+                    }
                     None if moved && saved.is_some() => {
                         secrets::delete(TOKEN_ACCOUNT).map_err(storage)?;
                         Some(String::new())
@@ -1195,26 +1209,30 @@ impl Daemon {
                 let own = split_findings(&found.notes).1;
                 let plans: Vec<crate::store::TaskPlan> = issues
                     .iter()
-                    .map(|issue| crate::store::TaskPlan {
-                        title: plain(&issue.title),
-                        notes: [
-                            format!(
-                                "{FINDINGS_HEADER}\n{}",
-                                issue
-                                    .findings
-                                    .iter()
-                                    .map(|f| format!("- {}", export::escape(f)))
-                                    .collect::<Vec<_>>()
-                                    .join("\n")
-                            ),
-                            own.clone(),
-                        ]
-                        .into_iter()
-                        .filter(|p| !p.is_empty())
-                        .collect::<Vec<_>>()
-                        .join("\n\n"),
-                        tags: clean_tags(&issue.tags),
-                        edits: issue_edits(issue, voice_start, &captures),
+                    .map(|issue| {
+                        let (edits, leave) = issue_edits(issue, voice_start, &captures);
+                        crate::store::TaskPlan {
+                            title: plain(&issue.title),
+                            notes: [
+                                format!(
+                                    "{FINDINGS_HEADER}\n{}",
+                                    issue
+                                        .findings
+                                        .iter()
+                                        .map(|f| format!("- {}", export::escape(f)))
+                                        .collect::<Vec<_>>()
+                                        .join("\n")
+                                ),
+                                own.clone(),
+                            ]
+                            .into_iter()
+                            .filter(|p| !p.is_empty())
+                            .collect::<Vec<_>>()
+                            .join("\n\n"),
+                            tags: clean_tags(&issue.tags),
+                            edits,
+                            leave,
+                        }
                     })
                     .collect();
                 match store
@@ -1922,13 +1940,17 @@ impl Daemon {
         drop(slot);
         let Some(daemon) = self.me() else { return };
         std::thread::spawn(move || {
-            let result = speech::download(&daemon.paths, |received, total| {
-                *daemon
-                    .speech_download
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner()) =
-                    Some(ModelState::Downloading { received, total });
-            });
+            // A panic fails this download instead of leaving it "downloading" until a restart.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                speech::download(&daemon.paths, |received, total| {
+                    *daemon
+                        .speech_download
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner()) =
+                        Some(ModelState::Downloading { received, total });
+                })
+            }))
+            .unwrap_or_else(|_| Err("the download stopped unexpectedly; try again".into()));
             let next = match result {
                 Ok(()) => None,
                 Err(reason) => {
@@ -1966,8 +1988,10 @@ impl Daemon {
         });
     }
 
+    /// Under the store lock: no record can name a blob or a review appear while files go.
     fn sweep(&self) {
-        let (blobs, reviews) = match self.lock_store().references() {
+        let store = self.lock_store();
+        let (blobs, reviews) = match store.references() {
             Ok(found) => found,
             Err(e) => return log(&self.paths, &format!("sweep: {e}")),
         };
@@ -1994,6 +2018,7 @@ impl Daemon {
                 }
             }
         }
+        drop(store);
     }
 
     /// Voice notes that a split copied while they were still being written down.
@@ -2319,30 +2344,42 @@ fn summary_agent(store: &Store) -> Option<investigate::Agent> {
 }
 
 /// The edits that trim each session capture to the issue's time range: transcript seconds from
-/// the first voice note's start, with a few seconds around them. None of it without the times.
+/// the first voice note's start, with a few seconds around them; and the session captures wholly
+/// outside that range, which belong to another issue and stay out of this one's task. None of it
+/// without the times.
 fn issue_edits(
     issue: &investigate::Issue,
     voice_start: Option<i64>,
     captures: &[Capture],
-) -> Vec<(i64, Edits)> {
+) -> (Vec<(i64, Edits)>, Vec<i64>) {
     let (Some(from), Some(to), Some(start)) = (issue.from_seconds, issue.to_seconds, voice_start)
     else {
-        return Vec::new();
+        return Default::default();
     };
     let (first, last) = (from.min(to), from.max(to));
-    let from = start + (first * 1000.0) as i64 - 3000;
-    let to = start + (last * 1000.0) as i64 + 3000;
-    captures
-        .iter()
-        .filter(|c| c.kind == CaptureKind::Session)
-        .filter_map(|c| {
-            let mut edits = c.edits.clone();
-            edits.trim_start = Some(edits.trim_start.unwrap_or(c.started_at).max(from));
-            edits.trim_end = Some(edits.trim_end.unwrap_or(c.created_at).min(to));
-            // A range outside this capture would keep nothing of it: leave it whole.
-            (!edits.kept(c.started_at, c.created_at).is_empty()).then_some((c.id, edits))
-        })
-        .collect()
+    let from = start
+        .saturating_add((first * 1000.0) as i64)
+        .saturating_sub(3000);
+    let to = start
+        .saturating_add((last * 1000.0) as i64)
+        .saturating_add(3000);
+    let mut trimmed = Vec::new();
+    let mut outside = Vec::new();
+    for c in captures.iter().filter(|c| c.kind == CaptureKind::Session) {
+        let mut edits = c.edits.clone();
+        edits.trim_start = Some(edits.trim_start.unwrap_or(c.started_at).max(from));
+        edits.trim_end = Some(edits.trim_end.unwrap_or(c.created_at).min(to));
+        if edits.kept(c.started_at, c.created_at).is_empty() {
+            outside.push(c.id);
+        } else {
+            trimmed.push((c.id, edits));
+        }
+    }
+    // Times that miss every recording are wrong, not another issue's: then all stay whole.
+    if trimmed.is_empty() {
+        outside.clear();
+    }
+    (trimmed, outside)
 }
 
 /// The findings lines (`- ...`) of the block at the top of the notes, and the rest of the notes.
@@ -2383,7 +2420,19 @@ fn start_transcription(daemon: Arc<Daemon>) {
     std::thread::spawn(move || {
         for id in jobs {
             match worker.upgrade() {
-                Some(daemon) => daemon.transcribe(id),
+                // A panic stops this note, not the only worker: later notes still go.
+                Some(daemon) => {
+                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        daemon.transcribe(id)
+                    }))
+                    .is_err()
+                    {
+                        log(
+                            &daemon.paths,
+                            &format!("voice note {id}: transcription panicked"),
+                        );
+                    }
+                }
                 None => break,
             }
         }
@@ -2513,22 +2562,41 @@ mod tests {
             &issue(Some(20.0), Some(5.0)),
             Some(10_000),
             std::slice::from_ref(&capture),
-        );
+        )
+        .0;
         assert_eq!(edits.len(), 1);
         assert_eq!(
             (edits[0].1.trim_start, edits[0].1.trim_end),
             (Some(12_000), Some(33_000))
         );
-        assert!(
+        assert_eq!(
             issue_edits(
                 &issue(None, Some(5.0)),
                 Some(10_000),
                 std::slice::from_ref(&capture)
-            )
-            .is_empty()
+            ),
+            Default::default()
         );
-        // Far outside the capture: it stays whole instead of keeping nothing.
-        assert!(issue_edits(&issue(Some(500.0), Some(600.0)), Some(10_000), &[capture]).is_empty());
+        // Far outside every capture: the times are wrong, so all stay whole.
+        assert_eq!(
+            issue_edits(
+                &issue(Some(500.0), Some(600.0)),
+                Some(10_000),
+                std::slice::from_ref(&capture)
+            ),
+            Default::default()
+        );
+        // Another issue's recording stays out of this issue's task.
+        let mut later = capture.clone();
+        later.id = 2;
+        later.started_at = 900_000;
+        later.created_at = 960_000;
+        let (edits, leave) = issue_edits(
+            &issue(Some(20.0), Some(5.0)),
+            Some(10_000),
+            &[capture, later],
+        );
+        assert_eq!((edits.len(), leave), (1, vec![2]));
     }
 
     fn daemon() -> (tempfile::TempDir, Daemon) {

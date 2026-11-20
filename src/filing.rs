@@ -13,6 +13,8 @@ use uuid::Uuid;
 
 pub const MAX_MARKDOWN_CHARS: usize = 100_000;
 pub const MAX_ATTACHMENTS: usize = 64;
+/// VibeQ's staging endpoint takes files up to this size.
+pub const MAX_ATTACHMENT_BYTES: usize = 200 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -89,6 +91,12 @@ pub fn prepare(
             .unwrap_or_default()
             .to_string();
         let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+        if bytes.len() > MAX_ATTACHMENT_BYTES {
+            return Err(format!(
+                "{filename} is {} MiB; VibeQ takes files up to 200 MiB. Cut the recording shorter",
+                bytes.len() >> 20
+            ));
+        }
         manifest.push(Artifact {
             id: Uuid::new_v5(&submission_id, filename.as_bytes()).to_string(),
             content_type: content_type(&filename).into(),
@@ -97,7 +105,8 @@ pub fn prepare(
         });
     }
     let markdown = std::fs::read_to_string(folder.join("report.md")).map_err(|e| e.to_string())?;
-    if markdown.chars().count() > MAX_MARKDOWN_CHARS {
+    // VibeQ counts UTF-16 units, as JavaScript does: an emoji is two.
+    if markdown.encode_utf16().count() > MAX_MARKDOWN_CHARS {
         return Err("the report exceeds VibeQ's 100,000 characters; shorten the notes".into());
     }
     let title: String = review.title.trim().chars().take(500).collect();

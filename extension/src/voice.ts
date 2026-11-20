@@ -24,10 +24,15 @@ export async function record(): Promise<Recording> {
   const recorder = new MediaRecorder(stream);
   const chunks: Blob[] = [];
   recorder.ondataavailable = (event) => event.data.size && chunks.push(event.data);
-  recorder.start(1000);
+  // The clock starts with the first sample, not the call: speech then lines up with the replay.
+  await new Promise((started) => {
+    recorder.onstart = started;
+    recorder.start(1000);
+  });
+  const startedAt = Date.now();
   const release = () => stream.getTracks().forEach((track) => track.stop());
   return {
-    startedAt: Date.now(),
+    startedAt,
     cancel: () => (recorder.state !== 'inactive' && recorder.stop(), release()),
     stop: () =>
       new Promise<Blob>((done, fail) => {

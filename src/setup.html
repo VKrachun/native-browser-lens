@@ -265,10 +265,16 @@ function render() {
   const extensionBody = [];
   if (current) {
     extensionBody.push(el("p", {}, "Connected from " + browserName(current.client.browser) + " (extension " + current.client.extensionVersion + "). To add Lens to another browser too, choose it below."));
+  } else if (outdated && s.extensions.some((e) => e.client.protocol > s.protocol)) {
+    extensionBody.push(el("p", {}, "The extension is newer than this Lens app. Download the newest app from lens.sirv.studio."));
   } else if (outdated) {
     extensionBody.push(el("p", {}, "An older Lens extension connected. Reload it on the browser's extensions page so it takes the version that came with this app."));
   } else {
     extensionBody.push(el("p", {}, "The extension records the site you test."));
+  }
+  // Snap and Flatpak browsers are installed but cannot start Lens: say so, not "no browser".
+  for (const b of (data.browsers || []).filter((b) => b.name.includes("(") && b.problem)) {
+    extensionBody.push(el("p", {}, b.name + ": " + b.problem + "."));
   }
   if (browsers.length === 0) {
     extensionBody.push(el("p", {}, "Lens found no supported browser. Install Chrome, Edge, Brave, Chromium or Firefox, then come back."));

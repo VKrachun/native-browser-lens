@@ -91,8 +91,10 @@ export function Notes({
     void load().catch((error: Error) => setState({ kind: 'failed', message: error.message }));
   }, [load]);
 
-  const save = useCallback(async () => {
-    if (!record || !dirty || saving.current || !title.trim()) return;
+  // True when the notes on screen are the saved ones.
+  const save = useCallback(async (): Promise<boolean> => {
+    if (!record || !dirty) return true;
+    if (saving.current || !title.trim()) return false;
     saving.current = true;
     setState({ kind: 'saving' });
     try {
@@ -104,8 +106,10 @@ export function Notes({
       // The daemon cleans tags ("AI Tools" becomes ai-tools): show what it kept.
       if (saved.tags.join(',') !== tagList.join(',')) setTags(saved.tags.join(', '));
       // Typing during the save leaves a newer draft: the effect below saves it next.
-      setState(saved.title === title && saved.notes === notes ? { kind: 'saved' } : { kind: 'editing' });
+      const same = saved.title === title && saved.notes === notes;
+      setState(same ? { kind: 'saved' } : { kind: 'editing' });
       onSaved();
+      return same;
     } catch (error) {
       const conflict = error instanceof LensError && error.code === 'conflict';
       if (conflict) {
@@ -127,13 +131,14 @@ export function Notes({
             setTags(saved.tags.join(', '));
             setState({ kind: 'saved' });
             onSaved();
-            return;
+            return true;
           } catch {
             // Fall through: show the conflict.
           }
         }
       }
       setState(conflict ? { kind: 'conflict' } : { kind: 'failed', message: (error as Error).message });
+      return false;
     } finally {
       saving.current = false;
     }
@@ -149,7 +154,10 @@ export function Notes({
       // A save in flight first; then the newest draft, with the revision that save returned.
       for (let i = 0; i < 100 && saving.current; i++) await new Promise((done) => setTimeout(done, 50));
       await new Promise((done) => setTimeout(done, 0));
-      await latestSave.current();
+      if (await latestSave.current()) return;
+      // Typed during that save: the newer draft goes next.
+      await new Promise((done) => setTimeout(done, 0));
+      if (!(await latestSave.current())) throw new Error('The notes are not saved yet; look at them, then try again');
     };
   }
 

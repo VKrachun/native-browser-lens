@@ -954,7 +954,8 @@ impl Edits {
         let mut kept = Vec::new();
         let mut cursor = from;
         for cut in cuts {
-            if cut.to <= cursor || cut.from >= to {
+            // A cut of no length removes nothing; it must not split the range in two.
+            if cut.to <= cut.from || cut.to <= cursor || cut.from >= to {
                 continue;
             }
             if cut.from > cursor {

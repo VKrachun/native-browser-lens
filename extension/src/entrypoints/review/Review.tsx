@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { LensClient } from '@/lens-client';
+import { originOf } from '@/messages';
 import type { Capture } from '@/protocol/Capture';
 import type { Observation } from '@/protocol/Observation';
 import type { Review as FrozenReview } from '@/protocol/Review';
@@ -173,6 +174,8 @@ export function Review({ observation: id }: { observation: number }) {
         },
       });
       setReview(frozen);
+      // A new revision is not filed yet: the last filing was of the review before it.
+      setFiling(null);
       setProblem(null);
     } catch (error) {
       setProblem((error as Error).message);
@@ -186,9 +189,11 @@ export function Review({ observation: id }: { observation: number }) {
       const done = await client.request({ method: 'fileReview', params: { review: review.id, assignee: assignee || null } });
       setFiling(done);
       setProblem(done.missingFiles ? `${done.missingFiles} files did not reach VibeQ; file again to send them.` : null);
-      if (done.taskUrl && sirvantNext && !sirvant) await startSirvant();
+      // An agent starts on the whole evidence only: a filing with missing files waits for the retry.
+      const complete = done.taskUrl && !done.missingFiles;
+      if (complete && sirvantNext && !sirvant) await startSirvant();
       // The agent's prompt then links the VibeQ task.
-      if (done.taskUrl && handoff.afterFiling && handoff.ready && !handoff.done) await handoff.handOff(review.id);
+      if (complete && handoff.afterFiling && handoff.ready && !handoff.done) await handoff.handOff(review.id);
     } catch (error) {
       setProblem(`Not filed: ${(error as Error).message}. Filing again is safe: it never creates a second task.`);
     } finally {
@@ -244,6 +249,7 @@ export function Review({ observation: id }: { observation: number }) {
       });
       setObservation(saved);
       setReview(null);
+      setFiling(null);
       setSuggestion(null);
       setNotice('Your notes now hold the draft. Check them, then create a new review before you file.');
     } catch (error) {
@@ -300,7 +306,7 @@ export function Review({ observation: id }: { observation: number }) {
                     <BlobImage client={client} blob={item.screenshot} alt={`Reviewed capture ${item.capture}`} />
                   )}
                   <div className="review-side">
-                    <a className="small url" href={item.pageUrl} target="_blank" rel="noreferrer">
+                    <a className="small url" href={originOf(item.pageUrl) ? item.pageUrl : undefined} target="_blank" rel="noreferrer">
                       {item.pageUrl}
                     </a>
                     {item.findings.length > 0 ? (
@@ -372,7 +378,7 @@ export function Review({ observation: id }: { observation: number }) {
               <DoneIcon />
               <span>
                 Filed:{' '}
-                <a href={filing.taskUrl} target="_blank" rel="noreferrer">
+                <a href={originOf(filing.taskUrl) ? filing.taskUrl : undefined} target="_blank" rel="noreferrer">
                   {filing.taskUrl}
                 </a>
                 {sirvant && <>. {sirvant.alreadyRunning ? 'Sirvant already works on it.' : 'Sirvant works on it now.'}</>}
@@ -529,12 +535,12 @@ export function Review({ observation: id }: { observation: number }) {
               <p className="small muted">The review includes transcripts. MP4 exports can also include your recorded voice.</p>
             </details>
           )}
-          {filedTask?.startsWith('https://') && (
+          {originOf(filedTask ?? undefined) && (
             <div role="status" aria-label="Filed earlier" className="notice" data-tone="info">
               <DoneIcon />
               <span>
                 Filed earlier:{' '}
-                <a href={filedTask} target="_blank" rel="noreferrer">
+                <a href={filedTask ?? undefined} target="_blank" rel="noreferrer">
                   {filedTask}
                 </a>
                 . Filing again updates that task.
@@ -832,7 +838,7 @@ function Duplicates({ client, id }: { client: LensClient; id: number }) {
               {d.verdict === 'same' ? 'Same problem' : 'Similar title'}
             </span>
             <span className="duplicate-text">
-              <a href={d.url} target="_blank" rel="noreferrer">
+              <a href={originOf(d.url) ? d.url : undefined} target="_blank" rel="noreferrer">
                 {d.title}
               </a>
               <span className="small muted">

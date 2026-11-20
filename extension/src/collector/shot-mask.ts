@@ -17,12 +17,23 @@ export function privateRects(): PrivateRects {
       rects.push([r.left, r.top, r.width, r.height]);
     }
   };
-  for (const el of document.querySelectorAll('[data-lens-block]')) add(el);
-  for (const el of document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('input, textarea')) {
+  // Open shadow roots too: design systems put their inputs there.
+  const all = (selector: string, root: Document | ShadowRoot = document): Element[] => {
+    const found = [...root.querySelectorAll(selector)];
+    for (const host of root.querySelectorAll('*')) if (host.shadowRoot) found.push(...all(selector, host.shadowRoot));
+    return found;
+  };
+  for (const el of all('[data-lens-block]')) add(el);
+  // A frame's fields cannot be read from here (a hosted card form is on another site): it goes black.
+  for (const el of all('iframe, frame, embed, object')) add(el);
+  for (const el of all('input, textarea') as (HTMLInputElement | HTMLTextAreaElement)[]) {
     if (el.type === 'hidden' || !el.value) continue;
     const autocomplete = (el.getAttribute('autocomplete') ?? '').toLowerCase().split(/\s+/);
     const labels = [...(el.labels ?? [])].map((label) => label.textContent ?? '');
-    const named = [el.name, el.id, el.getAttribute('aria-label') ?? '', el.getAttribute('placeholder') ?? '', ...labels].join(' ');
+    const labelledBy = (el.getAttribute('aria-labelledby') ?? '')
+      .split(/\s+/)
+      .map((id) => (id && el.ownerDocument.getElementById(id)?.textContent) || '');
+    const named = [el.name, el.id, el.getAttribute('aria-label') ?? '', el.getAttribute('placeholder') ?? '', ...labels, ...labelledBy].join(' ');
     const digits = el.value.replace(/\D/g, '').length >= 12 && /^[\d\s-]+$/.test(el.value.trim());
     if (
       el.type === 'password' ||

@@ -453,8 +453,8 @@ export default defineBackground(() => {
     let after = 0;
     try {
       while (agentsLive) {
-        const collecting = (await browser.tabs.query({})).filter((t) => t.id !== undefined && buffer.mode(t.id) !== undefined);
-        if (collecting.length === 0 || paused) {
+        const recorded = (await browser.tabs.query({})).filter((t) => t.id !== undefined && buffer.mode(t.id) !== undefined);
+        if (recorded.length === 0 || paused) {
           await new Promise((done) => setTimeout(done, 5000));
           continue;
         }
@@ -470,7 +470,7 @@ export default defineBackground(() => {
         const from = Date.now() - WINDOW_MS;
         const tabs = [];
         for (const tab of await browser.tabs.query({})) {
-          if (tab.id === undefined || buffer.mode(tab.id) === undefined) continue;
+          if (tab.id === undefined || !collecting(tab.id)) continue;
           let host = '';
           try {
             host = new URL(tab.url ?? '').hostname;

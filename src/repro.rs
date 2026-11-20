@@ -355,7 +355,8 @@ fn entries(evidence: &Evidence, context: &Context) -> Vec<Entry> {
     for note in context.voice {
         for segment in &note.segments {
             let at = note.started_at + segment.start_ms;
-            if !context.keeps(at) {
+            // The middle of the words decides, as for the transcript (see record::spoken_in_kept).
+            if !context.keeps(note.started_at + (segment.start_ms + segment.end_ms) / 2) {
                 continue;
             }
             let near = match (first, last) {
