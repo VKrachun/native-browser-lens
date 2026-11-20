@@ -5,7 +5,7 @@ import { CopyIcon, DoneIcon } from '@/ui/icons';
 
 /** People download Lens from its site; the terminal installers stay on the release. */
 const SITE = 'https://lens.sirv.studio/#download';
-const RELEASES = 'https://github.com/VKrachun/native-browser-lens/releases/latest/download';
+const RELEASES = 'https://github.com/sirv/native-browser-lens/releases/latest/download';
 
 /** The installer for this computer, as people know it, and the terminal line for those who prefer it. */
 function installerFor(os: string) {

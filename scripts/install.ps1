@@ -1,6 +1,6 @@
 # Installs Sirv Lens for the current user on Windows, then registers it with the browsers.
 #
-#   irm https://github.com/VKrachun/native-browser-lens/releases/latest/download/install.ps1 | iex
+#   irm https://github.com/sirv/native-browser-lens/releases/latest/download/install.ps1 | iex
 #
 # It writes %LOCALAPPDATA%\Programs\Sirv Lens\lens.exe, adds that folder to the user PATH, and
 # registers the browsers in HKCU. No administrator rights. Remove Lens with:
@@ -8,7 +8,7 @@
 $ErrorActionPreference = 'Stop'
 # Windows PowerShell 5.1 runs `irm | iex` by default: no PowerShell 7 syntax below, and TLS 1.2 on.
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-$repo = if ($env:LENS_REPO) { $env:LENS_REPO } else { 'VKrachun/native-browser-lens' }
+$repo = if ($env:LENS_REPO) { $env:LENS_REPO } else { 'sirv/native-browser-lens' }
 $target = switch ($env:PROCESSOR_ARCHITECTURE) {
     'AMD64' { 'x86_64-pc-windows-msvc' }
     # Windows on ARM runs the x64 build through its emulation; there is no ARM build.

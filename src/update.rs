@@ -11,7 +11,7 @@ use std::time::Duration;
 
 /// The release signing key (its private half lives in the repository's MINISIGN_SECRET_KEY).
 const PUBLIC_KEY: &str = "RWRUIk1sA/LfACfTQLljdyJArqZHzXbSZB32dsXEr2AMUrXAmSXevoDr";
-const FEED: &str = "https://github.com/VKrachun/native-browser-lens/releases/latest/download";
+const FEED: &str = "https://github.com/sirv/native-browser-lens/releases/latest/download";
 const MAX_DOWNLOAD: u64 = 200 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

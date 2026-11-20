@@ -24,8 +24,8 @@ The extension for Chrome, Edge and Brave is in the
 [Chrome Web Store](https://chromewebstore.google.com/detail/sirv-lens/lihjnfpbomppjmdlnchkookggmefanbg),
 and the one for Firefox is in [Firefox Add-ons](https://addons.mozilla.org/firefox/addon/sirv-lens/).
 
-Prefer the terminal? `curl -fsSL https://github.com/VKrachun/native-browser-lens/releases/latest/download/install.sh | sh`
-(PowerShell: `irm https://github.com/VKrachun/native-browser-lens/releases/latest/download/install.ps1 | iex`).
+Prefer the terminal? `curl -fsSL https://github.com/sirv/native-browser-lens/releases/latest/download/install.sh | sh`
+(PowerShell: `irm https://github.com/sirv/native-browser-lens/releases/latest/download/install.ps1 | iex`).
 
 Make the installers for the computer you are on with `node scripts/package.mjs --formats <formats>`
 (`app,dmg`, `nsis`, or `appimage,deb,pacman`; add `--gpu vulkan` or `--gpu metal` for the GPU
@@ -69,7 +69,7 @@ Coding agents read the defects a person reviewed, reproduce them and prove the f
   agents from Settings instead.
 
   ```
-  /plugin install sirv-lens --marketplace VKrachun/native-browser-lens
+  /plugin install sirv-lens --marketplace sirv/native-browser-lens
   ```
 
 - **The CLI**, for agents without MCP and for scripts:

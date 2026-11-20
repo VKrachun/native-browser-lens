@@ -1,7 +1,7 @@
 #!/bin/sh
 # Installs Sirv Lens for the current user on macOS or Linux, then registers it with the browsers.
 #
-#   curl -fsSL https://github.com/VKrachun/native-browser-lens/releases/latest/download/install.sh | sh
+#   curl -fsSL https://github.com/sirv/native-browser-lens/releases/latest/download/install.sh | sh
 #   sh install.sh 0.2.0        # a specific version
 #   LENS_DOWNLOAD_BASE=http://127.0.0.1:8000 sh install.sh 0.2.0   # a local release folder (tests)
 #
@@ -10,7 +10,7 @@
 # Remove Lens with: lens service uninstall && lens unregister && rm ~/.local/bin/lens
 set -eu
 
-repo=${LENS_REPO:-VKrachun/native-browser-lens}
+repo=${LENS_REPO:-sirv/native-browser-lens}
 bin_dir=${LENS_BIN_DIR:-$HOME/.local/bin}
 version=${1:-}
 die() { echo "install.sh: $1" >&2; exit 1; }
