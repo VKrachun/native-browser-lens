@@ -8,7 +8,7 @@ const ANSWER_WITHIN_MS = 8_000;
 /**
  * Says so when the Lens app does not answer, on every page that needs it. It asks the app on a
  * connection of its own, so a long request of the page never reads as an app that is down. A
- * new connection starts the app when it is installed but not running.
+ * new connection starts the app when it is installed but not running, unless the person quit it.
  */
 export function AppStatus({ onBack }: { onBack?: () => void }) {
   const [down, setDown] = useState<string | null>(null);
@@ -39,7 +39,7 @@ export function AppStatus({ onBack }: { onBack?: () => void }) {
         ]);
         if (alive) setDown(null);
       } catch (error) {
-        // A fresh connection next time, which also starts the app again.
+        // A fresh connection next time, which also starts the app again (not after Quit).
         lens.disconnect();
         if (alive) setDown((error as Error).message);
       } finally {

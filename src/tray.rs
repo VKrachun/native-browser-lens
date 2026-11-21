@@ -95,7 +95,7 @@ pub fn perform(paths: &Paths, action: Action, now: &Snapshot) {
                 .map(drop)
         }),
         Action::Quit => {
-            let _ = crate::stop_daemon(paths);
+            let _ = crate::quit(paths);
             std::process::exit(0);
         }
     };

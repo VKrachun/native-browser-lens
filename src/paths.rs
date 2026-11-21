@@ -110,6 +110,12 @@ impl Paths {
             .unwrap_or_else(|| self.data.join("exports"))
     }
 
+    /// Present after the person quit Lens: the browser then does not start it again. A daemon that
+    /// starts (at login, or because the person opened Lens) removes it.
+    pub fn quit_marker(&self) -> PathBuf {
+        self.runtime.join("quit")
+    }
+
     /// Frozen filing attempts: what was reviewed, byte for byte, until VibeQ confirms it.
     pub fn filings(&self) -> PathBuf {
         self.data.join("filings")

@@ -46,7 +46,7 @@ const USAGE: &str = "Usage: lens <command>
   status             Show the version, folders, service and daemon
   paths <name>       Print one folder: data, logs or extension (for scripts)
   start              Start Lens in the background
-  stop               Stop Lens (the service does not restart it)
+  stop               Stop Lens; neither the service nor the browser starts it again
   restart            Stop, then start
   update [--check]   Install the newest signed release (--check only reports it)
   service install    Start Lens at login (per user, no admin rights)
@@ -330,10 +330,18 @@ pub fn stop_daemon(paths: &Paths) -> std::io::Result<bool> {
     Ok(true)
 }
 
+/// Stops Lens until the person starts it again: the browser no longer starts it on its own.
+pub fn quit(paths: &Paths) -> std::io::Result<bool> {
+    // First the marker: a browser page that asks in the moment of the stop must not start it again.
+    paths.ensure()?;
+    std::fs::write(paths.quit_marker(), b"")?;
+    stop_daemon(paths)
+}
+
 fn stop(paths: &Paths) -> std::io::Result<()> {
     println!(
         "{}",
-        if stop_daemon(paths)? {
+        if quit(paths)? {
             "stopped"
         } else {
             "not running"

@@ -183,6 +183,8 @@ pub fn run(paths: &Paths, service: bool) -> std::io::Result<()> {
         Err(TryLockError::WouldBlock) => return Ok(()),
         Err(TryLockError::Error(e)) => return Err(e),
     }
+    // The browser never starts a quit Lens, so this start is the person's (or the login's).
+    let _ = std::fs::remove_file(paths.quit_marker());
     if service {
         match crate::paths::executable().and_then(|exe| crate::register::register(paths, &exe)) {
             Ok(_) => {}

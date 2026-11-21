@@ -11,8 +11,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub fn run(paths: &Paths) -> io::Result<()> {
-    let stream =
-        Arc::new(connect_or_start(paths).inspect_err(|e| log(paths, &format!("connect: {e}")))?);
+    // Extension pages ask the app every few seconds: after Quit, starting it here would undo the Quit.
+    let connected = if paths.quit_marker().exists() {
+        ipc::connect(paths)
+            .map_err(|_| io::Error::other("Lens was quit; open Sirv Lens to start it"))
+    } else {
+        connect_or_start(paths)
+    };
+    let stream = Arc::new(connected.inspect_err(|e| log(paths, &format!("connect: {e}")))?);
     let to_daemon = stream.clone();
     let log_paths = paths.clone();
     std::thread::spawn(move || {
