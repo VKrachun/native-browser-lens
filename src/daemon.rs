@@ -969,6 +969,7 @@ impl Daemon {
                     projects: store.count("projects").map_err(storage)?,
                     captures: store.count("captures").map_err(storage)?,
                     vibeq_configured: store.setting("vibeq.endpoint").map_err(storage)?.is_some(),
+                    coding_agents_connected: crate::agents::connected(),
                     steps: Vec::new(),
                 };
                 status.steps = crate::setup::steps(&status);
@@ -3099,6 +3100,28 @@ mod tests {
         ] {
             assert!(normalize_origin(bad).is_err(), "{bad} was accepted");
         }
+    }
+
+    #[test]
+    fn a_recording_without_a_screenshot_or_a_replay_is_still_saved() {
+        // Firefox without access to all sites, on a page the recorder did not reach.
+        let (_dir, daemon) = daemon();
+        let reply = ask(
+            &daemon,
+            &serde_json::json!({ "id": 1, "method": "createCapture", "params": {
+                "observation": null, "pageUrl": "https://shop.test/", "pageTitle": "Cart",
+                "renderScreenshot": true,
+                "evidence": { "mode": "limited", "page": null, "events": [], "actions": [],
+                    "gaps": [{ "channel": "screenshot", "reason": "No screenshot", "startedAt": 1, "endedAt": null }] },
+                "recording": null, "kind": "session", "startedAt": 1
+            } })
+            .to_string(),
+        );
+        assert_eq!(reply["status"], "ok", "{reply}");
+        let sha = reply["result"]["data"]["screenshot"]["sha256"]
+            .as_str()
+            .unwrap();
+        assert_eq!(daemon.blobs.read_all(sha).unwrap(), PENDING_SCREENSHOT);
     }
 
     #[test]

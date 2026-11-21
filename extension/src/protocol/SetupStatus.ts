@@ -13,6 +13,10 @@ service: string | null, browsers: Array<BrowserCheck>,
  */
 extensions: Array<ClientSeen>, projects: number, captures: number, vibeqConfigured: boolean, 
 /**
+ * The coding agents here have the sirv-lens skill (`lens agents connect` ran).
+ */
+codingAgentsConnected: boolean, 
+/**
  * The checklist the terminal and the side panel show, computed here once.
  */
 steps: Array<Step>, };

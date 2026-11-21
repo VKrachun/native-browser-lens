@@ -473,8 +473,14 @@ export default defineBackground(() => {
           recording = await client().upload(body, 'application/json');
         }
       }
+      // A missing picture never holds a recording back: the steps, voice and evidence are saved.
       if (shot === null && !recording) {
-        throw new Error('Firefox takes a screenshot here only with access to all sites, and this page has no replay to make one from. Allow it in the Lens panel');
+        snapshot.gaps.push({
+          channel: 'screenshot',
+          reason: 'No screenshot: Firefox takes one only with access to all sites, and this page had no replay to make one from',
+          startedAt: Date.now(),
+          endedAt: null,
+        });
       }
       const taken = [];
       for (const shot of shots.since(tabId, from)) {

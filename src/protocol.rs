@@ -735,6 +735,8 @@ pub struct SetupStatus {
     pub projects: u32,
     pub captures: u32,
     pub vibeq_configured: bool,
+    /// The coding agents here have the sirv-lens skill (`lens agents connect` ran).
+    pub coding_agents_connected: bool,
     /// The checklist the terminal and the side panel show, computed here once.
     pub steps: Vec<crate::setup::Step>,
 }

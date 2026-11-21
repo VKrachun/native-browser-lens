@@ -401,6 +401,7 @@ mod tests {
             projects: 0,
             captures: 0,
             vibeq_configured: false,
+            coding_agents_connected: false,
             steps: vec![],
         }
     }

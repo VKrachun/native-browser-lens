@@ -422,6 +422,19 @@ function CodingAgents({ client }: { client: LensClient }) {
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<AgentSetup[] | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  /** Whether connect ran here (the sirv-lens skill is installed); null until the app answers. */
+  const [connected, setConnected] = useState<boolean | null>(null);
+  const load = useCallback(
+    () =>
+      client
+        .request({ method: 'setupStatus' })
+        .then((s) => setConnected(s.codingAgentsConnected))
+        .catch(() => {}),
+    [client],
+  );
+  useEffect(() => {
+    void load();
+  }, [load]);
   async function run(method: 'connectAgents' | 'disconnectAgents') {
     setBusy(true);
     setProblem(null);
@@ -431,6 +444,7 @@ function CodingAgents({ client }: { client: LensClient }) {
       setProblem((error as Error).message);
     } finally {
       setBusy(false);
+      void load();
     }
   }
   return (
@@ -443,13 +457,25 @@ function CodingAgents({ client }: { client: LensClient }) {
           The same works in a terminal with <code>lens agents connect</code>.
         </p>
       </div>
+      {connected && (
+        <p className="small" role="status" aria-label="Coding agents state">
+          <DoneIcon size={14} /> Connected. Connect again after you install another agent.
+        </p>
+      )}
       <div className="actions">
-        <button type="button" className="btn btn-primary" onClick={() => void run('connectAgents')} disabled={busy}>
-          {busy ? 'Connecting…' : 'Connect coding agents'}
+        <button
+          type="button"
+          className={connected ? 'btn btn-secondary' : 'btn btn-primary'}
+          onClick={() => void run('connectAgents')}
+          disabled={busy}
+        >
+          {busy ? 'Working…' : connected ? 'Connect again' : 'Connect coding agents'}
         </button>
-        <button type="button" className="btn btn-ghost" onClick={() => void run('disconnectAgents')} disabled={busy}>
-          Disconnect
-        </button>
+        {connected && (
+          <button type="button" className="btn btn-ghost" onClick={() => void run('disconnectAgents')} disabled={busy}>
+            Disconnect
+          </button>
+        )}
       </div>
       <label className="check">
         <input type="checkbox" checked={live} onChange={(e) => setLive(e.target.checked)} />
