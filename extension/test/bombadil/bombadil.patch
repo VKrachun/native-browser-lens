@@ -1,0 +1,93 @@
+diff --git a/lib/bombadil-browser/src/browser.rs b/lib/bombadil-browser/src/browser.rs
+index 4e5ebc1..ba0820b 100644
+--- a/lib/bombadil-browser/src/browser.rs
++++ b/lib/bombadil-browser/src/browser.rs
+@@ -216,7 +216,7 @@ impl Browser {
+                 }
+             }
+         } else {
+-            let (target_id, session_id) = find_page(&connection)?;
++            let (target_id, session_id) = find_page(&connection, origin)?;
+             (target_id, session_id, None)
+         };
+         log::info!("frame control: {}", frame_control.is_some());
+@@ -1639,7 +1639,10 @@ fn create_target_with_frame_control(
+     }
+ }
+ 
+-fn find_page(connection: &cdp::Connection) -> Result<(TargetId, SessionId)> {
++fn find_page(
++    connection: &cdp::Connection,
++    origin: &Url,
++) -> Result<(TargetId, SessionId)> {
+     let page_targets = connection
+         .send(
+             target::GetTargetsParams {
+@@ -1656,8 +1659,11 @@ fn find_page(connection: &cdp::Connection) -> Result<(TargetId, SessionId)> {
+ 
+     log::debug!("targets: {:?}", page_targets);
+ 
++    // The page that already shows the origin, when there is one.
+     let target = page_targets
+-        .first()
++        .iter()
++        .find(|target| target.url == origin.as_str())
++        .or(page_targets.first())
+         .ok_or(anyhow!("no page target available"))?;
+ 
+     if page_targets.len() >= 2 {
+diff --git a/lib/bombadil-browser/src/match_pattern.rs b/lib/bombadil-browser/src/match_pattern.rs
+index 9627f77..387ed78 100644
+--- a/lib/bombadil-browser/src/match_pattern.rs
++++ b/lib/bombadil-browser/src/match_pattern.rs
+@@ -30,6 +30,8 @@ enum SchemePattern {
+     /// `*`
+     HttpOrHttps,
+     File,
++    /// `chrome-extension`: one extension's pages, by its ID as the host.
++    ChromeExtension,
+     /// `<all_urls>`
+     Any,
+ }
+@@ -121,6 +123,17 @@ impl MatchPattern {
+                 port: None,
+                 path: PathPattern::ExactPath(origin.path().to_string()),
+             }),
++            "chrome-extension" => Ok(MatchPattern {
++                scheme: SchemePattern::ChromeExtension,
++                host: HostPattern::Exact(
++                    origin
++                        .host_str()
++                        .ok_or("chrome-extension origin is missing its ID")?
++                        .to_string(),
++                ),
++                port: None,
++                path: PathPattern::all_paths(),
++            }),
+             scheme @ ("http" | "https") => Ok(MatchPattern {
+                 scheme: if scheme == "https" {
+                     SchemePattern::Https
+@@ -157,6 +170,7 @@ impl SchemePattern {
+             SchemePattern::Https => scheme == "https",
+             SchemePattern::HttpOrHttps => matches!(scheme, "http" | "https"),
+             SchemePattern::File => scheme == "file",
++            SchemePattern::ChromeExtension => scheme == "chrome-extension",
+             SchemePattern::Any => matches!(scheme, "http" | "https" | "file"),
+         }
+     }
+@@ -233,6 +247,7 @@ impl Display for MatchPattern {
+             SchemePattern::Https => "https",
+             SchemePattern::HttpOrHttps => "*",
+             SchemePattern::File => "file",
++            SchemePattern::ChromeExtension => "chrome-extension",
+         };
+         write!(f, "{scheme}://")?;
+         match &self.host {
+@@ -258,6 +273,7 @@ fn parse_scheme(scheme: &str, raw: &str) -> Result<SchemePattern, String> {
+         "https" => Ok(SchemePattern::Https),
+         "*" => Ok(SchemePattern::HttpOrHttps),
+         "file" => Ok(SchemePattern::File),
++        "chrome-extension" => Ok(SchemePattern::ChromeExtension),
+         other => Err(invalid(raw, &format!("unsupported scheme {other:?}"))),
+     }
+ }
