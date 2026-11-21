@@ -38,16 +38,61 @@ fn run(program: &str, arguments: &[&str]) -> io::Result<String> {
 
 /// Installs the service, or moves it to `executable` when it starts another Lens program: the
 /// Lens the person opens is the one they want, say a new AppImage beside an older `lens`.
-/// Otherwise starts it. A data folder of its own (LENS_HOME: tests, demos) never moves the
-/// person's service.
+/// Otherwise starts it. A data folder of its own (LENS_HOME: tests, demos) only starts its daemon.
 pub fn ensure(paths: &Paths, executable: &Path) -> io::Result<()> {
+    if own_home() {
+        return start(paths);
+    }
     match state(paths) {
         State::NotInstalled => install(paths, executable),
-        _ if std::env::var_os("LENS_HOME").is_none() && !runs(paths, executable) => {
-            install(paths, executable)
-        }
+        _ if !runs(paths, executable) => install(paths, executable),
         _ => start(paths),
     }
+}
+
+/// A data folder of its own (LENS_HOME: tests, demos). Such a Lens never uses the service manager:
+/// the unit or agent it would install, start or remove has the same name as the person's own Lens,
+/// so `systemctl --user` or `launchctl` would act on theirs.
+fn own_home() -> bool {
+    std::env::var_os("LENS_HOME").is_some_and(|v| !v.is_empty())
+}
+
+fn own_home_refused() -> io::Error {
+    io::Error::other(
+        "a Lens with its own data folder (LENS_HOME) does not start at login: the service is the person's own Lens",
+    )
+}
+
+/// Makes Lens start at login.
+pub fn install(paths: &Paths, executable: &Path) -> io::Result<()> {
+    if own_home() {
+        return Err(own_home_refused());
+    }
+    install_os(paths, executable)
+}
+
+/// Stops Lens starting at login.
+pub fn uninstall(paths: &Paths) -> io::Result<()> {
+    if own_home() {
+        return Err(own_home_refused());
+    }
+    uninstall_os(paths)
+}
+
+/// Whether Lens starts at login, and how.
+pub fn state(paths: &Paths) -> State {
+    if own_home() {
+        return State::NotInstalled;
+    }
+    state_os(paths)
+}
+
+/// Starts the daemon: through the service when there is one.
+pub fn start(paths: &Paths) -> io::Result<()> {
+    if own_home() {
+        return spawn_detached(paths);
+    }
+    start_os(paths)
 }
 
 /// Starts the daemon without any service manager, detached (as the browser shim does).
@@ -114,7 +159,7 @@ fn runs(paths: &Paths, executable: &Path) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-pub fn install(paths: &Paths, executable: &Path) -> io::Result<()> {
+fn install_os(paths: &Paths, executable: &Path) -> io::Result<()> {
     paths.ensure()?;
     let path = plist_path()?;
     std::fs::create_dir_all(path.parent().expect("plist has a folder"))?;
@@ -140,7 +185,7 @@ pub fn install(paths: &Paths, executable: &Path) -> io::Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-pub fn uninstall(_paths: &Paths) -> io::Result<()> {
+fn uninstall_os(_paths: &Paths) -> io::Result<()> {
     let _ = run("launchctl", &["bootout", &format!("{}/{LABEL}", domain())]);
     match std::fs::remove_file(plist_path()?) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
@@ -149,7 +194,7 @@ pub fn uninstall(_paths: &Paths) -> io::Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-pub fn state(_paths: &Paths) -> State {
+fn state_os(_paths: &Paths) -> State {
     match plist_path().map(|p| p.exists()) {
         Ok(true) => State::Installed { manager: "launchd" },
         _ => State::NotInstalled,
@@ -157,7 +202,7 @@ pub fn state(_paths: &Paths) -> State {
 }
 
 #[cfg(target_os = "macos")]
-pub fn start(paths: &Paths) -> io::Result<()> {
+fn start_os(paths: &Paths) -> io::Result<()> {
     if state(paths) == State::NotInstalled {
         return spawn_detached(paths);
     }
@@ -233,7 +278,7 @@ fn runs(paths: &Paths, executable: &Path) -> bool {
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-pub fn install(paths: &Paths, executable: &Path) -> io::Result<()> {
+fn install_os(paths: &Paths, executable: &Path) -> io::Result<()> {
     paths.ensure()?;
     if systemd_user() {
         let path = unit_path()?;
@@ -264,7 +309,7 @@ pub fn install(paths: &Paths, executable: &Path) -> io::Result<()> {
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-pub fn uninstall(_paths: &Paths) -> io::Result<()> {
+fn uninstall_os(_paths: &Paths) -> io::Result<()> {
     if unit_path()?.exists() {
         let _ = run(
             "systemctl",
@@ -280,7 +325,7 @@ pub fn uninstall(_paths: &Paths) -> io::Result<()> {
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-pub fn state(_paths: &Paths) -> State {
+fn state_os(_paths: &Paths) -> State {
     if unit_path().is_ok_and(|p| p.exists()) {
         State::Installed { manager: "systemd" }
     } else if autostart_path().is_ok_and(|p| p.exists()) {
@@ -293,7 +338,7 @@ pub fn state(_paths: &Paths) -> State {
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-pub fn start(paths: &Paths) -> io::Result<()> {
+fn start_os(paths: &Paths) -> io::Result<()> {
     match state(paths) {
         State::Installed { manager: "systemd" } => {
             run("systemctl", &["--user", "start", "sirv-lens.service"]).map(drop)
@@ -332,7 +377,7 @@ fn runs(_paths: &Paths, executable: &Path) -> bool {
 }
 
 #[cfg(windows)]
-pub fn install(paths: &Paths, executable: &Path) -> io::Result<()> {
+fn install_os(paths: &Paths, executable: &Path) -> io::Result<()> {
     use winreg::{RegKey, enums::HKEY_CURRENT_USER};
     paths.ensure()?;
     let launcher = launcher(executable);
@@ -352,7 +397,7 @@ pub fn install(paths: &Paths, executable: &Path) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-pub fn uninstall(_paths: &Paths) -> io::Result<()> {
+fn uninstall_os(_paths: &Paths) -> io::Result<()> {
     use winreg::{RegKey, enums::HKEY_CURRENT_USER};
     match RegKey::predef(HKEY_CURRENT_USER)
         .open_subkey_with_flags(RUN_KEY, winreg::enums::KEY_SET_VALUE)
@@ -367,7 +412,7 @@ pub fn uninstall(_paths: &Paths) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-pub fn state(_paths: &Paths) -> State {
+fn state_os(_paths: &Paths) -> State {
     use winreg::{RegKey, enums::HKEY_CURRENT_USER};
     let installed = RegKey::predef(HKEY_CURRENT_USER)
         .open_subkey(RUN_KEY)
@@ -383,7 +428,7 @@ pub fn state(_paths: &Paths) -> State {
 }
 
 #[cfg(windows)]
-pub fn start(paths: &Paths) -> io::Result<()> {
+fn start_os(paths: &Paths) -> io::Result<()> {
     spawn_detached(paths)
 }
 

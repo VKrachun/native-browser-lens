@@ -252,7 +252,7 @@ pub fn run(paths: &Paths, service: bool) -> std::io::Result<()> {
                 let daemon = daemon.clone();
                 let paths = paths.clone();
                 std::thread::spawn(move || {
-                    if let Err(e) = serve(&daemon, stream) {
+                    if let Err(e) = serve(daemon, stream) {
                         log(&paths, &format!("connection ended: {e}"));
                     }
                 });
@@ -264,14 +264,67 @@ pub fn run(paths: &Paths, service: bool) -> std::io::Result<()> {
     Ok(())
 }
 
-fn serve(daemon: &Daemon, stream: Stream) -> std::io::Result<()> {
-    let mut stream = &stream;
-    let mut transfer = None;
-    while let Some(frame) = read_frame(&mut stream, MAX_REQUEST_BYTES)? {
-        let (reply, stop) = daemon.answer(&frame, &mut transfer);
-        write_frame(&mut stream, &reply)?;
-        if stop {
-            std::process::exit(0);
+/// Attachment downloads in progress on one connection, by review and capture: a page can read a
+/// ZIP and an MP4 at the same time.
+type Transfers = Mutex<std::collections::HashMap<(i64, Option<i64>), crate::attachments::Transfer>>;
+
+/// Requests that wait on a model, the network, a render or another program. Each runs on a thread
+/// of its own, so the page's other requests (a notes save, a status) do not wait behind it: one
+/// connection serves a whole page. Every other request keeps its order on the connection.
+fn slow(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::Investigate { .. }
+            | Request::Summarize { .. }
+            | Request::FindDuplicates { .. }
+            | Request::FileReview { .. }
+            | Request::StartSirvant { .. }
+            | Request::ListMembers
+            | Request::GetVibeQ
+            | Request::ListAgents
+            | Request::ConnectAgents
+            | Request::DisconnectAgents
+            | Request::ExportReview { .. }
+            | Request::ExportAttachment { .. }
+            | Request::ReadAttachment { .. }
+            | Request::HandOff { .. }
+            | Request::WaitForAsk { .. }
+            | Request::CheckUpdates
+            | Request::UpdateNow
+    )
+}
+
+fn serve(daemon: Arc<Daemon>, stream: Stream) -> std::io::Result<()> {
+    let stream = Arc::new(stream);
+    // Replies leave one whole frame at a time: from this loop and from the slow requests' threads.
+    let sending = Arc::new(Mutex::new(()));
+    let transfers = Arc::new(Transfers::default());
+    while let Some(frame) = read_frame(&mut &*stream, MAX_REQUEST_BYTES)? {
+        match serde_json::from_slice::<RequestFrame>(&frame) {
+            Ok(request) if slow(&request.request) => {
+                let (daemon, stream, sending, transfers) = (
+                    daemon.clone(),
+                    stream.clone(),
+                    sending.clone(),
+                    transfers.clone(),
+                );
+                std::thread::spawn(move || {
+                    let (reply, _) = daemon.answer_parsed(Ok(request), &frame, &transfers);
+                    let _one = sending.lock().unwrap_or_else(|e| e.into_inner());
+                    // The page may be gone by now: nothing waits for this reply then.
+                    let _ = write_frame(&mut &*stream, &reply);
+                });
+            }
+            parsed => {
+                let (reply, stop) = daemon.answer_parsed(parsed, &frame, &transfers);
+                {
+                    let _one = sending.lock().unwrap_or_else(|e| e.into_inner());
+                    write_frame(&mut &*stream, &reply)?;
+                }
+                if stop {
+                    std::process::exit(0);
+                }
+            }
         }
     }
     Ok(())
@@ -280,18 +333,25 @@ fn serve(daemon: &Daemon, stream: Stream) -> std::io::Result<()> {
 impl Daemon {
     /// One request frame in, one reply frame out, and whether the daemon stops after sending it.
     /// Never fails: a broken request gets an error reply.
-    fn answer(
+    #[cfg(test)]
+    fn answer(&self, frame: &[u8], transfers: &Transfers) -> (Vec<u8>, bool) {
+        self.answer_parsed(serde_json::from_slice(frame), frame, transfers)
+    }
+
+    /// `answer` for a frame already parsed (`parsed`), which the connection reads to choose a thread.
+    fn answer_parsed(
         &self,
+        parsed: Result<RequestFrame, serde_json::Error>,
         frame: &[u8],
-        transfer: &mut Option<crate::attachments::Transfer>,
+        transfers: &Transfers,
     ) -> (Vec<u8>, bool) {
         let mut stop = false;
-        let reply = match serde_json::from_slice::<RequestFrame>(frame) {
+        let reply = match parsed {
             Ok(request) => {
                 stop = matches!(request.request, Request::Shutdown);
                 ReplyFrame {
                     id: request.id,
-                    outcome: self.handle_with_transfer(request.request, transfer),
+                    outcome: self.handle_with_transfer(request.request, transfers),
                 }
             }
             Err(e) => ReplyFrame {
@@ -343,15 +403,11 @@ impl Daemon {
     }
 
     pub(crate) fn handle(&self, request: Request) -> Outcome {
-        self.handle_with_transfer(request, &mut None)
+        self.handle_with_transfer(request, &Transfers::default())
     }
 
-    fn handle_with_transfer(
-        &self,
-        request: Request,
-        transfer: &mut Option<crate::attachments::Transfer>,
-    ) -> Outcome {
-        match self.reply(request, transfer) {
+    fn handle_with_transfer(&self, request: Request, transfers: &Transfers) -> Outcome {
+        match self.reply(request, transfers) {
             Ok(result) => Outcome::Ok {
                 result: Box::new(result),
             },
@@ -359,11 +415,7 @@ impl Daemon {
         }
     }
 
-    fn reply(
-        &self,
-        request: Request,
-        transfer: &mut Option<crate::attachments::Transfer>,
-    ) -> Result<Reply, ProtocolError> {
+    fn reply(&self, request: Request, transfers: &Transfers) -> Result<Reply, ProtocolError> {
         let mut store = self
             .store
             .lock()
@@ -1037,8 +1089,8 @@ impl Daemon {
                 offset,
                 include_voice,
             } => {
-                if offset == 0 {
-                    *transfer = None;
+                let key = (review, capture);
+                let mut reader = if offset == 0 {
                     let frozen = store
                         .get_review(review)
                         .map_err(storage)?
@@ -1047,26 +1099,41 @@ impl Daemon {
                         .mp4_voice(&frozen, capture.is_some() && include_voice)
                         .map_err(storage)?;
                     drop(store);
-                    *transfer = Some(
-                        crate::attachments::Transfer::open(
-                            &frozen,
-                            capture,
-                            &self.blobs,
-                            &self.paths.data.join("video-tools"),
-                            &voice,
-                        )
-                        .map_err(storage)?,
-                    );
+                    crate::attachments::Transfer::open(
+                        &frozen,
+                        capture,
+                        &self.blobs,
+                        &self.paths.data.join("video-tools"),
+                        &voice,
+                    )
+                    .map_err(storage)?
                 } else {
                     drop(store);
-                }
-                let reader = transfer
-                    .as_mut()
-                    .filter(|t| t.review == review && t.capture == capture)
-                    .ok_or_else(|| bad("No matching attachment transfer on this connection."))?;
-                let (bytes, total_size) = reader.read(offset).map_err(storage)?;
-                if offset + bytes.len() as u64 == total_size {
-                    *transfer = None;
+                    // The page reads one transfer's parts in order: while one is read, the
+                    // transfer is out of the map.
+                    transfers
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&key)
+                        .ok_or_else(|| bad("No matching attachment transfer on this connection."))?
+                };
+                let read = reader.read(offset);
+                let keep = |reader| {
+                    transfers
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(key, reader);
+                };
+                let (bytes, total_size) = match read {
+                    Ok(read) => read,
+                    Err(e) => {
+                        // The same part can be asked for again.
+                        keep(reader);
+                        return Err(storage(e));
+                    }
+                };
+                if offset + (bytes.len() as u64) < total_size {
+                    keep(reader);
                 }
                 Reply::Blob(BlobChunk {
                     data: BASE64.encode(bytes),
@@ -2913,7 +2980,7 @@ mod tests {
     }
 
     fn ask(daemon: &Daemon, json: &str) -> serde_json::Value {
-        serde_json::from_slice(&daemon.answer(json.as_bytes(), &mut None).0).unwrap()
+        serde_json::from_slice(&daemon.answer(json.as_bytes(), &Transfers::default()).0).unwrap()
     }
 
     #[test]
@@ -2948,6 +3015,31 @@ mod tests {
     }
 
     #[test]
+    fn a_slow_request_does_not_hold_up_the_next_one_on_its_connection() {
+        let (_dir, daemon) = daemon();
+        let paths = daemon.paths.clone();
+        paths.ensure().unwrap();
+        let listener = ipc::listen(&paths).unwrap();
+        let daemon = Arc::new(daemon);
+        std::thread::spawn(move || {
+            let stream = listener.accept().unwrap();
+            let _ = serve(daemon, stream);
+        });
+        let mut client = ipc::connect(&paths).unwrap();
+        // The long poll waits for an agent's ask that never comes; hello comes back meanwhile.
+        write_frame(
+            &mut client,
+            br#"{"id":1,"method":"waitForAsk","params":{"after":0}}"#,
+        )
+        .unwrap();
+        write_frame(&mut client, br#"{"id":2,"method":"hello"}"#).unwrap();
+        let first = read_frame(&mut client, MAX_REPLY_BYTES).unwrap().unwrap();
+        let reply: serde_json::Value = serde_json::from_slice(&first).unwrap();
+        assert_eq!(reply["id"], 2, "{reply}");
+        assert_eq!(reply["status"], "ok");
+    }
+
+    #[test]
     fn answers_requests_and_reports_bad_ones() {
         let (_dir, daemon) = daemon();
         let created = ask(
@@ -2975,10 +3067,14 @@ mod tests {
 
         assert!(
             daemon
-                .answer(br#"{"id":11,"method":"shutdown"}"#, &mut None)
+                .answer(br#"{"id":11,"method":"shutdown"}"#, &Transfers::default())
                 .1
         );
-        assert!(!daemon.answer(br#"{"id":12,"method":"hello"}"#, &mut None).1);
+        assert!(
+            !daemon
+                .answer(br#"{"id":12,"method":"hello"}"#, &Transfers::default())
+                .1
+        );
     }
 
     #[test]

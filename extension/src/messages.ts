@@ -56,9 +56,18 @@ export type Broadcast =
   | { kind: 'annotated'; capture: Capture }
   | { kind: 'tabChanged'; tabId: number };
 
-export function send<T>(request: BackgroundRequest): Promise<T> {
-  return browser.runtime.sendMessage(request) as Promise<T>;
+/**
+ * The reply, or undefined when no part of the extension answered (the background was restarting):
+ * a caller that reads `ok` uses NO_ANSWER then.
+ */
+export function send<T>(request: BackgroundRequest): Promise<T | undefined> {
+  return browser.runtime.sendMessage(request) as Promise<T | undefined>;
 }
+
+export const NO_ANSWER: { ok: false; error: string; microphoneBlocked?: boolean } = {
+  ok: false,
+  error: 'Lens did not answer in the browser; try again',
+};
 
 export function originOf(url: string | undefined): string | null {
   if (!url) return null;

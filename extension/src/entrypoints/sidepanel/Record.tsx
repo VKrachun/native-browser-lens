@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { LensClient } from '@/lens-client';
-import { send, type CaptureResult, type SessionStart, type TabStatus } from '@/messages';
+import { NO_ANSWER, send, type CaptureResult, type SessionStart, type TabStatus } from '@/messages';
 import { MicIcon, StopIcon } from '@/ui/icons';
 import { MicrophoneBlocked, record, toWav, type Recording } from '@/voice';
 import { purge, spool, spooled, unspool } from '@/voice-spool';
@@ -131,7 +131,19 @@ export function RecordControls({
   useEffect(() => () => microphone.current?.cancel(), []);
   const inBackground = !import.meta.env.FIREFOX;
 
+  // One start at a time: a second click while the first starts would start the microphone again,
+  // and the second start cancels the first one's voice.
   async function start() {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await begin();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function begin() {
     if (tabId === null) return;
     onProblem(null);
     if (voice && !inBackground) {
@@ -162,7 +174,7 @@ export function RecordControls({
         return onProblem(`The microphone did not start: ${(error as Error).message}`);
       }
     }
-    const started = await send<SessionStart>({ kind: 'startSession', tabId, voice: voice && inBackground });
+    const started = (await send<SessionStart>({ kind: 'startSession', tabId, voice: voice && inBackground })) ?? NO_ANSWER;
     if (!started.ok) {
       if (microphoneTab.current === tabId) {
         microphone.current?.cancel();
@@ -189,7 +201,7 @@ export function RecordControls({
       const mineKept = keptVoice.current?.tab === tabId && keptVoice.current.session === session;
       const kept = mineKept ? keptVoice.current : spoken ? null : await fromSpool(tabId, session);
       const [result, wav] = await Promise.all([
-        send<CaptureResult>({ kind: 'stopSession', tabId }),
+        send<CaptureResult>({ kind: 'stopSession', tabId }).then((reply) => reply ?? NO_ANSWER),
         kept ? Promise.resolve(kept.wav) : spoken ? spoken.stop() : Promise.resolve(null),
       ]);
       const startedAt = kept?.startedAt ?? spoken?.startedAt;

@@ -1,6 +1,6 @@
 import { StrictMode, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { LensClient } from '@/lens-client';
+import { LensClient, captureProblem } from '@/lens-client';
 import type { Capture } from '@/protocol/Capture';
 import type { VoiceNote } from '@/protocol/VoiceNote';
 import '@/ui/base.css';
@@ -25,7 +25,7 @@ function Recording({ id }: { id: number }) {
         setCapture(found);
         setVoice(await client.request({ method: 'listVoiceNotes', params: { observation: found.observation } }));
       })
-      .catch((error: Error) => setProblem(error.message));
+      .catch((error: Error) => setProblem(captureProblem(error)));
     return () => client.disconnect();
   }, [client, id]);
 

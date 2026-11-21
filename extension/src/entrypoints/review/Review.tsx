@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { LensClient } from '@/lens-client';
+import { LensClient, LensError } from '@/lens-client';
 import { originOf } from '@/messages';
 import type { Capture } from '@/protocol/Capture';
 import type { Observation } from '@/protocol/Observation';
@@ -45,20 +45,31 @@ export function Review({ observation: id }: { observation: number }) {
   const { settings: destinations, error: destinationError } = useDestination(client);
   const defaultChoice = destinations?.choice;
   const destination = defaultChoice?.tracker;
-  const [filing, setFiling] = useState<Filing | null>(null);
+  const [lastFiling, setFiling] = useState<Filing | null>(null);
+  // A filing reply can land after a newer review replaced its own: it then belongs to no review here.
+  const filing = review && lastFiling?.review === review.id ? lastFiling : null;
   const [sending, setSending] = useState(false);
   /** Put Sirvant, VibeQ's agent, to work right after filing; remembered for the next review. */
   const [sirvantNext, setSirvantNext] = useStored('lens.sirvant', false);
-  const [sirvant, setSirvant] = useState<SirvantRun | null>(null);
+  const [lastSirvant, setSirvant] = useState<{ review: number; run: SirvantRun } | null>(null);
+  const sirvant = review && lastSirvant?.review === review.id ? lastSirvant.run : null;
   const [starting, setStarting] = useState(false);
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [drafting, setDrafting] = useState<Agent | null>(null);
   const [suggestion, setSuggestion] = useState<Suggestion | null>(null);
+  const [usingDraft, setUsingDraft] = useState(false);
+  const [freezing, setFreezing] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   /** The task of an earlier filing of this observation, when the page opens again. */
   const [filedTask, setFiledTask] = useState<string | null>(null);
   const handoff = useHandoff(client, siteOf(review?.items[0]?.pageUrl ?? captures[0]?.pageUrl));
+  // The review and filing on the page now. A reply that comes back after the person made a new
+  // review, or cleared it with "Use as my notes", belongs to the old one and must not show here:
+  // the page would offer Sirvant or filing for a review the reply was not about.
+  const shown = useRef({ review, filing });
+  shown.current = { review, filing };
+  const stillShown = (one: FrozenReview) => shown.current.review?.id === one.id;
 
   // A filing cut short (the page closed, the network went) belongs to its frozen review: after a
   // reload the page shows that review again, so filing again finishes the same submission.
@@ -74,9 +85,10 @@ export function Review({ observation: id }: { observation: number }) {
         if (!earlier) continue;
         if (earlier.taskUrl && earlier.missingFiles === 0) return;
         const frozen = await client.request({ method: 'getReview', params: { review: summary.id } }).catch(() => null);
-        if (!frozen) return;
-        setReview((current) => current ?? frozen);
-        setFiling((current) => current ?? earlier);
+        // A review made meanwhile wins: the earlier filing is shown with its own review or not at all.
+        if (!frozen || shown.current.review || shown.current.filing) return;
+        setReview(frozen);
+        setFiling(earlier);
         setNotice('An earlier filing of this review did not finish. File again to finish it: VibeQ gets no second task.');
         return;
       }
@@ -105,6 +117,10 @@ export function Review({ observation: id }: { observation: number }) {
         void restoreUnfinished(found.revision);
       })
       .catch((error: Error) => {
+        // Split into tasks or deleted (an old tab, Back): asking again will not bring it back.
+        if (error instanceof LensError && error.code === 'notFound') {
+          return setProblem('This recording no longer exists: it was split into separate tasks or deleted.');
+        }
         setProblem(error.message);
         retry = setTimeout(() => setLoadAttempt((n) => n + 1), 5000);
       });
@@ -178,14 +194,16 @@ export function Review({ observation: id }: { observation: number }) {
   }, [client, id, transcribing]);
 
   async function freeze() {
-    if (!observation) return;
-    try {
-      // The title and notes are edited on this page: the review takes their latest revision,
-      // after the draft typed in the last moment is saved.
+    if (!observation || freezing) return;
+    setFreezing(true);
+    // The title and notes are edited on this page: the review takes their latest revision, after
+    // the draft typed in the last moment is saved. An autosave or the background title can still
+    // land between that read and the review: then once more, with the revision after it.
+    const attempt = async () => {
       await flushNotes.current?.();
       const latest = await client.request({ method: 'getObservation', params: { id } });
       setObservation(latest);
-      const frozen = await client.request({
+      return client.request({
         method: 'createReview',
         params: {
           observation: observation.id,
@@ -198,12 +216,22 @@ export function Review({ observation: id }: { observation: number }) {
           screenshotsChecked: true,
         },
       });
+    };
+    try {
+      const frozen = await attempt().catch((error: Error) => {
+        if (error instanceof LensError && error.code === 'conflict') return attempt();
+        throw error;
+      });
+      // Before the next render: a reply about the old review that lands meanwhile is ignored.
+      shown.current = { review: frozen, filing: null };
       setReview(frozen);
       // A new revision is not filed yet: the last filing was of the review before it.
       setFiling(null);
       setProblem(null);
     } catch (error) {
       setProblem((error as Error).message);
+    } finally {
+      setFreezing(false);
     }
   }
 
@@ -212,6 +240,7 @@ export function Review({ observation: id }: { observation: number }) {
     setSending(true);
     try {
       const done = await client.request({ method: 'fileReview', params: { review: review.id, assignee: assignee || null } });
+      if (!stillShown(review)) return;
       setFiling(done);
       setProblem(done.missingFiles ? `${done.missingFiles} files did not reach VibeQ; file again to send them.` : null);
       // An agent starts on the whole evidence only: a filing with missing files waits for the retry.
@@ -220,7 +249,7 @@ export function Review({ observation: id }: { observation: number }) {
       // The agent's prompt then links the VibeQ task.
       if (complete && handoff.afterFiling && handoff.ready && !handoff.done) await handoff.handOff(review.id);
     } catch (error) {
-      setProblem(`Not filed: ${(error as Error).message}. Filing again is safe: it never creates a second task.`);
+      if (stillShown(review)) setProblem(`Not filed: ${(error as Error).message}. Filing again is safe: it never creates a second task.`);
     } finally {
       setSending(false);
     }
@@ -230,9 +259,10 @@ export function Review({ observation: id }: { observation: number }) {
     if (!review) return;
     setStarting(true);
     try {
-      setSirvant(await client.request({ method: 'startSirvant', params: { review: review.id } }));
+      const run = await client.request({ method: 'startSirvant', params: { review: review.id } });
+      setSirvant({ review: review.id, run });
     } catch (error) {
-      setProblem(`Filed, but Sirvant did not start: ${(error as Error).message}.`);
+      if (stillShown(review)) setProblem(`Filed, but Sirvant did not start: ${(error as Error).message}.`);
     } finally {
       setStarting(false);
     }
@@ -255,10 +285,12 @@ export function Review({ observation: id }: { observation: number }) {
     if (!review) return;
     setDrafting(agent);
     try {
-      setSuggestion(await client.request({ method: 'investigate', params: { review: review.id, agent } }));
+      const drafted = await client.request({ method: 'investigate', params: { review: review.id, agent } });
+      if (!stillShown(review)) return;
+      setSuggestion(drafted);
       setProblem(null);
     } catch (error) {
-      setProblem((error as Error).message);
+      if (stillShown(review)) setProblem((error as Error).message);
     } finally {
       setDrafting(null);
     }
@@ -266,19 +298,28 @@ export function Review({ observation: id }: { observation: number }) {
 
   /** The draft replaces the notes: a new revision, so this review no longer matches and is redone. */
   async function useDraft() {
-    if (!observation || !suggestion) return;
+    if (!observation || !suggestion || usingDraft) return;
+    // A second click before the first save returns would save on the old revision: a conflict.
+    setUsingDraft(true);
     try {
+      // The notes editor saves on its own: the page's copy of the revision can be old.
+      const latest = await client.request({ method: 'getObservation', params: { id: observation.id } });
       const saved = await client.request({
         method: 'updateObservation',
-        params: { id: observation.id, revision: observation.revision, title: observation.title, notes: suggestion.markdown },
+        params: { id: observation.id, revision: latest.revision, title: latest.title, notes: suggestion.markdown },
       });
       setObservation(saved);
+      // The editor loads the new notes and revision; its old ones would conflict on the next save.
+      setNotesVersion((v) => v + 1);
+      shown.current = { review: null, filing: null };
       setReview(null);
       setFiling(null);
       setSuggestion(null);
       setNotice('Your notes now hold the draft. Check them, then create a new review before you file.');
     } catch (error) {
       setProblem((error as Error).message);
+    } finally {
+      setUsingDraft(false);
     }
   }
 
@@ -286,9 +327,9 @@ export function Review({ observation: id }: { observation: number }) {
     if (!review) return;
     try {
       const done = await client.request({ method: 'exportReview', params: { review: review.id } });
-      setExported(done.folder);
+      if (stillShown(review)) setExported(done.folder);
     } catch (error) {
-      setProblem((error as Error).message);
+      if (stillShown(review)) setProblem((error as Error).message);
     }
   }
 
@@ -391,7 +432,7 @@ export function Review({ observation: id }: { observation: number }) {
                 </ul>
               )}
               <div>
-                <button type="button" className="btn btn-secondary" onClick={useDraft}>
+                <button type="button" className="btn btn-secondary" onClick={useDraft} disabled={usingDraft}>
                   Use as my notes
                 </button>
               </div>
@@ -595,8 +636,8 @@ export function Review({ observation: id }: { observation: number }) {
             </div>
           )}
           <footer className="action-bar">
-            <button type="button" className="btn btn-primary" onClick={freeze} disabled={captures.length === 0}>
-              Create review
+            <button type="button" className="btn btn-primary" onClick={freeze} disabled={captures.length === 0 || freezing}>
+              {freezing ? 'Creating review…' : 'Create review'}
             </button>
           </footer>
         </>

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { LensClient, PROTOCOL_VERSION, type LensError } from '@/lens-client';
-import { originOf, send, type Broadcast, type CaptureResult, type TabStatus } from '@/messages';
+import { NO_ANSWER, originOf, send, type Broadcast, type CaptureResult, type TabStatus } from '@/messages';
 import type { Capture } from '@/protocol/Capture';
 import type { Hello } from '@/protocol/Hello';
 import type { ObservationSummary } from '@/protocol/ObservationSummary';
@@ -93,7 +93,7 @@ export function App() {
     }
     if (id !== null) lastWebTab.current = id;
     setTabId(id);
-    setSite(id === null ? null : await send<TabStatus>({ kind: 'tabStatus', tabId: id }).catch(() => null));
+    setSite(id === null ? null : ((await send<TabStatus>({ kind: 'tabStatus', tabId: id }).catch(() => null)) ?? null));
   }, []);
 
   useEffect(() => {
@@ -185,7 +185,7 @@ export function App() {
   async function capture() {
     if (tabId === null) return;
     setBusy(true);
-    const result = await send<CaptureResult>({ kind: 'capture', tabId, observation: selected });
+    const result = (await send<CaptureResult>({ kind: 'capture', tabId, observation: selected })) ?? NO_ANSWER;
     setBusy(false);
     if (!result.ok) return setProblem(`Capture failed: ${result.error}`);
     setProblem(null);

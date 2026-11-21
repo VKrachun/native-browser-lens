@@ -3,9 +3,13 @@ import { LensError, type LensClient } from '@/lens-client';
 import type { Observation } from '@/protocol/Observation';
 import { joinNotes, splitNotes } from '@/findings';
 
-/** Tags as chips: Enter or a comma adds one, × or Backspace in an empty field removes one. */
-function TagChips({ tags, onChange }: { tags: string[]; onChange: (tags: string[]) => void }) {
-  const [draft, setDraft] = useState('');
+/**
+ * Tags as chips: Enter, a comma or leaving the field adds one, × or Backspace in an empty field
+ * removes one. A tag still being typed is not saved: `onDraft` tells the notes so they say it.
+ */
+function TagChips({ tags, onChange, onDraft }: { tags: string[]; onChange: (tags: string[]) => void; onDraft: (typing: boolean) => void }) {
+  const [draft, setDraftText] = useState('');
+  const setDraft = (text: string) => (setDraftText(text), onDraft(text.trim() !== ''));
   const add = () => {
     const tag = draft.trim();
     if (tag && !tags.includes(tag)) onChange([...tags, tag]);
@@ -67,6 +71,8 @@ export function Notes({
   const [notes, setNotes] = useState('');
   const [tags, setTags] = useState('');
   const [state, setState] = useState<SaveState>({ kind: 'saved' });
+  /** A tag typed but not added yet: unsaved until Enter, a comma or leaving the field. */
+  const [typingTag, setTypingTag] = useState(false);
   const saving = useRef(false);
   const tagList = tags.split(',').map((t) => t.trim()).filter(Boolean);
   const dirty =
@@ -175,7 +181,7 @@ export function Notes({
       }
     };
     const leave = (event: BeforeUnloadEvent) => {
-      if (dirty) event.preventDefault();
+      if (dirty || typingTag) event.preventDefault();
     };
     window.addEventListener('keydown', keys);
     window.addEventListener('beforeunload', leave);
@@ -183,7 +189,7 @@ export function Notes({
       window.removeEventListener('keydown', keys);
       window.removeEventListener('beforeunload', leave);
     };
-  }, [save, dirty]);
+  }, [save, dirty, typingTag]);
 
   if (!record) return state.kind === 'failed' ? <p role="alert" className="notice">{state.message}</p> : null;
   const editing = (s: SaveState) => (s.kind === 'conflict' ? s : ({ kind: 'editing' } as SaveState));
@@ -203,10 +209,10 @@ export function Notes({
         onChange={(e) => (setTitle(e.target.value.replace(/\n/g, ' ')), setState(editing))}
         onKeyDown={(e) => e.key === 'Enter' && e.preventDefault()}
       />
-      <TagChips tags={tagList} onChange={setTagList} />
+      <TagChips tags={tagList} onChange={setTagList} onDraft={setTypingTag} />
       <div className="notes-head">
         <span className="small muted" role="status" aria-label="Notes status">
-          {state.kind === 'saved' && 'Saved'}
+          {state.kind === 'saved' && (typingTag ? 'Press Enter to add the tag' : 'Saved')}
           {state.kind === 'editing' && (title.trim() ? 'Unsaved changes' : 'A title is required')}
           {state.kind === 'saving' && 'Saving…'}
         </span>

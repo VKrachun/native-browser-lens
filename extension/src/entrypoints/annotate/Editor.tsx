@@ -2,7 +2,7 @@ import type Konva from 'konva';
 import { getStroke } from 'perfect-freehand';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Arrow, Image as KonvaImage, Layer, Line, Rect, Stage } from 'react-konva';
-import { LensClient } from '@/lens-client';
+import { LensClient, captureProblem } from '@/lens-client';
 import type { Broadcast } from '@/messages';
 import type { Capture } from '@/protocol/Capture';
 import type { Point } from '@/protocol/Point';
@@ -48,7 +48,7 @@ export function Editor({ capture: captureId }: { capture: number }) {
         img.onload = () => setImage(img);
         img.src = url;
       })
-      .catch((error: Error) => setProblem(error.message));
+      .catch((error: Error) => setProblem(captureProblem(error)));
     const resize = () => setWidth(window.innerWidth - 64);
     window.addEventListener('resize', resize);
     return () => {

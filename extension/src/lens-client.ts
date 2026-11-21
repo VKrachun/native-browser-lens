@@ -89,6 +89,13 @@ export class LensError extends Error {
   }
 }
 
+/** A capture that is gone (its recording was split into tasks or deleted) says so in words. */
+export function captureProblem(error: Error): string {
+  return error instanceof LensError && error.code === 'notFound'
+    ? 'This capture no longer exists: its recording was split into separate tasks or deleted.'
+    : error.message;
+}
+
 /**
  * A native messaging port to the shim, which relays to `lensd`. When the app restarts (an update
  * does), the requests in flight fail and the next request opens a new port, which starts the app

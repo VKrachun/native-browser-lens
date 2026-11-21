@@ -214,12 +214,11 @@ fn render(mut command: Command, staging: &Path, limit: Duration) -> io::Result<(
     }))
 }
 
-/// One sequential transfer per native connection. Closing the port drops its temporary file.
+/// One sequential transfer per review and capture on a native connection. Closing the port drops
+/// its temporary file.
 pub struct Transfer {
     file: fs::File,
     _folder: tempfile::TempDir,
-    pub review: i64,
-    pub capture: Option<i64>,
 }
 
 impl Transfer {
@@ -235,8 +234,6 @@ impl Transfer {
         Ok(Self {
             file: fs::File::open(path)?,
             _folder: folder,
-            review: review.id,
-            capture,
         })
     }
 

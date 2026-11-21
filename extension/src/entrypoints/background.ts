@@ -562,7 +562,18 @@ export default defineBackground(() => {
     return reply;
   }
 
-  async function startSession(tabId: number, voice = false): Promise<SessionStart> {
+  // A start in progress per tab: a second start (two panels, a double click) gets the same answer
+  // instead of starting the microphone again, which would cancel the first start's voice.
+  const starting = new Map<number, Promise<SessionStart>>();
+  function startSession(tabId: number, voice = false): Promise<SessionStart> {
+    const running = starting.get(tabId);
+    if (running) return running;
+    const start = beginSession(tabId, voice).finally(() => starting.delete(tabId));
+    starting.set(tabId, start);
+    return start;
+  }
+
+  async function beginSession(tabId: number, voice: boolean): Promise<SessionStart> {
     if (buffer.mode(tabId) === undefined) return { ok: false, error: 'Lens does not collect on this site yet.' };
     if (voice && !voiced.has(tabId)) {
       if (voiced.size > 0) return { ok: false, error: 'The microphone already records a session in another tab.' };
