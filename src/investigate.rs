@@ -710,7 +710,29 @@ pub fn program(name: &str) -> Option<PathBuf> {
     folders
         .iter()
         .flat_map(|f| names.iter().map(move |n| f.join(n)))
-        .find(|p| p.is_file())
+        .find(|p| p.is_file() && runnable(p))
+}
+
+/// A file the system can start. A package manager that skipped its install step leaves a stub
+/// without `#!` (Bun's Claude Code does): starting it fails with "Exec format error", so the
+/// next copy on the search path is used instead.
+fn runnable(path: &Path) -> bool {
+    if cfg!(windows) {
+        return true;
+    }
+    let mut start = [0u8; 4];
+    let read = std::fs::File::open(path).and_then(|mut f| std::io::Read::read(&mut f, &mut start));
+    match read {
+        Ok(n) if n >= 2 && start.starts_with(b"#!") => true,
+        Ok(4) => matches!(
+            start,
+            [0x7f, b'E', b'L', b'F']
+                | [0xfe, 0xed, 0xfa, 0xce | 0xcf]
+                | [0xce | 0xcf, 0xfa, 0xed, 0xfe]
+                | [0xca, 0xfe, 0xba, 0xbe]
+        ),
+        _ => false,
+    }
 }
 
 /// Where Node version managers keep their programs. A login service (launchd on macOS) gets a
@@ -719,31 +741,42 @@ fn version_managers() -> Vec<PathBuf> {
     let Some(home) = directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf()) else {
         return Vec::new();
     };
+    let mise = std::env::var_os("MISE_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".local/share/mise"));
     let mut folders = vec![
         home.join(".volta/bin"),
         home.join(".asdf/shims"),
         home.join(".local/share/fnm/aliases/default/bin"),
         home.join(".fnm/aliases/default/bin"),
-        home.join(".bun/bin"),
     ];
-    // nvm: the newest installed Node.
-    if let Ok(versions) = std::fs::read_dir(home.join(".nvm/versions/node")) {
-        let mut found: Vec<PathBuf> = versions.flatten().map(|e| e.path().join("bin")).collect();
-        found.sort_by_key(|p| {
-            p.parent()
-                .and_then(|v| v.file_name())
-                .and_then(|n| n.to_str())
-                .map(|n| {
-                    n.trim_start_matches('v')
-                        .split('.')
-                        .map(|part| part.parse::<u64>().unwrap_or(0))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
-        });
-        folders.extend(found.into_iter().rev());
-    }
+    // nvm and mise: the newest installed Node first.
+    folders.extend(newest_first(&home.join(".nvm/versions/node")));
+    folders.extend(newest_first(&mise.join("installs/node")));
+    folders.extend([mise.join("shims"), home.join(".bun/bin")]);
     folders
+}
+
+/// The `bin` folders of the Node versions in `root`, the newest version first.
+fn newest_first(root: &Path) -> Vec<PathBuf> {
+    let Ok(versions) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = versions.flatten().map(|e| e.path().join("bin")).collect();
+    found.sort_by_key(|p| {
+        p.parent()
+            .and_then(|v| v.file_name())
+            .and_then(|n| n.to_str())
+            .map(|n| {
+                n.trim_start_matches('v')
+                    .split('.')
+                    .map(|part| part.parse::<u64>().unwrap_or(0))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    });
+    found.reverse();
+    found
 }
 
 /// PATH for a program Lens found: its own folder first, then the folders `program` searches, so a
@@ -983,6 +1016,26 @@ impl Drop for Workspace {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_files_the_system_can_start_count_as_programs() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = |name: &str, bytes: &[u8]| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path
+        };
+        // Bun's Claude Code when its install step did not run: no #!, so "Exec format error".
+        assert!(!runnable(&file(
+            "stub",
+            b"echo \"Error: claude native binary not installed.\" >&2\nexit 1\n"
+        )));
+        assert!(!runnable(&file("empty", b"")));
+        assert!(runnable(&file("script", b"#!/usr/bin/env node\n")));
+        assert!(runnable(&file("elf", b"\x7fELF\x02\x01")));
+        assert!(runnable(&file("macho", b"\xcf\xfa\xed\xfe\x07")));
+        assert!(runnable(&file("universal", b"\xca\xfe\xba\xbe\x00")));
+    }
 
     #[test]
     fn npm_cmd_files_run_their_script_with_node() {
