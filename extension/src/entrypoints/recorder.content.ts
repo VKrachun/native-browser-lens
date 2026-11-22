@@ -12,7 +12,8 @@ const SEND_MS = 1000;
 /** Elements named for marks; the daemon keeps at most 800. */
 const MAX_ELEMENTS = 800;
 
-export type RecorderRequest = { kind: 'lens-prepare' } | { kind: 'lens-snapshot' };
+/** lens-ping: the background asks whether a recorder runs in this page; it answers true. */
+export type RecorderRequest = { kind: 'lens-prepare' } | { kind: 'lens-snapshot' } | { kind: 'lens-ping' };
 /** What the page holds for a capture: recording and steps not sent yet, and what is on screen. */
 export interface Prepared {
   recording: eventWithTime[];
@@ -102,8 +103,12 @@ export default defineContentScript({
     }
     let retired = false;
 
-    function listen(message: RecorderRequest, _sender: unknown, reply: (prepared: Prepared) => void) {
+    function listen(message: RecorderRequest, _sender: unknown, reply: (answer: Prepared | true) => void) {
       if (retired) return;
+      if (message?.kind === 'lens-ping') {
+        reply(true);
+        return;
+      }
       if (message?.kind === 'lens-snapshot') {
         // A session starts: its replay begins with a fresh copy of the page.
         // Before DOMContentLoaded rrweb has no copy yet, and its first one is fresh anyway.

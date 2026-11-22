@@ -516,7 +516,8 @@
 }
 .record-live {
   display: grid;
-  grid-template-columns: auto auto 1fr auto;
+  /* The fifth column holds Discard recording, after a Stop that could not save. */
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 8px;
   padding: 8px 8px 8px 12px;

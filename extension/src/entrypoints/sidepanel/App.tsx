@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { LensClient, PROTOCOL_VERSION, type LensError } from '@/lens-client';
-import { NO_ANSWER, originOf, send, type Broadcast, type CaptureResult, type TabStatus } from '@/messages';
+import { NO_ANSWER, originOf, send, sitePattern, type Broadcast, type CaptureResult, type TabStatus } from '@/messages';
 import type { Capture } from '@/protocol/Capture';
 import type { Hello } from '@/protocol/Hello';
 import type { ObservationSummary } from '@/protocol/ObservationSummary';
@@ -165,7 +165,7 @@ export function App() {
     // The permission prompt must open inside the click, before any other await. The site only:
     // Firefox's screenshot access (all sites) is its own prompt at Record and Capture (see
     // useScreenAccess), so refusing that one never blocks adding the site.
-    const granted = await browser.permissions.request({ origins: [`${origin}/*`] });
+    const granted = await browser.permissions.request({ origins: [sitePattern(origin)] });
     if (!granted) return setProblem(`Lens may not read ${origin}.`);
     try {
       if (site.projectId === null) {

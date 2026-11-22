@@ -1037,10 +1037,7 @@ impl Daemon {
                 Reply::Agents(
                     [investigate::Agent::Codex, investigate::Agent::Claude]
                         .into_iter()
-                        .map(|agent| investigate::AgentInfo {
-                            agent,
-                            state: investigate::status(agent),
-                        })
+                        .map(investigate::info)
                         .collect(),
                 )
             }
@@ -3179,10 +3176,13 @@ mod tests {
             })
             .filter(|t| crate::attachments::tools_ready(t));
         let Some(tools) = tools else { return };
+        // The tools folder is linked into the test's Lens home on Unix only.
+        if cfg!(not(unix)) {
+            let _ = tools;
+            return;
+        }
         #[cfg(unix)]
         std::os::unix::fs::symlink(&tools, daemon.paths.data.join("video-tools")).unwrap();
-        #[cfg(windows)]
-        return;
         let reply = ask(&daemon, &request(2));
         let capture = &reply["result"]["data"];
         let png = daemon

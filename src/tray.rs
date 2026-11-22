@@ -11,6 +11,9 @@ use std::time::Duration;
 
 const POLL: Duration = Duration::from_secs(5);
 
+/// A check the person started from the menu runs now: the menu says so instead of the button.
+static CHECKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Snapshot {
     pub running: bool,
@@ -21,6 +24,12 @@ pub struct Snapshot {
     pub automatic: bool,
     pub managed: bool,
     pub available: Option<String>,
+    /// Whole minutes since the last update check, so the menu's "checked … ago" stays current.
+    pub checked_minutes_ago: Option<i64>,
+    pub update_error: Option<String>,
+    pub checking: bool,
+    /// Browsers used this week with an extension older than the app, as "chromium 0.12.14".
+    pub older_extensions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -28,6 +37,7 @@ pub enum Action {
     TogglePause,
     OpenSetup,
     ToggleAutomatic,
+    CheckUpdates,
     UpdateNow,
     OpenLogs,
     Start,
@@ -52,13 +62,74 @@ pub fn snapshot(paths: &Paths) -> Snapshot {
         let required = status.steps.iter().filter(|s| s.mark != Mark::Optional);
         snapshot.setup_required = required.clone().count();
         snapshot.setup_done = required.filter(|s| s.mark == Mark::Done).count();
+        snapshot.older_extensions = crate::setup::older_extensions(&status);
     }
     if let Ok(Reply::Updates(updates)) = client.call(Request::GetUpdates) {
         snapshot.automatic = updates.automatic;
         snapshot.managed = updates.managed_by.is_some();
         snapshot.available = updates.available;
+        snapshot.checked_minutes_ago = updates
+            .checked_at
+            .map(|at| (crate::daemon::now_ms() - at).max(0) / 60_000);
+        snapshot.update_error = updates.last_error;
     }
+    snapshot.checking = CHECKING.load(std::sync::atomic::Ordering::Relaxed);
     snapshot
+}
+
+/// The menu closes on a click, so what a check or an update found is told in a notification.
+fn notify(text: &str) {
+    let mut command = if cfg!(target_os = "macos") {
+        let quoted = text.replace('\\', "\\\\").replace('"', "\\\"");
+        let mut c = std::process::Command::new("osascript");
+        c.args([
+            "-e",
+            &format!("display notification \"{quoted}\" with title \"Sirv Lens\""),
+        ]);
+        c
+    } else if cfg!(windows) {
+        // ponytail: no toast on Windows yet; the menu's status line shows the result there.
+        return;
+    } else {
+        let mut c = std::process::Command::new("notify-send");
+        c.args(["--app-name=Sirv Lens", "Sirv Lens", text]);
+        c
+    };
+    let _ = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
+/// What a finished check says, in the notification.
+fn check_result(reply: io::Result<Reply>, current: &str) -> String {
+    match reply {
+        Ok(Reply::Updates(u)) => match u.available {
+            Some(version) => {
+                format!("Lens {version} is available. Choose Update to {version} now in the menu.")
+            }
+            None => format!("Lens {current} is up to date."),
+        },
+        Ok(_) => "The update check gave no answer.".into(),
+        Err(e) => format!("The update check failed: {e}"),
+    }
+}
+
+/// The line under the update item: when Lens last looked, or why it could not.
+fn update_status(now: &Snapshot) -> Option<String> {
+    if now.checking || now.available.is_some() {
+        return None;
+    }
+    if let Some(error) = &now.update_error {
+        return Some(format!("Last check failed: {error}"));
+    }
+    Some(match now.checked_minutes_ago? {
+        0 => "Up to date · checked just now".into(),
+        m @ 1..60 => format!("Up to date · checked {m} min ago"),
+        m @ 60..1440 => format!("Up to date · checked {} h ago", m / 60),
+        m => format!("Up to date · checked {} days ago", m / 1440),
+    })
 }
 
 pub fn perform(paths: &Paths, action: Action, now: &Snapshot) {
@@ -73,11 +144,33 @@ pub fn perform(paths: &Paths, action: Action, now: &Snapshot) {
             enabled: !now.automatic,
         })
         .map(drop),
+        Action::CheckUpdates => {
+            if CHECKING.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
+            let (paths, current) = (paths.clone(), now.version.clone());
+            std::thread::spawn(move || {
+                let reply = Client::attach(&paths)
+                    .and_then(|mut c| c.call(Request::CheckUpdates).map_err(io::Error::other));
+                CHECKING.store(false, std::sync::atomic::Ordering::Relaxed);
+                notify(&check_result(reply, &current));
+            });
+            Ok(())
+        }
         // Minutes at most; the daemon restarts itself when it installs one.
         Action::UpdateNow => {
             let paths = paths.clone();
+            if let Some(version) = &now.available {
+                notify(&format!(
+                    "Installing Lens {version}. Lens restarts when it is done."
+                ));
+            }
             std::thread::spawn(move || {
-                let _ = Client::attach(&paths).map(|mut c| c.call(Request::UpdateNow));
+                let reply = Client::attach(&paths)
+                    .and_then(|mut c| c.call(Request::UpdateNow).map_err(io::Error::other));
+                if let Err(e) = reply {
+                    notify(&format!("The update did not install: {e}"));
+                }
             });
             Ok(())
         }
@@ -168,6 +261,12 @@ pub fn menu(now: &Snapshot) -> Vec<Option<Item>> {
         },
         Action::OpenSetup,
     ));
+    if !now.older_extensions.is_empty() {
+        items.push(text(format!(
+            "Older extension in {}",
+            now.older_extensions.join(", ")
+        )));
+    }
     items.push(None);
     items.push(check("Pause collection", Action::TogglePause, now.paused));
     if !now.managed {
@@ -176,15 +275,14 @@ pub fn menu(now: &Snapshot) -> Vec<Option<Item>> {
             Action::ToggleAutomatic,
             now.automatic,
         ));
-        let update = match &now.available {
-            Some(version) => format!("Update to {version} now"),
-            None => "Check for updates now".into(),
-        };
-        items.push(Some(Item {
-            label: update,
-            action: Some(Action::UpdateNow),
-            checked: None,
-        }));
+        items.push(match &now.available {
+            Some(version) => button(&format!("Update to {version} now"), Action::UpdateNow),
+            None if now.checking => text("Checking for updates…".into()),
+            None => button("Check for updates", Action::CheckUpdates),
+        });
+        if let Some(status) = update_status(now) {
+            items.push(text(status));
+        }
     }
     items.push(button("Open log folder", Action::OpenLogs));
     items.push(None);
@@ -578,7 +676,39 @@ mod tests {
             .map(|i| i.label)
             .collect();
         assert!(labels.contains(&"Finish setting up (2 of 4 done)…".to_string()));
-        assert!(labels.contains(&"Check for updates now".to_string()));
+        assert!(labels.contains(&"Check for updates".to_string()));
+
+        // The click closes the menu: the menu then says what the check found, and when.
+        let labels = |now: &Snapshot| -> Vec<String> {
+            menu(now).into_iter().flatten().map(|i| i.label).collect()
+        };
+        let checked = Snapshot {
+            checked_minutes_ago: Some(3),
+            ..running.clone()
+        };
+        assert!(labels(&checked).contains(&"Up to date · checked 3 min ago".to_string()));
+        let checking = Snapshot {
+            checking: true,
+            ..checked.clone()
+        };
+        assert!(labels(&checking).contains(&"Checking for updates…".to_string()));
+        assert!(
+            !menu(&checking)
+                .into_iter()
+                .flatten()
+                .any(|i| i.action == Some(Action::CheckUpdates))
+        );
+        let failed = Snapshot {
+            update_error: Some("offline".into()),
+            ..checked.clone()
+        };
+        assert!(labels(&failed).contains(&"Last check failed: offline".to_string()));
+        let newer = Snapshot {
+            available: Some("9.9.9".into()),
+            ..checked
+        };
+        assert!(labels(&newer).contains(&"Update to 9.9.9 now".to_string()));
+        assert!(!labels(&newer).iter().any(|l| l.starts_with("Up to date")));
 
         let managed = Snapshot {
             managed: true,

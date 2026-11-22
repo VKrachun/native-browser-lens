@@ -100,6 +100,9 @@ export function RecordControls({
   const spoolFor = useRef<number | null>(null);
   const spoolFailed = useRef(false);
   const running = site?.session ?? null;
+  /** The recording whose Stop failed: it can then be discarded, after a second click to confirm. */
+  const [failedStop, setFailedStop] = useState<number | null>(null);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
   // With the voice on, the speech model must be there to write it down: offer it here, once.
   const [speech, setSpeech] = useState<SpeechStatus | null>(null);
   const downloading = speech?.model.state === 'downloading';
@@ -206,6 +209,7 @@ export function RecordControls({
       ]);
       const startedAt = kept?.startedAt ?? spoken?.startedAt;
       if (!result.ok) {
+        setFailedStop(session);
         // The background keeps the session; the voice waits here for Stop again.
         if (wav && startedAt !== undefined) {
           keptVoice.current = { wav, startedAt, tab: tabId, session };
@@ -219,6 +223,7 @@ export function RecordControls({
         return onProblem(`The recording was not saved: ${result.error}`);
       }
       if (kept) keptVoice.current = null;
+      setFailedStop(null);
       try {
         if (wav && startedAt !== undefined) {
           const audio = await client.upload(wav, 'audio/wav');
@@ -242,6 +247,27 @@ export function RecordControls({
     }
   }
 
+  /** The way out when Stop cannot save: the recording and its voice go, the tab collects on. */
+  async function discard() {
+    if (tabId === null || running === null) return;
+    if (!confirmDiscard) return setConfirmDiscard(true);
+    setBusy(true);
+    try {
+      if (microphoneTab.current === tabId) {
+        microphone.current?.cancel();
+        microphone.current = microphoneTab.current = null;
+      }
+      keptVoice.current = null;
+      await send({ kind: 'discardSession', tabId });
+      await unspool(tabId, running).catch(() => {});
+      setFailedStop(null);
+      onProblem(null);
+    } finally {
+      setConfirmDiscard(false);
+      setBusy(false);
+    }
+  }
+
   if (running !== null) {
     return (
       <div className="record-live" role="status" aria-label="Recording">
@@ -250,15 +276,31 @@ export function RecordControls({
         <span className="small muted record-what">
           {microphone.current || keptVoice.current || site?.voice ? 'Screen, steps and your voice' : 'Screen and steps'}
         </span>
+        {failedStop === running && (
+          <button type="button" className="btn btn-ghost" onClick={() => void discard()} disabled={busy}>
+            {confirmDiscard ? 'Discard it for good' : 'Discard recording'}
+          </button>
+        )}
         <button type="button" className="btn btn-danger" onClick={() => void stop()} disabled={busy}>
           <StopIcon />
-          {busy ? 'Saving…' : 'Stop'}
+          {busy ? 'Saving…' : failedStop === running ? 'Stop again' : 'Stop'}
         </button>
       </div>
     );
   }
   return (
     <div className="record-start">
+      {site?.recorder === false && tabId !== null && (
+        <div role="note" className="notice" data-tone="warning">
+          <span>
+            Reload this page to record it: it was open before Lens could read this site, so the browser keeps the
+            recorder out until it loads again.{' '}
+            <button type="button" className="btn btn-ghost btn-sm" onClick={() => void browser.tabs.reload(tabId)}>
+              Reload
+            </button>
+          </span>
+        </div>
+      )}
       <label className="check">
         <input type="checkbox" checked={voice} onChange={(e) => setVoice(e.target.checked)} />
         <span>

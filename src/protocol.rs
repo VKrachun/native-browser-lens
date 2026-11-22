@@ -1381,6 +1381,8 @@ pub enum ErrorCode {
     TooLarge,
     Storage,
     Internal,
+    /// The person quit Lens: the browser does not start it again (the shim says so, as id 0).
+    Quit,
 }
 
 impl ProtocolError {

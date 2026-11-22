@@ -13,8 +13,10 @@ use std::time::{Duration, Instant};
 pub fn run(paths: &Paths) -> io::Result<()> {
     // Extension pages ask the app every few seconds: after Quit, starting it here would undo the Quit.
     let connected = if paths.quit_marker().exists() {
-        ipc::connect(paths)
-            .map_err(|_| io::Error::other("Lens was quit; open Sirv Lens to start it"))
+        match ipc::connect(paths) {
+            Ok(stream) => Ok(stream),
+            Err(_) => return say_quit(),
+        }
     } else {
         connect_or_start(paths)
     };
@@ -30,6 +32,21 @@ pub fn run(paths: &Paths) -> io::Result<()> {
     });
     relay(&mut &*stream, &mut io::stdout().lock(), MAX_REPLY_BYTES)
         .inspect_err(|e| log(paths, &format!("daemon to browser: {e}")))
+}
+
+/// Tells the page why there is no app: one error frame with id 0, which the extension reads as
+/// "the person quit Lens". Expected, so it is not logged: the pages ask every few seconds.
+fn say_quit() -> io::Result<()> {
+    use crate::protocol::{ErrorCode, Outcome, ProtocolError, ReplyFrame};
+    let frame = ReplyFrame {
+        id: 0,
+        outcome: Outcome::Error {
+            error: ProtocolError::new(ErrorCode::Quit, "Lens was quit; open Sirv Lens to start it"),
+        },
+    };
+    let bytes = serde_json::to_vec(&frame).expect("frames serialize");
+    write_frame(&mut io::stdout().lock(), &bytes)?;
+    io::stdout().flush()
 }
 
 /// Browsers discard a host's stderr (Chrome on Windows always), so errors go to `host.log` in the

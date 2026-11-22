@@ -2,4 +2,16 @@
 import type { Agent } from "./Agent";
 import type { AgentState } from "./AgentState";
 
-export type AgentInfo = { agent: Agent, state: AgentState, };
+export type AgentInfo = { agent: Agent, state: AgentState, 
+/**
+ * The program Lens runs for this agent.
+ */
+binary: string | null, 
+/**
+ * Copies Lens skipped because the system cannot start them (a broken install).
+ */
+broken: Array<string>, 
+/**
+ * Why the sign-in check failed, when the program did not answer it.
+ */
+problem: string | null, };

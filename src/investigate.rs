@@ -46,6 +46,12 @@ pub enum AgentState {
 pub struct AgentInfo {
     pub agent: Agent,
     pub state: AgentState,
+    /// The program Lens runs for this agent.
+    pub binary: Option<String>,
+    /// Copies Lens skipped because the system cannot start them (a broken install).
+    pub broken: Vec<String>,
+    /// Why the sign-in check failed, when the program did not answer it.
+    pub problem: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -115,15 +121,48 @@ fn selection(review: &Review) -> Value {
 }
 
 pub fn status(agent: Agent) -> AgentState {
-    let Some(binary) = find(agent) else {
-        return AgentState::Missing;
+    info(agent).state
+}
+
+/// The agent's state, the program behind it, and broken copies the search skipped.
+pub fn info(agent: Agent) -> AgentInfo {
+    let name = match agent {
+        Agent::Codex => "codex",
+        Agent::Claude => "claude",
     };
+    let shown = |p: &Path| p.display().to_string();
+    let mut info = AgentInfo {
+        agent,
+        state: AgentState::Missing,
+        binary: None,
+        broken: broken(name).iter().map(|p| shown(p)).collect(),
+        problem: None,
+    };
+    let Some(binary) = find(agent) else {
+        return info;
+    };
+    info.binary = Some(shown(&binary));
     let arguments: &[&str] = match agent {
         Agent::Codex => &["login", "status"],
         Agent::Claude => &["auth", "status"],
     };
-    let Ok(output) = run(&binary, arguments, None, None, Duration::from_secs(10)) else {
-        return AgentState::SignIn;
+    // Codex 0.171 prints "Logged in using ChatGPT" to stderr: without it Codex never read as ready.
+    // Claude's answer is JSON on stdout, which a warning on stderr would break.
+    let stderr = agent == Agent::Codex;
+    let output = match run_with(
+        &binary,
+        arguments,
+        None,
+        None,
+        Duration::from_secs(10),
+        stderr,
+    ) {
+        Ok(output) => output,
+        Err(e) => {
+            info.state = AgentState::SignIn;
+            info.problem = Some(e);
+            return info;
+        }
     };
     let text = String::from_utf8_lossy(&output);
     let signed_in = match agent {
@@ -131,11 +170,12 @@ pub fn status(agent: Agent) -> AgentState {
         Agent::Claude => serde_json::from_str::<Value>(&text)
             .is_ok_and(|v| v["loggedIn"] == true && v["authMethod"] == "claude.ai"),
     };
-    if signed_in {
+    info.state = if signed_in {
         AgentState::Ready
     } else {
         AgentState::SignIn
-    }
+    };
+    info
 }
 
 pub fn investigate(
@@ -688,6 +728,21 @@ fn find(agent: Agent) -> Option<PathBuf> {
 /// A program on PATH or in the usual folders that installers put CLIs in. A daemon started by the
 /// system may have a short PATH, so the folders are searched as well.
 pub fn program(name: &str) -> Option<PathBuf> {
+    candidates(name).into_iter().find(|p| runnable(p))
+}
+
+/// Copies of a program the search found but skipped, as the system cannot start them.
+pub fn broken(name: &str) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = candidates(name)
+        .into_iter()
+        .filter(|p| !runnable(p))
+        .collect();
+    found.dedup();
+    found
+}
+
+/// Every file of that name in the searched folders, in search order.
+fn candidates(name: &str) -> Vec<PathBuf> {
     let home = directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf());
     let mut folders: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).collect())
@@ -710,7 +765,8 @@ pub fn program(name: &str) -> Option<PathBuf> {
     folders
         .iter()
         .flat_map(|f| names.iter().map(move |n| f.join(n)))
-        .find(|p| p.is_file() && runnable(p))
+        .filter(|p| p.is_file())
+        .collect()
 }
 
 /// A file the system can start. A package manager that skipped its install step leaves a stub
@@ -934,6 +990,18 @@ fn run(
     cwd: Option<&Path>,
     timeout: Duration,
 ) -> Result<Vec<u8>, String> {
+    run_with(binary, arguments, input, cwd, timeout, false)
+}
+
+/// `run`; with `stderr`, the error stream follows the output (Codex prints its login status there).
+fn run_with(
+    binary: &Path,
+    arguments: &[&str],
+    input: Option<&[u8]>,
+    cwd: Option<&Path>,
+    timeout: Duration,
+    stderr: bool,
+) -> Result<Vec<u8>, String> {
     let mut command = command(binary);
     command
         .args(arguments)
@@ -947,7 +1015,11 @@ fn run(
             Stdio::null()
         })
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(if stderr {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
@@ -968,6 +1040,15 @@ fn run(
             .read_to_end(&mut output);
         output
     });
+    let errors = child.stderr.take().map(|mut stream| {
+        std::thread::spawn(move || {
+            let mut output = Vec::new();
+            let _ = (&mut stream)
+                .take(MAX_OUTPUT_BYTES as u64)
+                .read_to_end(&mut output);
+            output
+        })
+    });
     let deadline = Instant::now() + timeout;
     loop {
         if child.try_wait().map_err(|e| e.to_string())?.is_some() {
@@ -980,7 +1061,10 @@ fn run(
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    let output = reader.join().unwrap_or_default();
+    let mut output = reader.join().unwrap_or_default();
+    if let Some(errors) = errors {
+        output.extend(errors.join().unwrap_or_default());
+    }
     if output.len() > MAX_OUTPUT_BYTES {
         return Err("the agent's output exceeded 4 MiB; nothing changed".into());
     }

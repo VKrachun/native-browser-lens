@@ -7,6 +7,7 @@ import { LensClient } from '@/lens-client';
 import { clientInfo } from '@/identity';
 import {
   originOf,
+  sitePattern,
   type BackgroundRequest,
   type Broadcast,
   type CaptureResult,
@@ -151,7 +152,7 @@ export default defineBackground(() => {
   const projectFor = (origin: string | null) =>
     origin ? projects.find((p) => p.enabled && p.origins.includes(origin)) : undefined;
   const permitted = (origin: string | null) =>
-    origin ? browser.permissions.contains({ origins: [`${origin}/*`] }) : Promise.resolve(false);
+    origin ? browser.permissions.contains({ origins: [sitePattern(origin)] }) : Promise.resolve(false);
 
   const queues = new Map<number, Promise<void>>();
   /** Done when the recordings of an earlier worker are restored (set at the end of this script). */
@@ -432,7 +433,18 @@ export default defineBackground(() => {
       projectId: project?.id ?? null,
       permitted: await permitted(origin),
       mode: buffer.mode(tabId) ?? null,
+      recorder: buffer.mode(tabId) === undefined ? null : await recorderRuns(tabId),
     };
+  }
+
+  /** Whether the tab's recorder answers. A page still loading gets the benefit of the doubt. */
+  async function recorderRuns(tabId: number): Promise<boolean> {
+    const tab = await browser.tabs.get(tabId).catch(() => null);
+    if (tab?.status === 'loading') return true;
+    return Promise.race([
+      browser.tabs.sendMessage(tabId, { kind: 'lens-ping' }).then((answer) => answer === true, () => false),
+      new Promise<boolean>((done) => setTimeout(() => done(true), 1000)),
+    ]);
   }
 
   /**
@@ -606,6 +618,23 @@ export default defineBackground(() => {
     return { ok: true, startedAt };
   }
 
+  /** Ends the tab's recording without saving it; the tab goes on collecting as before Record. */
+  async function discardSession(tabId: number): Promise<{ ok: true }> {
+    const session = sessions.get(tabId);
+    if (session === undefined) return { ok: true };
+    dropEvidence(tabId, session);
+    if (!import.meta.env.FIREFOX) void unspool(tabId, session);
+    sessions.delete(tabId);
+    restored.delete(tabId);
+    offProject.delete(tabId);
+    keptVoice.delete(tabId);
+    holdAll(tabId, null);
+    await endMicrophone(tabId, 'mic-cancel');
+    checkpoint();
+    void broadcast({ kind: 'tabChanged', tabId });
+    return { ok: true };
+  }
+
   /** The voice of a Stop that the app did not take: the next Stop saves it with the recording. */
   const keptVoice = new Map<number, Spoken | null>();
   /** The voice an earlier worker kept for this recording's Stop again (Chrome). */
@@ -721,7 +750,9 @@ export default defineBackground(() => {
     const work = ready.then((): Promise<unknown> =>
       message.kind === 'capture'
         ? capture(message.tabId, message.observation)
-        : message.kind === 'tabStatus'
+        : message.kind === 'discardSession'
+          ? discardSession(message.tabId)
+          : message.kind === 'tabStatus'
           ? status(message.tabId)
           : message.kind === 'lensReachable'
             ? client()

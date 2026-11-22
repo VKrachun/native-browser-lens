@@ -117,6 +117,11 @@ export class LensClient {
   private open(): Browser.runtime.Port {
     const port = browser.runtime.connectNative(HOST_NAME);
     port.onMessage.addListener((frame: ReplyFrame) => {
+      // Id 0 answers no request: the host says why it ends (code 'quit': the person quit Lens).
+      if (frame.id === 0 && frame.status === 'error') {
+        if (this.port === port) this.fail(new LensError(frame.error.code, frame.error.message));
+        return;
+      }
       const waiter = this.pending.get(frame.id);
       if (!waiter) return;
       this.pending.delete(frame.id);

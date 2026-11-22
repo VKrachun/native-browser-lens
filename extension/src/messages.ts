@@ -8,6 +8,8 @@ export type BackgroundRequest =
   /** `voice`: Chrome records the microphone in the background's offscreen page. */
   | { kind: 'startSession'; tabId: number; voice?: boolean }
   | { kind: 'stopSession'; tabId: number }
+  /** Ends the recording without saving it: the way out when Stop cannot save it. */
+  | { kind: 'discardSession'; tabId: number }
   | { kind: 'tabStatus'; tabId: number }
   | { kind: 'projectsChanged' }
   /** Whether the background's own connection to the app answers: true or false. */
@@ -48,6 +50,11 @@ export interface TabStatus {
   session: number | null;
   /** The session records the microphone in the background (Chrome). */
   voice: boolean;
+  /**
+   * Whether the recorder runs in the page; null when Lens does not collect here. False on a page
+   * that was open before its site was allowed and the browser kept the recorder out: a reload fixes it.
+   */
+  recorder: boolean | null;
 }
 
 /** Background → every extension page. */
@@ -68,6 +75,17 @@ export const NO_ANSWER: { ok: false; error: string; microphoneBlocked?: boolean 
   ok: false,
   error: 'Lens did not answer in the browser; try again',
 };
+
+/**
+ * The permission pattern Lens asks for to collect on a site. Firefox grants nothing to scripts for
+ * a pattern with a port (the recorder never ran on localhost:3000), so there it is the host on
+ * every port. Lens still collects only on the project's exact origins.
+ */
+export function sitePattern(origin: string): string {
+  if (!import.meta.env.FIREFOX) return `${origin}/*`;
+  const { protocol, hostname } = new URL(origin);
+  return `${protocol}//${hostname}/*`;
+}
 
 export function originOf(url: string | undefined): string | null {
   if (!url) return null;

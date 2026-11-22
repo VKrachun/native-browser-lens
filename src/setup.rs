@@ -105,6 +105,20 @@ pub fn steps(status: &SetupStatus) -> Vec<Step> {
         (None, None) => step("Browser extension", Mark::Todo, extension_instructions()),
     });
 
+    // A store sends the new extension after its review, so this is a note, not a failed step.
+    let older = older_extensions(status);
+    if !older.is_empty() {
+        steps.push(step(
+            "Extension updates",
+            Mark::Optional,
+            format!(
+                "older than the app ({}): {}. A store sends the new one after its review; a Load unpacked copy needs Reload on the extensions page",
+                status.version,
+                older.join(", ")
+            ),
+        ));
+    }
+
     let granted: usize = status
         .extensions
         .iter()
@@ -146,6 +160,50 @@ pub fn steps(status: &SetupStatus) -> Vec<Step> {
     steps
 }
 
+/// Browsers used this week whose extension is older than the app, as "chromium 0.12.14".
+pub fn older_extensions(status: &SetupStatus) -> Vec<String> {
+    let week_ago = crate::daemon::now_ms() - 7 * 24 * 60 * 60 * 1000;
+    let mut older: Vec<String> = status
+        .extensions
+        .iter()
+        .filter(|e| e.last_seen >= week_ago)
+        .filter(|e| crate::update::newer(&status.version, &e.client.extension_version))
+        .map(|e| format!("{} {}", e.client.browser, e.client.extension_version))
+        .collect();
+    older.dedup();
+    older
+}
+
+/// One coding agent in the doctor's list: optional, so never a failed step.
+fn agent_step(info: &crate::investigate::AgentInfo) -> Step {
+    use crate::investigate::{Agent, AgentState};
+    let name = match info.agent {
+        Agent::Claude => "Claude Code",
+        Agent::Codex => "Codex",
+    };
+    let mut detail = match (&info.state, &info.binary, &info.problem) {
+        (AgentState::Ready, Some(binary), _) => format!("ready: {binary}"),
+        (_, Some(binary), Some(problem)) => format!("{binary} did not answer: {problem}"),
+        (_, Some(binary), None) => format!("{binary}: not signed in with a subscription"),
+        (_, None, _) => "not found".into(),
+    };
+    if !info.broken.is_empty() {
+        detail.push_str(&format!(
+            "; skipped {}: the system cannot start it, so reinstall or remove it",
+            info.broken.join(", ")
+        ));
+    }
+    Step {
+        name: name.into(),
+        mark: if info.state == AgentState::Ready {
+            Mark::Done
+        } else {
+            Mark::Optional
+        },
+        detail,
+    }
+}
+
 fn extension_instructions() -> String {
     format!(
         "add the extension in Chrome, Edge or Brave from {CHROME_STORE}; in Firefox, from {FIREFOX_STORE}"
@@ -178,6 +236,10 @@ pub fn doctor(paths: &Paths) -> io::Result<()> {
     let mut client = Client::connect(paths)?;
     let steps = status(&mut client)?.steps;
     print(&steps);
+    // As the daemon sees them: its PATH can differ from this terminal's.
+    if let Ok(Reply::Agents(agents)) = client.call(Request::ListAgents) {
+        print(&agents.iter().map(agent_step).collect::<Vec<_>>());
+    }
     match steps.iter().filter(|s| s.mark == Mark::Todo).count() {
         0 => {
             println!("\nEverything required is in order.");
@@ -474,6 +536,63 @@ mod tests {
                 .unwrap()
                 .detail
                 .contains("update Lens")
+        );
+    }
+
+    #[test]
+    fn an_older_extension_used_this_week_is_noted_but_does_not_fail() {
+        let seen = |browser: &str, version: &str, last_seen: i64| ClientSeen {
+            client: ClientInfo {
+                browser: browser.into(),
+                extension_version: version.into(),
+                profile: browser.into(),
+                protocol: PROTOCOL_VERSION,
+                granted_origins: vec![],
+                extension_id: None,
+            },
+            last_seen,
+        };
+        let now = crate::daemon::now_ms();
+        let mut current = status();
+        current.version = "0.12.22".into();
+        current.extensions = vec![
+            seen("chromium", "0.12.14", now),
+            seen("firefox", "0.12.22", now),
+            // Not used for weeks: a profile nobody opens says nothing.
+            seen("chrome", "0.12.5", now - 30 * 24 * 60 * 60 * 1000),
+        ];
+        assert_eq!(older_extensions(&current), vec!["chromium 0.12.14"]);
+        let note = steps(&current)
+            .into_iter()
+            .find(|s| s.name == "Extension updates")
+            .unwrap();
+        assert_eq!(note.mark, Mark::Optional);
+        assert!(note.detail.contains("chromium 0.12.14"));
+    }
+
+    #[test]
+    fn the_doctor_names_the_agent_program_and_broken_copies() {
+        use crate::investigate::{Agent, AgentInfo, AgentState};
+        let step = agent_step(&AgentInfo {
+            agent: Agent::Claude,
+            state: AgentState::Ready,
+            binary: Some("/usr/local/bin/claude".into()),
+            broken: vec!["/home/me/.bun/bin/claude".into()],
+            problem: None,
+        });
+        assert_eq!(step.mark, Mark::Done);
+        assert!(step.detail.starts_with("ready: /usr/local/bin/claude"));
+        assert!(step.detail.contains("skipped /home/me/.bun/bin/claude"));
+        let missing = agent_step(&AgentInfo {
+            agent: Agent::Codex,
+            state: AgentState::Missing,
+            binary: None,
+            broken: vec![],
+            problem: None,
+        });
+        assert_eq!(
+            (missing.mark, missing.detail.as_str()),
+            (Mark::Optional, "not found")
         );
     }
 }
