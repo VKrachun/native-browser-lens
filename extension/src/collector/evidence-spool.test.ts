@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { chromium } from 'playwright-core';
+import ts from 'typescript';
 import { expect, it } from 'vitest';
 import { ActionLog, EvidenceBuffer, MAX_ACTIONS, ReplayBuffer, ShotBuffer } from './buffer';
 import { chunk, emptyBatch, gather, KINDS, STALE_MS, stale, type Batch } from './evidence-spool';
@@ -75,4 +78,28 @@ it('deletes spools no running recording owns, and old ones', () => {
   ];
   expect(stale(states, new Set([1, 3]), now)).toEqual([2, 3]);
   expect(stale(states, new Set([1, 2, 3]), now)).toEqual([3]);
+});
+
+// A real IndexedDB (headless Chromium): the delete of a fresh write must not reach the chunks the
+// same transaction adds.
+it('a fresh write keeps its own chunks and drops only the older ones', { timeout: 30_000 }, async () => {
+  const source = readFileSync(new URL('./evidence-spool.ts', import.meta.url), 'utf8');
+  const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
+  const browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {});
+  try {
+    const page = await browser.newPage();
+    await page.route('http://lens.test/**', (route) => route.fulfill({ contentType: 'text/html', body: '<!doctype html>' }));
+    await page.goto('http://lens.test/');
+    await page.addScriptTag({ type: 'module', content: `${code}\nwindow.spool = { write, read, chunk };` });
+    const back = await page.evaluate(async () => {
+      const { write, read, chunk } = (window as unknown as { spool: typeof import('./evidence-spool') }).spool;
+      const state = { session: 7, tab: 1, savedAt: 1, gaps: [], dropped: {} };
+      await write([chunk(7, 'actions', ['old-1']), chunk(7, 'actions', ['old-2']), chunk(8, 'actions', ['other'])], [state, { ...state, session: 8 }]);
+      await write([chunk(7, 'actions', ['new-1']), chunk(7, 'actions', ['new-2'])], [state], [7]);
+      return { seven: (await read(7))?.actions, eight: (await read(8))?.actions };
+    });
+    expect(back).toEqual({ seven: ['new-1', 'new-2'], eight: ['other'] });
+  } finally {
+    await browser.close();
+  }
 });

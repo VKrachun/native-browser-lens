@@ -1,5 +1,7 @@
-//! `lens-speech <model> <input.wav> [--vad <model>] [--threads N]`: transcribes a 16 kHz mono WAV
-//! with whisper.cpp and prints one JSON object. The daemon runs it as a child process.
+//! `lens-speech <model> <input.wav> [--vad <model>] [--threads N] [--language <code>]
+//! [--prompt <text>]`: transcribes a 16 kHz mono WAV with whisper.cpp and prints one JSON object.
+//! The daemon runs it as a child process. `--language auto` (or none) detects the language;
+//! `--prompt` gives Whisper words to expect, such as product names.
 use serde::Serialize;
 use std::process::ExitCode;
 use whisper_rs::{
@@ -53,16 +55,25 @@ fn main() -> ExitCode {
 fn run() -> Result<Transcript, String> {
     let mut args = std::env::args().skip(1);
     let (Some(model), Some(input)) = (args.next(), args.next()) else {
-        return Err("usage: lens-speech <model> <input.wav> [--vad <model>] [--threads N]".into());
+        return Err(
+            "usage: lens-speech <model> <input.wav> [--vad <model>] [--threads N] \
+             [--language <code>] [--prompt <text>]"
+                .into(),
+        );
     };
-    let (mut vad, mut threads) = (None, 4);
+    let (mut vad, mut threads, mut language, mut prompt) = (None, 4, None, None);
     while let Some(flag) = args.next() {
+        let mut value = || args.next().ok_or_else(|| format!("{flag} needs a value"));
         match flag.as_str() {
             "--vad" => vad = args.next(),
             "--threads" => threads = args.next().and_then(|n| n.parse().ok()).unwrap_or(4),
+            "--language" => language = Some(value()?),
+            "--prompt" => prompt = Some(value()?),
             other => return Err(format!("unknown option {other}")),
         }
     }
+    // A fixed language holds for every window; without one the first window detects it.
+    let mut language = fixed_language(language.as_deref())?;
     let samples = read_wav(&input)?;
 
     // whisper.cpp logs to stderr; the daemon keeps that for its log.
@@ -81,7 +92,6 @@ fn run() -> Result<Transcript, String> {
         Some(vad) => speech_parts(vad, &samples, threads)?,
         None => vec![(0, samples.len())],
     };
-    let mut language: Option<String> = None;
     let mut segments = Vec::new();
     for window in windows(&parts) {
         let audio = window.audio(&samples);
@@ -94,6 +104,9 @@ fn run() -> Result<Transcript, String> {
         params.set_print_timestamps(false);
         params.set_print_special(false);
         params.set_suppress_blank(true);
+        if let Some(prompt) = prompt.as_deref().filter(|p| !p.trim().is_empty()) {
+            params.set_initial_prompt(prompt);
+        }
         state
             .full(params, &audio)
             .map_err(|e| format!("transcription failed: {e}"))?;
@@ -134,6 +147,17 @@ fn run() -> Result<Transcript, String> {
         engine: engine.into(),
         segments,
     })
+}
+
+/// The whisper.cpp code of a language (`en`, `uk`, or a name such as `german`); None to detect it.
+fn fixed_language(language: Option<&str>) -> Result<Option<String>, String> {
+    match language.map(str::trim) {
+        None | Some("" | "auto") => Ok(None),
+        Some(code) => whisper_rs::get_lang_id(&code.to_lowercase())
+            .and_then(whisper_rs::get_lang_str)
+            .map(|code| Some(code.to_string()))
+            .ok_or_else(|| format!("unknown language {code}")),
+    }
 }
 
 fn ms(sample: usize) -> i64 {
@@ -326,6 +350,15 @@ mod tests {
         let audio = first.audio(&vec![0.5; 90 * second]);
         assert_eq!(audio.len(), 3 * 5 * second + 2 * JOIN_GAP);
         assert_eq!(audio[5 * second + 1], 0.0, "the gap is silent");
+    }
+
+    #[test]
+    fn languages_are_whisper_codes() {
+        assert_eq!(fixed_language(None), Ok(None));
+        assert_eq!(fixed_language(Some("auto")), Ok(None));
+        assert_eq!(fixed_language(Some("uk")), Ok(Some("uk".into())));
+        assert_eq!(fixed_language(Some("German")), Ok(Some("de".into())));
+        assert!(fixed_language(Some("klingon")).is_err());
     }
 
     #[test]

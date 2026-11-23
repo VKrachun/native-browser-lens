@@ -237,7 +237,8 @@
 }
 .obs-row {
   display: grid;
-  grid-template-columns: 64px minmax(0, 1fr) auto;
+  /* The last column keeps room for Open task and Delete, so they never cover the text. */
+  grid-template-columns: 64px minmax(0, 1fr) minmax(56px, auto);
   align-items: start;
   gap: 10px;
   width: calc(100% + 16px);
@@ -306,6 +307,7 @@
   color: var(--danger);
 }
 .obs-status {
+  justify-self: end;
   margin-top: 1px;
 }
 .obs-delete {
@@ -515,10 +517,11 @@
   vertical-align: -2px;
 }
 .record-live {
-  display: grid;
-  /* The fifth column holds Discard recording, after a Stop that could not save. */
-  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+  /* After a Stop that could not save, Discard joins Stop: in a narrow panel, the buttons wrap. */
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: 8px;
   padding: 8px 8px 8px 12px;
   border-radius: var(--radius);
@@ -528,9 +531,31 @@
   font: 600 16px var(--font-heading);
 }
 .record-what {
+  /* Small enough that the time, Mark and Stop share one line at 320px. */
+  flex: 1 1 4em;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.record-mark {
+  min-width: 5.5em;
+}
+.record-notice {
+  flex-basis: 100%;
+}
+.record-go {
+  position: relative;
+}
+.record-go .keys {
+  position: absolute;
+  right: 12px;
+}
+.record-hint {
+  margin: -4px 0 0;
+}
+.model-progress .btn {
+  justify-self: start;
 }
 .rec-dot-still {
   animation: none;

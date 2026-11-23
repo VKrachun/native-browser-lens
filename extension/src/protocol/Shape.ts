@@ -4,4 +4,4 @@ import type { Point } from "./Point";
 /**
  * A mark on a screenshot, in the screenshot's own pixels.
  */
-export type Shape = { "kind": "rectangle", x: number, y: number, width: number, height: number, color: string, } | { "kind": "arrow", from: Point, to: Point, color: string, } | { "kind": "pen", points: Array<Point>, color: string, } | { "kind": "mask", x: number, y: number, width: number, height: number, };
+export type Shape = { "kind": "rectangle", x: number, y: number, width: number, height: number, color: string, } | { "kind": "arrow", from: Point, to: Point, color: string, } | { "kind": "pen", points: Array<Point>, color: string, } | { "kind": "mask", x: number, y: number, width: number, height: number, } | { "kind": "blur", x: number, y: number, width: number, height: number, } | { "kind": "text", x: number, y: number, text: string, color: string, } | { "kind": "badge", x: number, y: number, number: number, color: string, };

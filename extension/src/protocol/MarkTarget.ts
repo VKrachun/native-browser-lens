@@ -10,6 +10,6 @@ export type MarkTarget = {
  */
 mark: number, 
 /**
- * `rectangle`, `arrow` or `pen`.
+ * `rectangle`, `arrow`, `pen`, `text` or `badge`.
  */
 kind: string, elements: Array<Locator>, };

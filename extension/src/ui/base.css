@@ -477,8 +477,8 @@ code,
   border: 0;
   background: none;
   color: var(--foreground);
+  border-radius: 4px;
   font: 12px var(--font-ui);
-  outline: none;
 }
 .tag-draft::placeholder {
   color: var(--muted-foreground);

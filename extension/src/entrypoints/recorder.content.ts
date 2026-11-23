@@ -1,7 +1,8 @@
 import { record } from '@rrweb/record';
 import type { eventWithTime } from '@rrweb/types';
-import { ActionRecorder, elementMap } from '@/collector/actions';
+import { ActionRecorder, elementMap, setMaskSelectors } from '@/collector/actions';
 import { BLOCK_SELECTOR, scrubRecording } from '@/collector/recording';
+import { PRIVACY_KEY, privacySettings, setCustomRedaction } from '@/collector/sanitize';
 import type { Action } from '@/protocol/Action';
 import type { PageElement } from '@/protocol/PageElement';
 
@@ -30,10 +31,22 @@ export type RecorderMessage =
 // nothing until the background says the tab collects; on a no, it ends and forgets what it held.
 export default defineContentScript({
   registration: 'runtime',
-  main() {
+  async main() {
     const scope = globalThis as typeof globalThis & { __lensRecorder?: boolean };
     if (scope.__lensRecorder) return;
     scope.__lensRecorder = true;
+
+    // The person's own rules (Settings in the app), as the background stored them. They apply
+    // from the next page on when they change.
+    let stored: unknown = null;
+    try {
+      stored = (await browser.storage.local.get(PRIVACY_KEY))[PRIVACY_KEY];
+    } catch {
+      // No storage here: the built-in rules only.
+    }
+    const privacy = privacySettings(stored);
+    setCustomRedaction(privacy);
+    const masked = setMaskSelectors(privacy.maskSelectors);
 
     /** Undefined while the background has not answered: everything waits in this page. */
     let allowed: boolean | undefined;
@@ -49,7 +62,7 @@ export default defineContentScript({
       // marked elements are not recorded at all.
       maskAllInputs: true,
       maskTextSelector: '[contenteditable], [contenteditable] *',
-      blockSelector: BLOCK_SELECTOR,
+      blockSelector: [BLOCK_SELECTOR, ...masked].join(', '),
       recordCanvas: false,
       collectFonts: false,
       // Started at document_start: the first copy of the page as soon as its HTML is parsed.

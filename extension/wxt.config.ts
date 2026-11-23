@@ -22,6 +22,9 @@ export default defineConfig({
         'alarms',
         ...(firefox ? ['webRequest'] : ['sidePanel', 'debugger', 'favicon', 'offscreen']),
       ],
+      // Video mode films the tab (Chrome): asked for in the panel when the person turns it on, so
+      // an update shows no new warning.
+      ...(firefox ? {} : { optional_permissions: ['tabCapture'] }),
       // Lens reads a site only after the person grants that exact origin from the side panel.
       // Firefox screenshots a tab only with <all_urls> (or a fresh toolbar click): Lens asks for it
       // there, and still collects only on the sites the person adds.
@@ -36,6 +39,14 @@ export default defineConfig({
         capture: {
           suggested_key: { default: 'Alt+Shift+L' },
           description: 'Capture the page with its evidence',
+        },
+        'toggle-recording': {
+          suggested_key: { default: 'Alt+Shift+R' },
+          description: 'Start or stop recording the current tab',
+        },
+        'drop-marker': {
+          suggested_key: { default: 'Alt+Shift+M' },
+          description: 'Drop a timestamped marker during recording',
         },
       },
       // The key pins the unpacked development ID that `lens register` allows. Store builds drop it.

@@ -1,9 +1,9 @@
 //! Commands for coding agents and scripts: the reviews a person approved, as JSON or as a folder
 //! of files. They read the same frozen reviews as the MCP server, and `agents` connects the coding
-//! agents on this computer to Lens.
+//! agents on this computer to Lens. `storage`, `prune` and `video-tools` look after the notebook.
 use crate::client::Client;
 use crate::paths::Paths;
-use crate::protocol::{Reply, Request, Review};
+use crate::protocol::{Reply, Request, Review, ReviewSummary};
 use std::io::{self, Write};
 use std::path::PathBuf;
 
@@ -26,16 +26,39 @@ pub fn reviews(paths: &Paths, json: bool) -> io::Result<()> {
     let mut client = Client::connect(paths)?;
     let reviews =
         crate::mcp::all_reviews(|request| client.call(request)).map_err(io::Error::other)?;
+    print_reviews(
+        &reviews,
+        json,
+        "No reviews yet. Record a defect and create a review in Lens.",
+    )
+}
+
+/// `lens search <words> [--json]`: the reviews whose title, page, VibeQ task, notes or findings
+/// hold every word, as the MCP tool search_reviews finds them.
+pub fn search(paths: &Paths, words: &str, json: bool) -> io::Result<()> {
+    let mut client = Client::connect(paths)?;
+    let all = crate::mcp::all_reviews(|request| client.call(request)).map_err(io::Error::other)?;
+    let query = crate::mcp::SearchArguments {
+        text: Some(words.into()),
+        ..Default::default()
+    };
+    let found = crate::mcp::search(all, &query, crate::daemon::now_ms(), |id| {
+        match client.call(Request::GetReview { review: id }) {
+            Ok(Reply::Review(review)) => Some(review),
+            _ => None,
+        }
+    });
+    print_reviews(&found, json, "No review matches.")
+}
+
+fn print_reviews(reviews: &[ReviewSummary], json: bool, none: &str) -> io::Result<()> {
     let mut out = io::stdout().lock();
     if json {
         serde_json::to_writer_pretty(&mut out, &reviews)?;
         return writeln!(out);
     }
     if reviews.is_empty() {
-        return writeln!(
-            out,
-            "No reviews yet. Record a defect and create a review in Lens."
-        );
+        return writeln!(out, "{none}");
     }
     // Titles come from web pages: no control characters reach the terminal.
     let plain = |text: &str| text.chars().filter(|c| !c.is_control()).collect::<String>();
@@ -43,7 +66,8 @@ pub fn reviews(paths: &Paths, json: bool) -> io::Result<()> {
         let when = crate::repro::iso_time(r.created_at);
         let task = r
             .vibeq_task_url
-            .map(|u| format!("  {}", plain(&u)))
+            .as_ref()
+            .map(|u| format!("  {}", plain(u)))
             .unwrap_or_default();
         writeln!(
             out,
@@ -207,6 +231,105 @@ pub fn agents(action: Option<&str>) -> io::Result<()> {
     }
     if failed {
         return Err(io::Error::other("some agents were not set up"));
+    }
+    Ok(())
+}
+
+fn megabytes(bytes: u64) -> String {
+    format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+}
+
+/// `lens storage [--json]`: the disk the notebook takes, by kind, and the retention rule.
+pub fn storage(paths: &Paths, json: bool) -> io::Result<()> {
+    let mut client = Client::connect(paths)?;
+    let Reply::Storage(usage) = ask(&mut client, Request::GetStorage)? else {
+        return Err(io::Error::other("unexpected reply"));
+    };
+    let mut out = io::stdout().lock();
+    if json {
+        serde_json::to_writer_pretty(&mut out, &usage)?;
+        return writeln!(out);
+    }
+    for (name, bytes) in [
+        ("Recordings", usage.recordings_bytes),
+        ("Voice audio", usage.audio_bytes),
+        ("Screenshots", usage.screenshots_bytes),
+        ("Speech models", usage.models_bytes),
+        ("Other", usage.other_bytes),
+        ("Total", usage.total_bytes),
+    ] {
+        writeln!(out, "{name:<14} {:>12}", megabytes(bytes))?;
+    }
+    writeln!(
+        out,
+        "\n{} observations, {} reviews",
+        usage.observation_count, usage.review_count
+    )?;
+    match usage.retention_days {
+        Some(days) => writeln!(
+            out,
+            "Retention: {}observations older than {days} days go every hour",
+            if usage.retention_filed_only {
+                "filed "
+            } else {
+                ""
+            }
+        ),
+        None => writeln!(
+            out,
+            "Retention: Lens keeps everything (lens prune removes old observations)"
+        ),
+    }
+}
+
+/// `lens prune --older-than <days> [--filed-only]`: deletes observations not changed for that
+/// many days (only those filed as a task with `--filed-only`).
+pub fn prune(paths: &Paths, days: Option<&str>, filed_only: bool) -> io::Result<()> {
+    let older_than_days: u32 = days
+        .and_then(|d| d.parse().ok())
+        .filter(|d| *d > 0)
+        .ok_or_else(|| io::Error::other("lens prune --older-than <days> [--filed-only]"))?;
+    let mut client = Client::connect(paths)?;
+    let Reply::Pruned(result) = ask(
+        &mut client,
+        Request::PruneStorage {
+            older_than_days,
+            filed_only,
+        },
+    )?
+    else {
+        return Err(io::Error::other("unexpected reply"));
+    };
+    println!(
+        "Removed {} observations; {} freed.",
+        result.deleted_observations,
+        megabytes(result.freed_bytes)
+    );
+    Ok(())
+}
+
+/// `lens video-tools [status|install]`: what MP4 export needs, and its install.
+pub fn video_tools(paths: &Paths, action: Option<&str>) -> io::Result<()> {
+    let tools = paths.data.join("video-tools");
+    match action {
+        None | Some("status") => {}
+        Some("install") => {
+            crate::attachments::install_video_tools(&tools, |step| println!("{step}"))
+                .map_err(io::Error::other)?;
+            println!("The video tools are installed.");
+        }
+        Some(_) => return Err(io::Error::other("lens video-tools [status|install]")),
+    }
+    let check = crate::attachments::check_video_tools(&tools);
+    let yes = |ok: bool| if ok { "found" } else { "missing" };
+    println!("Node.js        {}", yes(check.node));
+    println!("FFmpeg         {}", yes(check.ffmpeg));
+    println!(
+        "MP4 export     {}",
+        if check.ready { "ready" } else { "not ready" }
+    );
+    if let Some(detail) = check.detail {
+        println!("\n{detail}");
     }
     Ok(())
 }

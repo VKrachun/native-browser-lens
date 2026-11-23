@@ -32,7 +32,8 @@ export function useHandoff(client: LensClient, site: string) {
   const [afterFiling, setAfterFiling] = useStored('lens.handoff.afterFiling', false);
   const [folder, setFolder] = useState('');
   const [busy, setBusy] = useState(false);
-  const [done, setDone] = useState<{ app: HandoffApp; report: string } | null>(null);
+  /** The last hand-off, with its review: a new review on the page has not been handed off. */
+  const [done, setDone] = useState<{ review: number; app: HandoffApp; report: string } | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
 
   useEffect(() => {
@@ -58,7 +59,7 @@ export function useHandoff(client: LensClient, site: string) {
       const handed = await client.request({ method: 'handOff', params: { review, app, folder: path } });
       setFolders({ ...folders, [site]: path });
       setChosen(app);
-      setDone({ app, report: handed.folder });
+      setDone({ review, app, report: handed.folder });
     } catch (error) {
       setProblem((error as Error).message);
     } finally {
@@ -90,7 +91,8 @@ export const handoffName = (app: HandoffApp) => NAMES[app];
 
 /** Hands the review to a coding agent app on this computer. */
 export function Handoff({ state, review }: { state: HandoffState; review: number }) {
-  const { apps, app, folder, busy, done, problem } = state;
+  const { apps, app, folder, busy, problem } = state;
+  const done = state.done?.review === review ? state.done : null;
   if (!app) return null;
 
   return (

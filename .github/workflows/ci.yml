@@ -71,6 +71,11 @@ jobs:
           pnpm test
           pnpm build
           pnpm build:firefox
+      # addons-linter, as AMO runs it: it validates the Firefox manifest and the code. Warnings pass.
+      - name: Firefox package lint
+        if: runner.os == 'Linux'
+        working-directory: extension
+        run: pnpm dlx web-ext@10.8.0 lint --source-dir .output/firefox-mv3 --no-input
       - name: Chromium for the end-to-end test
         working-directory: extension
         run: pnpm exec playwright-core install chromium
@@ -89,6 +94,65 @@ jobs:
         with:
           name: e2e-shots-${{ matrix.os }}
           path: ${{ runner.temp }}/e2e-shots
+          if-no-files-found: ignore
+
+  # Random clicks, typing and reloads on the extension pages, checked against the properties in
+  # extension/test/bombadil (github.com/antithesishq/bombadil, with the patch kept there).
+  bombadil:
+    name: bombadil (extension pages)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      BOMBADIL_COMMIT: c7bd61f3ec83761634804c50845cd96c521a45f0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Rust toolchain (from rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Build lens
+        run: cargo build --locked
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: bombadil
+        with:
+          path: ~/.local/bombadil
+          key: bombadil-${{ env.BOMBADIL_COMMIT }}-${{ hashFiles('extension/test/bombadil/bombadil.patch') }}
+      - name: Bombadil with the extension-page patch
+        if: steps.bombadil.outputs.cache-hit != 'true'
+        run: |
+          src="$RUNNER_TEMP/bombadil"
+          git clone --filter=blob:none https://github.com/antithesishq/bombadil "$src"
+          git -C "$src" checkout "$BOMBADIL_COMMIT"
+          git -C "$src" apply "$GITHUB_WORKSPACE/extension/test/bombadil/bombadil.patch"
+          # The inspect UI needs trunk: a stand-in writes the one page the CLI embeds.
+          mkdir -p "$RUNNER_TEMP/stub"
+          printf '#!/bin/sh\nwhile [ $# -gt 0 ]; do [ "$1" = --dist ] && mkdir -p "$2" && echo "<!doctype html>" > "$2/index.html"; shift; done\n' > "$RUNNER_TEMP/stub/trunk"
+          chmod +x "$RUNNER_TEMP/stub/trunk"
+          (cd "$src" && PATH="$RUNNER_TEMP/stub:$PATH" cargo build --release -p bombadil-cli --no-default-features)
+          mkdir -p ~/.local/bombadil
+          cp "$src/target/release/bombadil" ~/.local/bombadil/
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          package_json_file: extension/package.json
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: extension/pnpm-lock.yaml
+      - name: Extension test build and Chromium
+        working-directory: extension
+        run: |
+          pnpm install --frozen-lockfile
+          LENS_E2E=1 pnpm build
+          pnpm exec playwright-core install chromium
+      - name: One minute of Bombadil on each of the review, replay, panel and options pages
+        working-directory: extension
+        run: BOMBADIL="$HOME/.local/bombadil/bombadil" node test/bombadil.mjs "$RUNNER_TEMP/bombadil-runs" 1
+      - name: Traces of a failed Bombadil run
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bombadil-runs
+          path: ${{ runner.temp }}/bombadil-runs
           if-no-files-found: ignore
 
   installer:

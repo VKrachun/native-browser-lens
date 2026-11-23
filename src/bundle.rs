@@ -35,15 +35,44 @@ pub fn sync_extensions(paths: &Paths) -> io::Result<bool> {
         if !source.join("manifest.json").is_file() || fingerprint(&source) == fingerprint(&target) {
             continue;
         }
+        // A self-update unpacks a newer build than the installer's (a Windows install folder keeps
+        // the one it came with): never go back to the older one.
+        if let (Some(have), Some(bundled)) = (version(&target), version(&source))
+            && crate::update::newer(&have, &bundled)
+        {
+            continue;
+        }
         // Next to the target, then swapped in: a browser never sees half a folder.
         let fresh = paths.data.join(format!(".{name}.new"));
         let _ = std::fs::remove_dir_all(&fresh);
         copy_dir(&source, &fresh)?;
-        let _ = std::fs::remove_dir_all(&target);
-        std::fs::rename(&fresh, &target)?;
+        swap_dir(&fresh, &target)?;
         changed = true;
     }
     Ok(changed)
+}
+
+fn version(dir: &Path) -> Option<String> {
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("manifest.json")).ok()?).ok()?;
+    Some(manifest.get("version")?.as_str()?.to_string())
+}
+
+/// Puts the folder `fresh` in place of `folder`. The old one goes aside first, comes back when the
+/// new one cannot go in, and is removed only once the new one is in: a failure never leaves none.
+pub fn swap_dir(fresh: &Path, folder: &Path) -> io::Result<()> {
+    let old = folder.with_extension("old");
+    let _ = std::fs::remove_dir_all(&old);
+    match std::fs::rename(folder, &old) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    if let Err(e) = std::fs::rename(fresh, folder) {
+        let _ = std::fs::rename(&old, folder);
+        return Err(e);
+    }
+    let _ = std::fs::remove_dir_all(&old);
+    Ok(())
 }
 
 /// Every file's relative path and size, plus a hash of the manifest: equal for two copies of one
@@ -103,5 +132,26 @@ mod tests {
         std::fs::write(b.join("chunks/x.js"), "xy").unwrap();
         assert_ne!(fingerprint(&a), fingerprint(&b));
         assert!(fingerprint(&dir.path().join("none")).is_none());
+    }
+
+    #[test]
+    fn a_swap_replaces_the_folder_and_versions_are_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let (folder, fresh) = (dir.path().join("extension"), dir.path().join(".new"));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("manifest.json"), r#"{"version":"0.12.23"}"#).unwrap();
+        std::fs::create_dir_all(&fresh).unwrap();
+        std::fs::write(fresh.join("manifest.json"), r#"{"version":"0.12.9"}"#).unwrap();
+        assert!(crate::update::newer(
+            &version(&folder).unwrap(),
+            &version(&fresh).unwrap()
+        ));
+        swap_dir(&fresh, &folder).unwrap();
+        assert_eq!(version(&folder).as_deref(), Some("0.12.9"));
+        assert!(!fresh.exists() && !folder.with_extension("old").exists());
+        // No folder yet: the new one simply goes in.
+        std::fs::create_dir_all(&fresh).unwrap();
+        swap_dir(&fresh, &dir.path().join("extension-firefox")).unwrap();
+        assert!(dir.path().join("extension-firefox").is_dir());
     }
 }

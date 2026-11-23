@@ -72,6 +72,18 @@ type ReplyTo = {
   summarize: 'summary';
   speechStatus: 'speech';
   installSpeech: 'speech';
+  cancelSpeechDownload: 'speech';
+  getSpeechSettings: 'speechSettings';
+  setSpeechSettings: 'speechSettings';
+  getVideoTools: 'videoTools';
+  installVideoTools: 'videoTools';
+  getStorage: 'storage';
+  pruneStorage: 'pruned';
+  setRetention: 'storage';
+  getPrivacySettings: 'privacySettings';
+  setPrivacySettings: 'privacySettings';
+  getFindingsSettings: 'findingsSettings';
+  setFindingsSettings: 'findingsSettings';
   shutdown: 'stopping';
 };
 // Every protocol method must name its reply here; a new Rust request fails this line first.
@@ -117,9 +129,13 @@ export class LensClient {
   private open(): Browser.runtime.Port {
     const port = browser.runtime.connectNative(HOST_NAME);
     port.onMessage.addListener((frame: ReplyFrame) => {
-      // Id 0 answers no request: the host says why it ends (code 'quit': the person quit Lens).
+      // Id 0 answers no request. Code 'quit': the person quit Lens, and the port is done; else the
+      // daemon could not read a frame, which ends nothing.
       if (frame.id === 0 && frame.status === 'error') {
-        if (this.port === port) this.fail(new LensError(frame.error.code, frame.error.message));
+        if (frame.error.code === 'quit' && this.port === port) {
+          this.fail(new LensError(frame.error.code, frame.error.message));
+          port.disconnect();
+        }
         return;
       }
       const waiter = this.pending.get(frame.id);
@@ -173,7 +189,7 @@ export class LensClient {
   }
 
   /** Sends a file in chunks (requests stay under 16 MiB); the last reply names the stored blob. */
-  async upload(file: Blob, mediaType: 'audio/wav' | 'application/json' | 'image/webp' | 'image/png'): Promise<BlobRef> {
+  async upload(file: Blob, mediaType: 'audio/wav' | 'application/json' | 'image/webp' | 'image/png' | 'video/webm'):Promise<BlobRef> {
     const CHUNK = 3 * 1024 * 1024;
     const id = crypto.randomUUID();
     for (let offset = 0; ; offset += CHUNK) {

@@ -26,11 +26,12 @@ export class LimitedCollector {
           url: d.url,
           status: d.statusCode,
           fromCache: d.fromCache,
+          resourceType: d.type,
         }),
       filter,
     );
     web.onErrorOccurred.addListener(
-      (d) => this.record(d.tabId, 'networkFailure', { requestId: d.requestId, url: d.url, errorText: d.error }),
+      (d) => this.record(d.tabId, 'networkFailure', { requestId: d.requestId, url: d.url, errorText: d.error, resourceType: d.type }),
       filter,
     );
   }

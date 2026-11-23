@@ -134,8 +134,12 @@ impl Blobs {
                 let blob = name.len() == 64 && self.path(&name).is_ok();
                 let partial = name.ends_with(".partial");
                 if old && ((blob && !keep.contains(&name)) || partial) {
-                    std::fs::remove_file(file.path())?;
-                    removed += 1;
+                    // One file that cannot go (open on Windows, say) must not keep the rest.
+                    match std::fs::remove_file(file.path()) {
+                        Ok(()) => removed += 1,
+                        // Stderr is lensd.log for a daemon.
+                        Err(e) => eprintln!("cannot remove blob {name}: {e}"),
+                    }
                 }
             }
         }
@@ -166,9 +170,40 @@ impl Blobs {
     }
 }
 
+/// Bytes of every file under `path` (a blob or model folder), on disk now. Links are not
+/// followed, and an entry that cannot be read counts as nothing.
+pub fn dir_bytes(path: &std::path::Path) -> u64 {
+    let mut total = 0;
+    let mut folders = vec![path.to_path_buf()];
+    while let Some(folder) = folders.pop() {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            match entry.file_type() {
+                Ok(t) if t.is_dir() => folders.push(entry.path()),
+                Ok(t) if t.is_file() => total += entry.metadata().map_or(0, |m| m.len()),
+                _ => {}
+            }
+        }
+    }
+    total
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dir_bytes_sums_nested_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let blobs = Blobs::new(dir.path().to_path_buf());
+        blobs.put(b"12345", "text/plain").unwrap();
+        blobs.put(b"123", "text/plain").unwrap();
+        std::fs::write(dir.path().join("top"), b"12").unwrap();
+        assert_eq!(dir_bytes(dir.path()), 10);
+        assert_eq!(dir_bytes(&dir.path().join("missing")), 0);
+    }
 
     #[test]
     fn sweep_removes_only_unnamed_old_blobs() {

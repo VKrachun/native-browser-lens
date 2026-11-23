@@ -115,10 +115,69 @@
   cursor: default;
 }
 
-.optional-integrations > summary {
-  padding: 16px;
-  cursor: pointer;
+.danger-text {
+  color: var(--danger-foreground);
 }
-.optional-integrations .settings-section {
-  border: 0;
+
+.status-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* Storage: one bar of the parts, then the parts with their sizes. */
+.storage-bar {
+  display: flex;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--muted);
+}
+.storage-bar span {
+  min-width: 0;
+}
+.storage-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+}
+.storage-list > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+.storage-list > div:last-child {
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+  font-weight: 600;
+}
+.storage-list dt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.storage-list dd {
+  margin: 0;
+}
+.storage-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+}
+.cleanup,
+.inline-fields {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.cleanup .input {
+  width: 6em;
+}
+.inline-fields .select {
+  flex: 1;
+  min-width: 12em;
+}
+.language-code {
+  width: 7em;
 }

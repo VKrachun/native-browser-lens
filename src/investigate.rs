@@ -149,7 +149,7 @@ pub fn info(agent: Agent) -> AgentInfo {
     // Codex 0.171 prints "Logged in using ChatGPT" to stderr: without it Codex never read as ready.
     // Claude's answer is JSON on stdout, which a warning on stderr would break.
     let stderr = agent == Agent::Codex;
-    let output = match run_with(
+    let (success, output) = match run_with(
         &binary,
         arguments,
         None,
@@ -166,7 +166,8 @@ pub fn info(agent: Agent) -> AgentInfo {
     };
     let text = String::from_utf8_lossy(&output);
     let signed_in = match agent {
-        Agent::Codex => text.contains("ChatGPT"),
+        // `codex login status` exits 1 when no one is signed in, whatever it prints.
+        Agent::Codex => success && text.contains("ChatGPT"),
         Agent::Claude => serde_json::from_str::<Value>(&text)
             .is_ok_and(|v| v["loggedIn"] == true && v["authMethod"] == "claude.ai"),
     };
@@ -210,6 +211,7 @@ pub fn investigate(
         instructions: INSTRUCTIONS,
         schema: schema(),
         claude_model: None,
+        codex_model: None,
     };
     let answer = match agent {
         Agent::Codex => codex(&binary, &work.0, notebook, &images, &prompt, &job)?,
@@ -339,13 +341,111 @@ fn unavailable(preferred: Option<Agent>) -> String {
     }
 }
 
-/// Asks the first ready agent for a title and findings: Claude (Haiku) first, then Codex.
-pub fn summarize(
+/// Which model writes a recording's findings, from Settings.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FindingsConfig {
+    /// Off: no findings, and no CLI runs.
+    pub enabled: bool,
+    /// "claude" or "codex"; None: Claude first, then Codex.
+    pub provider: Option<String>,
+    /// A model name or alias for the provider; None: Haiku for Claude, Codex's own default.
+    pub model: Option<String>,
+}
+
+impl Default for FindingsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            provider: None,
+            model: None,
+        }
+    }
+}
+
+impl FindingsConfig {
+    /// The provider as an agent; an unknown name is an error, never a silent fallback.
+    pub fn agent(&self) -> Result<Option<Agent>, String> {
+        match self.provider.as_deref().map(str::trim) {
+            None | Some("") => Ok(None),
+            Some(p) if p.eq_ignore_ascii_case("claude") => Ok(Some(Agent::Claude)),
+            Some(p) if p.eq_ignore_ascii_case("codex") => Ok(Some(Agent::Codex)),
+            Some(p) => Err(format!(
+                "unknown findings provider {p:?}; use claude or codex"
+            )),
+        }
+    }
+
+    /// The model `agent` runs: the configured one, else Haiku for Claude. A name that could read
+    /// as a command-line option, or break Codex's config value, is refused.
+    pub fn model_for(&self, agent: Agent) -> Result<Option<String>, String> {
+        let model = match self.model.as_deref().map(str::trim) {
+            Some(m) if !m.is_empty() => m,
+            _ => return Ok((agent == Agent::Claude).then(|| "haiku".into())),
+        };
+        let valid = !model.starts_with('-')
+            && model.len() <= 100
+            && model
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-._:[]/".contains(c));
+        if !valid {
+            return Err(format!("{model:?} is not a model name"));
+        }
+        Ok(Some(model.into()))
+    }
+}
+
+/// The name a findings header gives the model: "Claude Haiku", "Claude Sonnet", "Codex", or the
+/// provider and the model's own name ("Claude claude-sonnet-4-5", "Codex gpt-5").
+pub fn model_label(agent: Agent, model: Option<&str>) -> String {
+    let provider = match agent {
+        Agent::Claude => "Claude",
+        Agent::Codex => "Codex",
+    };
+    match model {
+        None => provider.into(),
+        Some(m) if ["haiku", "sonnet", "opus"].contains(&m.to_ascii_lowercase().as_str()) => {
+            let mut chars = m.chars();
+            let first = chars.next().map(|c| c.to_ascii_uppercase());
+            format!(
+                "{provider} {}{}",
+                first.unwrap_or_default(),
+                chars.as_str().to_ascii_lowercase()
+            )
+        }
+        Some(m) => format!("{provider} {m}"),
+    }
+}
+
+/// A title and findings as Settings say: None when findings are off (no CLI runs), else the
+/// summary and the label of the model that wrote it, for `crate::record::findings_header`. The
+/// first ready agent runs when Settings chose none: Claude (Haiku) first, then Codex.
+pub fn summarize_with(
     context: &Value,
     notebook: &Path,
-    preferred: Option<Agent>,
-) -> Result<Summary, String> {
+    config: &FindingsConfig,
+) -> Result<Option<(Summary, String)>, String> {
+    if !config.enabled {
+        return Ok(None);
+    }
+    let preferred = config.agent()?;
     let agent = Agent::pick(preferred).ok_or_else(|| unavailable(preferred))?;
+    let model = config.model_for(agent)?;
+    let label = model_label(agent, model.as_deref());
+    let (claude_model, codex_model) = match agent {
+        Agent::Claude => (model, None),
+        Agent::Codex => (None, model),
+    };
+    summarize_as(context, notebook, agent, claude_model, codex_model)
+        .map(|summary| Some((summary, label)))
+}
+
+fn summarize_as(
+    context: &Value,
+    notebook: &Path,
+    agent: Agent,
+    claude_model: Option<String>,
+    codex_model: Option<String>,
+) -> Result<Summary, String> {
     let binary = find(agent).ok_or_else(|| format!("{agent:?} is not installed"))?;
     let work = Workspace::new()?;
     let mut text = serde_json::to_string_pretty(context).expect("JSON serializes");
@@ -360,7 +460,8 @@ pub fn summarize(
     let job = Job {
         instructions: SUMMARY_INSTRUCTIONS,
         schema: summary_schema(),
-        claude_model: Some("haiku"),
+        claude_model: claude_model.as_deref(),
+        codex_model: codex_model.as_deref(),
     };
     let answer = match agent {
         Agent::Codex => codex(&binary, &work.0, notebook, &[], &prompt, &job)?,
@@ -476,6 +577,7 @@ pub fn judge_duplicates(
             } } },
         }),
         claude_model: Some("haiku"),
+        codex_model: None,
     };
     let answer = match agent {
         Agent::Codex => codex(&binary, &work.0, notebook, &[], &prompt, &job)?,
@@ -501,6 +603,8 @@ struct Job<'a> {
     instructions: &'a str,
     schema: Value,
     claude_model: Option<&'a str>,
+    /// None: Codex's own default model.
+    codex_model: Option<&'a str>,
 }
 
 fn codex(
@@ -543,6 +647,16 @@ fn codex(
         "model_reasoning_effort=\"low\"",
     ] {
         arguments.extend(["-c".into(), option.into()]);
+    }
+    if let Some(model) = job.codex_model {
+        // A JSON string is a TOML basic string.
+        arguments.extend([
+            "-c".into(),
+            format!(
+                "model={}",
+                serde_json::to_string(model).expect("JSON serializes")
+            ),
+        ]);
     }
     let notebook = notebook
         .canonicalize()
@@ -733,12 +847,13 @@ pub fn program(name: &str) -> Option<PathBuf> {
 
 /// Copies of a program the search found but skipped, as the system cannot start them.
 pub fn broken(name: &str) -> Vec<PathBuf> {
-    let mut found: Vec<PathBuf> = candidates(name)
+    // A folder twice on PATH, or a link to the same file, names one copy once.
+    let mut seen = std::collections::HashSet::new();
+    candidates(name)
         .into_iter()
         .filter(|p| !runnable(p))
-        .collect();
-    found.dedup();
-    found
+        .filter(|p| seen.insert(std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())))
+        .collect()
 }
 
 /// Every file of that name in the searched folders, in search order.
@@ -771,10 +886,17 @@ fn candidates(name: &str) -> Vec<PathBuf> {
 
 /// A file the system can start. A package manager that skipped its install step leaves a stub
 /// without `#!` (Bun's Claude Code does): starting it fails with "Exec format error", so the
-/// next copy on the search path is used instead.
+/// next copy on the search path is used instead. A file without the execute bit fails the same way.
 fn runnable(path: &Path) -> bool {
     if cfg!(windows) {
         return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 == 0) {
+            return false;
+        }
     }
     let mut start = [0u8; 4];
     let read = std::fs::File::open(path).and_then(|mut f| std::io::Read::read(&mut f, &mut start));
@@ -794,12 +916,20 @@ fn runnable(path: &Path) -> bool {
 /// Where Node version managers keep their programs. A login service (launchd on macOS) gets a
 /// bare PATH without them, while a terminal has them.
 fn version_managers() -> Vec<PathBuf> {
-    let Some(home) = directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf()) else {
+    let Some(base) = directories::BaseDirs::new() else {
         return Vec::new();
     };
+    let home = base.home_dir();
+    // On Windows mise lives in %LOCALAPPDATA%\mise, and npm puts its CLIs in %APPDATA%\npm.
     let mise = std::env::var_os("MISE_DATA_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".local/share/mise"));
+        .unwrap_or_else(|| {
+            if cfg!(windows) {
+                base.data_local_dir().join("mise")
+            } else {
+                home.join(".local/share/mise")
+            }
+        });
     let mut folders = vec![
         home.join(".volta/bin"),
         home.join(".asdf/shims"),
@@ -810,18 +940,21 @@ fn version_managers() -> Vec<PathBuf> {
     folders.extend(newest_first(&home.join(".nvm/versions/node")));
     folders.extend(newest_first(&mise.join("installs/node")));
     folders.extend([mise.join("shims"), home.join(".bun/bin")]);
+    if cfg!(windows) {
+        folders.push(base.data_dir().join("npm"));
+    }
     folders
 }
 
-/// The `bin` folders of the Node versions in `root`, the newest version first.
+/// The program folders of the Node versions in `root`, the newest version first: `bin`, or the
+/// version folder itself on Windows, where node.exe sits at its top.
 fn newest_first(root: &Path) -> Vec<PathBuf> {
     let Ok(versions) = std::fs::read_dir(root) else {
         return Vec::new();
     };
-    let mut found: Vec<PathBuf> = versions.flatten().map(|e| e.path().join("bin")).collect();
+    let mut found: Vec<PathBuf> = versions.flatten().map(|e| e.path()).collect();
     found.sort_by_key(|p| {
-        p.parent()
-            .and_then(|v| v.file_name())
+        p.file_name()
             .and_then(|n| n.to_str())
             .map(|n| {
                 n.trim_start_matches('v')
@@ -832,6 +965,11 @@ fn newest_first(root: &Path) -> Vec<PathBuf> {
             .unwrap_or_default()
     });
     found.reverse();
+    if !cfg!(windows) {
+        for version in &mut found {
+            version.push("bin");
+        }
+    }
     found
 }
 
@@ -844,6 +982,10 @@ pub fn path_for(binary: &Path) -> std::ffi::OsString {
             .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
             .unwrap_or_default(),
     );
+    if let Some(home) = directories::BaseDirs::new().map(|b| b.home_dir().join(".local/bin")) {
+        folders.push(home);
+    }
+    folders.extend(["/usr/local/bin", "/opt/homebrew/bin"].map(PathBuf::from));
     folders.extend(version_managers());
     if let Some(node) = program("node").and_then(|n| n.parent().map(Path::to_path_buf)) {
         folders.push(node);
@@ -890,7 +1032,7 @@ fn npm_shim(binary: &Path) -> Option<Shim> {
     let folder = binary.parent()?;
     let (flags, relative) = shim_call(&std::fs::read_to_string(binary).ok()?)?;
     let script = relative
-        .split('\\')
+        .split(['\\', '/'])
         .filter(|part| !part.is_empty())
         .fold(folder.to_path_buf(), |path, part| path.join(part));
     if !script.is_file() {
@@ -935,9 +1077,11 @@ fn shim_call(text: &str) -> Option<(Vec<String>, String)> {
     words.push(word);
     let script_of = |word: &str| {
         let word = word.trim_matches('"');
+        // %~dp0 ends with a backslash already, so pnpm and yarn may leave theirs out or write /.
         let relative = word
-            .strip_prefix("%dp0%\\")
-            .or_else(|| word.strip_prefix("%~dp0\\"))?;
+            .strip_prefix("%dp0%")
+            .or_else(|| word.strip_prefix("%~dp0"))?;
+        let relative = relative.trim_start_matches(['\\', '/']);
         [".js", ".cjs", ".mjs"]
             .iter()
             .any(|end| relative.ends_with(end))
@@ -990,18 +1134,19 @@ fn run(
     cwd: Option<&Path>,
     timeout: Duration,
 ) -> Result<Vec<u8>, String> {
-    run_with(binary, arguments, input, cwd, timeout, false)
+    run_with(binary, arguments, input, cwd, timeout, false).map(|(_, output)| output)
 }
 
-/// `run`; with `stderr`, the error stream follows the output (Codex prints its login status there).
-fn run_with(
+/// `run`, with whether the program exited successfully; with `stderr`, the error stream follows
+/// the output (Codex prints its login status there).
+pub(crate) fn run_with(
     binary: &Path,
     arguments: &[&str],
     input: Option<&[u8]>,
     cwd: Option<&Path>,
     timeout: Duration,
     stderr: bool,
-) -> Result<Vec<u8>, String> {
+) -> Result<(bool, Vec<u8>), String> {
     let mut command = command(binary);
     command
         .args(arguments)
@@ -1050,17 +1195,21 @@ fn run_with(
         })
     });
     let deadline = Instant::now() + timeout;
-    loop {
-        if child.try_wait().map_err(|e| e.to_string())?.is_some() {
-            break;
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            break status;
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return Err("the agent took longer than three minutes; nothing changed".into());
+            return Err(format!(
+                "{} took longer than {} seconds; nothing changed",
+                binary.display(),
+                timeout.as_secs()
+            ));
         }
         std::thread::sleep(Duration::from_millis(100));
-    }
+    };
     let mut output = reader.join().unwrap_or_default();
     if let Some(errors) = errors {
         output.extend(errors.join().unwrap_or_default());
@@ -1068,7 +1217,7 @@ fn run_with(
     if output.len() > MAX_OUTPUT_BYTES {
         return Err("the agent's output exceeded 4 MiB; nothing changed".into());
     }
-    Ok(output)
+    Ok((status.success(), output))
 }
 
 /// A private, temporary folder for one investigation, removed afterwards.
@@ -1102,13 +1251,71 @@ mod tests {
     use super::*;
 
     #[test]
+    fn findings_settings_pick_the_provider_model_and_label() {
+        let off = FindingsConfig {
+            enabled: false,
+            // Off wins: not even a bad provider makes it run or fail.
+            provider: Some("nope".into()),
+            model: None,
+        };
+        assert_eq!(
+            summarize_with(&json!({}), Path::new("/"), &off).unwrap(),
+            None
+        );
+
+        let config = |provider: Option<&str>, model: Option<&str>| FindingsConfig {
+            enabled: true,
+            provider: provider.map(String::from),
+            model: model.map(String::from),
+        };
+        assert_eq!(FindingsConfig::default(), config(None, None));
+        assert_eq!(
+            config(Some("Claude"), None).agent(),
+            Ok(Some(Agent::Claude))
+        );
+        assert_eq!(config(Some("codex"), None).agent(), Ok(Some(Agent::Codex)));
+        assert_eq!(config(Some(" "), None).agent(), Ok(None));
+        assert!(config(Some("gemini"), None).agent().is_err());
+        assert!(summarize_with(&json!({}), Path::new("/"), &config(Some("gemini"), None)).is_err());
+
+        let plain = config(None, None);
+        assert_eq!(plain.model_for(Agent::Claude), Ok(Some("haiku".into())));
+        assert_eq!(plain.model_for(Agent::Codex), Ok(None));
+        let sonnet = config(None, Some("sonnet"));
+        assert_eq!(sonnet.model_for(Agent::Claude), Ok(Some("sonnet".into())));
+        for bad in ["--dangerously-skip-permissions", "a\"b", "x y"] {
+            assert!(
+                config(None, Some(bad)).model_for(Agent::Codex).is_err(),
+                "{bad}"
+            );
+        }
+
+        assert_eq!(model_label(Agent::Claude, Some("haiku")), "Claude Haiku");
+        assert_eq!(model_label(Agent::Claude, Some("SONNET")), "Claude Sonnet");
+        assert_eq!(
+            model_label(Agent::Claude, Some("claude-sonnet-4-5")),
+            "Claude claude-sonnet-4-5"
+        );
+        assert_eq!(model_label(Agent::Codex, None), "Codex");
+        assert_eq!(model_label(Agent::Codex, Some("gpt-5")), "Codex gpt-5");
+        assert!(crate::record::is_findings_header(
+            &crate::record::findings_header(&model_label(Agent::Claude, Some("opus")))
+        ));
+    }
+
+    #[test]
     fn only_files_the_system_can_start_count_as_programs() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let file = |name: &str, bytes: &[u8]| {
             let path = dir.path().join(name);
             std::fs::write(&path, bytes).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
             path
         };
+        let script = file("not-executable", b"#!/bin/sh\n");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!runnable(&script), "no execute bit: EACCES");
         // Bun's Claude Code when its install step did not run: no #!, so "Exec format error".
         assert!(!runnable(&file(
             "stub",
@@ -1147,6 +1354,15 @@ mod tests {
             shim_call("@\"%~dp0\\node.exe\"  \"%~dp0\\..\\pkg\\cli.mjs\" %*").map(|c| c.1),
             Some("..\\pkg\\cli.mjs".to_string())
         );
+        // pnpm and yarn: no backslash after %~dp0, or / between the parts.
+        assert_eq!(
+            shim_call("  node  \"%~dp0..\\pkg\\cli.js\" %*").map(|c| c.1),
+            Some("..\\pkg\\cli.js".to_string())
+        );
+        assert_eq!(
+            shim_call("  node  \"%~dp0/../pkg/cli.js\" %*").map(|c| c.1),
+            Some("../pkg/cli.js".to_string())
+        );
         let folder = tempfile::tempdir().unwrap();
         let script = folder
             .path()
@@ -1175,6 +1391,7 @@ mod tests {
             instructions: INSTRUCTIONS,
             schema: schema(),
             claude_model: None,
+            codex_model: None,
         }
     }
 

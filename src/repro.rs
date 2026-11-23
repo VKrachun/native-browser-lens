@@ -342,9 +342,18 @@ fn entries(evidence: &Evidence, context: &Context) -> Vec<Entry> {
         })
         .collect();
     let mut requests: HashMap<&str, (&str, &str)> = HashMap::new();
+    let mut sockets: HashMap<&str, &str> = HashMap::new();
     for event in &evidence.events {
         let data = &event.data;
         let text = |key: &str| data[key].as_str().unwrap_or("");
+        let socket = |sockets: &HashMap<&str, &str>| {
+            sockets
+                .get(text("requestId"))
+                .copied()
+                .unwrap_or("")
+                .to_string()
+        };
+        let mut timestamp = event.timestamp;
         let line = match event.kind.as_str() {
             "request" => {
                 requests.insert(text("requestId"), (text("method"), text("resourceType")));
@@ -370,11 +379,35 @@ fn entries(evidence: &Evidence, context: &Context) -> Vec<Entry> {
             "log" if matches!(text("level"), "error" | "warning") => {
                 Some(format!("browser {}: {}", text("level"), text("text")))
             }
+            "marker" => Some(format!("[marker] {}", text("label"))),
+            "webSocket" => {
+                sockets.insert(text("requestId"), text("url"));
+                Some(format!("WebSocket opened: {}", text("url")))
+            }
+            "webSocketError" => Some(format!(
+                "WebSocket error: {} {}",
+                text("errorText"),
+                socket(&sockets)
+            )),
+            "webSocketClosed" => Some(format!("WebSocket closed: {}", socket(&sockets))),
+            "video" => {
+                // The event comes at Stop; the video starts earlier.
+                timestamp = data["startedAt"].as_i64().unwrap_or(timestamp);
+                let size = data["blob"]["size"].as_u64().unwrap_or(0) as f64 / 1_048_576.0;
+                Some(format!(
+                    "[video] the tab video starts ({size:.1} MB{})",
+                    if data["truncated"] == true {
+                        ", cut at 200 MiB"
+                    } else {
+                        ""
+                    }
+                ))
+            }
             _ => None,
         };
         if let Some(text) = line {
             entries.push(Entry {
-                timestamp: event.timestamp,
+                timestamp,
                 text: text.trim_end().into(),
                 action: None,
                 source: Source::Page,
@@ -535,6 +568,12 @@ pub fn mark_targets(shapes: &[Shape], elements: &[PageElement], scale: f64) -> V
                 y,
                 width,
                 height,
+            }
+            | Shape::Blur {
+                x,
+                y,
+                width,
+                height,
             } => Some(boxed(*x, *y, *width, *height)),
             _ => None,
         })
@@ -564,7 +603,15 @@ pub fn mark_targets(shapes: &[Shape], elements: &[PageElement], scale: f64) -> V
     let mut targets = Vec::new();
     for (index, shape) in shapes.iter().enumerate() {
         let (kind, found) = match shape {
-            Shape::Mask { .. } => continue,
+            Shape::Mask { .. } | Shape::Blur { .. } => continue,
+            Shape::Text { x, y, .. } => (
+                "text",
+                smallest_at(x / scale, y / scale).into_iter().collect(),
+            ),
+            Shape::Badge { x, y, .. } => (
+                "badge",
+                smallest_at(x / scale, y / scale).into_iter().collect(),
+            ),
             Shape::Arrow { to, .. } => (
                 "arrow",
                 smallest_at(to.x / scale, to.y / scale)
@@ -880,6 +927,39 @@ mod tests {
              +00:00.600  HTTP 500 from POST https://shop.test/api/price\n\
              +00:00.700  console.error: total is NaN\n\
              +00:01.000  go to https://shop.test/receipt\n"
+        );
+    }
+
+    #[test]
+    fn the_timeline_shows_markers_sockets_and_the_video() {
+        let mut evidence = checkout();
+        evidence.actions.clear();
+        evidence.events = vec![
+            event(
+                1000,
+                "webSocket",
+                json!({ "requestId": "s1", "url": "wss://shop.test/live" }),
+            ),
+            event(1200, "marker", json!({ "label": "price wrong here" })),
+            event(
+                1300,
+                "webSocketError",
+                json!({ "requestId": "s1", "errorText": "reset" }),
+            ),
+            event(
+                2000,
+                "video",
+                json!({ "blob": { "sha256": "a", "size": 2_097_152 }, "startedAt": 900, "truncated": true }),
+            ),
+            event(1400, "webSocketClosed", json!({ "requestId": "s1" })),
+        ];
+        assert_eq!(
+            timeline(&evidence, &Context::default()),
+            "+00:00.000  [video] the tab video starts (2.0 MB, cut at 200 MiB)\n\
+             +00:00.100  WebSocket opened: wss://shop.test/live\n\
+             +00:00.300  [marker] price wrong here\n\
+             +00:00.400  WebSocket error: reset wss://shop.test/live\n\
+             +00:00.500  WebSocket closed: wss://shop.test/live\n"
         );
     }
 

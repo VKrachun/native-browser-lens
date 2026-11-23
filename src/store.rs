@@ -162,6 +162,9 @@ const MIGRATIONS: &[&str] = &[
             OR EXISTS (SELECT 1 FROM observations)) FROM reviews
         UNION ALL SELECT 'voice_notes', COALESCE(MAX(id), 0) + 1000 * (EXISTS (SELECT 1 FROM settings)
             OR EXISTS (SELECT 1 FROM observations)) FROM voice_notes;",
+    // The tab videos a capture's evidence names: the evidence is a blob, so without this column
+    // no record would name them and the sweep would remove them.
+    "ALTER TABLE captures ADD COLUMN videos TEXT NOT NULL DEFAULT '[]';",
 ];
 
 /// A stored body this Lens cannot read (a newer Lens wrote it, say) is left out, and says so in
@@ -199,6 +202,11 @@ pub struct TaskPlan {
 }
 
 /// Copies every capture and voice note of `from` to `to`, in ID order.
+/// The setting that marks a capture whose pictures wait to be rendered from its replay.
+pub fn pending_pictures(capture: i64) -> String {
+    format!("pictures.pending.{capture}")
+}
+
 fn copy_children(tx: &rusqlite::Transaction, from: i64, to: i64) -> rusqlite::Result<()> {
     for table in ["captures", "voice_notes"] {
         // Every column but the row ID and the owner, so a later migration is copied too.
@@ -216,6 +224,20 @@ fn copy_children(tx: &rusqlite::Transaction, from: i64, to: i64) -> rusqlite::Re
                  SELECT ?2, {columns} FROM {table} WHERE observation_id = ?1 ORDER BY id"
             ),
             params![from, to],
+        )?;
+    }
+    // A copy of a capture whose pictures wait for the replay tools waits too. Copies come in the
+    // originals' order, and `to` holds only the copies.
+    let ids = |owner: i64| -> rusqlite::Result<Vec<i64>> {
+        tx.prepare("SELECT id FROM captures WHERE observation_id = ?1 ORDER BY id")?
+            .query_map([owner], |r| r.get(0))?
+            .collect()
+    };
+    for (original, copy) in ids(from)?.into_iter().zip(ids(to)?) {
+        tx.execute(
+            "INSERT OR REPLACE INTO settings (key, value)
+             SELECT ?2, value FROM settings WHERE key = ?1",
+            params![pending_pictures(original), pending_pictures(copy)],
         )?;
     }
     Ok(())
@@ -357,6 +379,8 @@ pub struct CaptureRow {
     pub kind: CaptureKind,
     pub started_at: i64,
     pub shots: Vec<Shot>,
+    /// The WebM tab videos the evidence's `video` events name.
+    pub videos: Vec<BlobRef>,
 }
 
 fn mode_name(mode: CaptureMode) -> &'static str {
@@ -387,6 +411,20 @@ impl Store {
         let mut store = Self { db };
         store.migrate()?;
         Ok(store)
+    }
+
+    /// Opens the notebook only to read it, without a migration: for `lens doctor` while Lens is
+    /// stopped. Fails when the schema is not this Lens's own.
+    pub fn open_read_only(path: &Path) -> rusqlite::Result<Self> {
+        let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if usize::try_from(version).ok() != Some(MIGRATIONS.len()) {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "the notebook uses schema {version}, not {}",
+                MIGRATIONS.len()
+            )));
+        }
+        Ok(Self { db })
     }
 
     fn migrate(&mut self) -> rusqlite::Result<()> {
@@ -546,13 +584,73 @@ impl Store {
     pub fn delete_observation(&self, id: i64) -> rusqlite::Result<bool> {
         // One transaction: a failure never leaves the observation without its filing receipt.
         let tx = self.db.unchecked_transaction()?;
-        tx.execute("DELETE FROM filings WHERE observation_id = ?1", [id])?;
-        let deleted = tx.execute("DELETE FROM observations WHERE id = ?1", [id])? > 0;
-        for key in [format!("issues.{id}"), format!("title.auto.{id}")] {
-            tx.execute("DELETE FROM settings WHERE key = ?1", [key])?;
+        let deleted = delete_in(&tx, id)?;
+        tx.commit()?;
+        Ok(deleted)
+    }
+
+    /// Deletes every observation last changed before `older_than_ms` (Unix ms), with its
+    /// captures, voice notes, reviews, filings and settings. With `filed_only`, only those with a
+    /// task in a tracker (a filing whose receipt has a task URL). One transaction. Blobs stay for
+    /// the sweep. Returns how many observations went.
+    pub fn prune_observations(
+        &self,
+        older_than_ms: i64,
+        filed_only: bool,
+    ) -> rusqlite::Result<u64> {
+        let tx = self.db.unchecked_transaction()?;
+        let ids: Vec<i64> = tx
+            .prepare(
+                "SELECT o.id FROM observations o WHERE o.updated_at < ?1
+                 AND (NOT ?2 OR EXISTS (SELECT 1 FROM filings f WHERE f.observation_id = o.id
+                     AND json_extract(f.body, '$.receipt.taskUrl') IS NOT NULL))",
+            )?
+            .query_map(params![older_than_ms, filed_only], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut deleted = 0;
+        for id in ids {
+            deleted += u64::from(delete_in(&tx, id)?);
         }
         tx.commit()?;
         Ok(deleted)
+    }
+
+    /// Bytes the notebook's records name, each blob counted once (in the first category that
+    /// names it), and how many observations and reviews there are.
+    pub fn storage_summary(&self) -> rusqlite::Result<CategoryCounts> {
+        let mut seen = std::collections::HashSet::new();
+        let mut sum = |sql: &str| -> rusqlite::Result<u64> {
+            let mut total = 0u64;
+            let mut statement = self.db.prepare(sql)?;
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                let sha: Option<String> = row.get(0)?;
+                let size: Option<i64> = row.get(1)?;
+                if let (Some(sha), Some(size)) = (sha, size)
+                    && seen.insert(sha)
+                {
+                    total += size.max(0) as u64;
+                }
+            }
+            Ok(total)
+        };
+        let recordings_bytes = sum("SELECT recording_sha256, recording_size FROM captures
+             UNION ALL SELECT json_extract(j.value, '$.sha256'), json_extract(j.value, '$.size')
+             FROM captures c, json_each(c.videos) j")?;
+        let audio_bytes = sum("SELECT audio_sha256, audio_size FROM voice_notes")?;
+        let screenshots_bytes = sum("SELECT screenshot_sha256, screenshot_size FROM captures
+             UNION ALL SELECT json_extract(j.value, '$.image.sha256'),
+                 json_extract(j.value, '$.image.size')
+             FROM captures c, json_each(c.shots) j")?;
+        let other_bytes = sum("SELECT evidence_sha256, evidence_size FROM captures")?;
+        Ok(CategoryCounts {
+            recordings_bytes,
+            audio_bytes,
+            screenshots_bytes,
+            other_bytes,
+            observation_count: self.count("observations")?.into(),
+            review_count: self.count("reviews")?.into(),
+        })
     }
 
     pub fn update_observation(
@@ -1041,8 +1139,8 @@ impl Store {
         tx.execute(
             "INSERT INTO captures (observation_id, created_at, page_url, page_title, mode,
                 screenshot_sha256, screenshot_size, evidence_sha256, evidence_size, event_count, gap_count,
-                recording_sha256, recording_size, kind, started_at, shots)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                recording_sha256, recording_size, kind, started_at, shots, videos)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 observation,
                 row.created_at,
@@ -1062,7 +1160,8 @@ impl Store {
                     CaptureKind::Session => "session",
                 },
                 row.started_at,
-                serde_json::to_string(&row.shots).expect("shots serialize")
+                serde_json::to_string(&row.shots).expect("shots serialize"),
+                serde_json::to_string(&row.videos).expect("videos serialize")
             ],
         )?;
         let id = tx.last_insert_rowid();
@@ -1202,6 +1301,34 @@ impl Store {
             params![capture, encoded],
         )? > 0)
     }
+}
+
+/// What the notebook's records hold, for a storage page: bytes by kind of blob (each blob
+/// counted once) and record counts.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CategoryCounts {
+    pub recordings_bytes: u64,
+    pub audio_bytes: u64,
+    pub screenshots_bytes: u64,
+    /// Evidence files (network, console, actions).
+    pub other_bytes: u64,
+    pub observation_count: u64,
+    pub review_count: u64,
+}
+
+/// Deletes one observation and what hangs on it, inside `tx`. False when there is none.
+fn delete_in(tx: &rusqlite::Transaction, id: i64) -> rusqlite::Result<bool> {
+    tx.execute(
+        "DELETE FROM settings WHERE key IN
+             (SELECT 'pictures.pending.' || id FROM captures WHERE observation_id = ?1)",
+        [id],
+    )?;
+    tx.execute("DELETE FROM filings WHERE observation_id = ?1", [id])?;
+    let deleted = tx.execute("DELETE FROM observations WHERE id = ?1", [id])? > 0;
+    for key in [format!("issues.{id}"), format!("title.auto.{id}")] {
+        tx.execute("DELETE FROM settings WHERE key = ?1", [key])?;
+    }
+    Ok(deleted)
 }
 
 /// Each run of exactly 64 lowercase hex digits in `text`.
@@ -1346,10 +1473,14 @@ mod tests {
         // A notebook from before AUTOINCREMENT, with a review, a filing and a voice note.
         {
             let db = Connection::open(&path).unwrap();
-            for sql in &MIGRATIONS[..MIGRATIONS.len() - 1] {
+            let rebuild = MIGRATIONS
+                .iter()
+                .position(|m| m.contains("AUTOINCREMENT"))
+                .unwrap();
+            for sql in &MIGRATIONS[..rebuild] {
                 db.execute_batch(sql).unwrap();
             }
-            db.pragma_update(None, "user_version", (MIGRATIONS.len() - 1) as i64)
+            db.pragma_update(None, "user_version", rebuild as i64)
                 .unwrap();
             db.execute_batch(
                 "INSERT INTO observations (id, title, created_at, notes) VALUES (1, 'a', 1, 'n'), (2, 'b', 2, '');
@@ -1474,6 +1605,7 @@ mod tests {
                     started_at: 1000,
                     shots: vec![],
                     recording: Some(blob('r')),
+                    videos: vec![],
                 },
             )
             .unwrap()
@@ -1541,6 +1673,7 @@ mod tests {
             started_at: 5,
             shots: vec![],
             recording: None,
+            videos: vec![],
         };
 
         let first = store.create_capture(None, row("Cart")).unwrap().unwrap();
@@ -1571,6 +1704,9 @@ mod tests {
         };
         assert!(store.save_edits(second.id, &edits).unwrap());
         store
+            .set_setting(&pending_pictures(second.id), "1")
+            .unwrap();
+        store
             .add_voice_note(first.observation, 6, 900, &blob('v'))
             .unwrap();
         let revision = store
@@ -1591,6 +1727,19 @@ mod tests {
         let copied = store.list_captures(copy.id).unwrap();
         assert_eq!(copied.len(), 2);
         assert_eq!(copied[1].edits, edits);
+        // Pictures that wait for the replay tools wait in the copy too.
+        assert!(
+            store
+                .setting(&pending_pictures(copied[1].id))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            store
+                .setting(&pending_pictures(copied[0].id))
+                .unwrap()
+                .is_none()
+        );
         assert!(
             copied
                 .iter()
@@ -1693,6 +1842,168 @@ mod tests {
         );
         assert!(store.delete_project(created.id).unwrap());
         assert!(store.list_projects().unwrap().is_empty());
+    }
+
+    fn capture_row(screenshot: char, recording: Option<char>, shot: char) -> CaptureRow {
+        let blob = |c: char, size: u64| BlobRef {
+            sha256: c.to_string().repeat(64),
+            size,
+            media_type: String::new(),
+        };
+        CaptureRow {
+            created_at: 10,
+            page_url: "https://shop.test/".into(),
+            page_title: "Shop".into(),
+            mode: CaptureMode::Deep,
+            screenshot: blob(screenshot, 100),
+            evidence: blob('e', 7),
+            event_count: 0,
+            gap_count: 0,
+            recording: recording.map(|c| blob(c, 1000)),
+            kind: CaptureKind::Session,
+            started_at: 1,
+            shots: vec![Shot {
+                at: 5,
+                image: blob(shot, 20),
+                reason: "step".into(),
+            }],
+            videos: vec![],
+        }
+    }
+
+    #[test]
+    fn the_sweep_keeps_a_video_that_a_capture_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("lens.sqlite")).unwrap();
+        let blobs = crate::blobs::Blobs::new(dir.path().join("blobs"));
+        let video = blobs.put(b"\x1aE\xdf\xa3webm", "video/webm").unwrap();
+        let stray = blobs.put(b"no record names this", "video/webm").unwrap();
+        let mut row = capture_row('a', None, 'b');
+        row.videos = vec![video.clone()];
+        store.create_capture(None, row).unwrap().unwrap();
+        let (keep, _) = store.references().unwrap();
+        assert_eq!(blobs.sweep(&keep, std::time::Duration::ZERO).unwrap(), 1);
+        assert!(blobs.file(&video.sha256).unwrap().is_file());
+        assert!(blobs.read_all(&stray.sha256).is_err());
+        assert!(
+            store.storage_summary().unwrap().recordings_bytes >= video.size,
+            "the video counts as a recording"
+        );
+    }
+
+    #[test]
+    fn the_storage_summary_counts_each_blob_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("lens.sqlite")).unwrap();
+        let first = store
+            .create_capture(None, capture_row('a', Some('r'), 's'))
+            .unwrap()
+            .unwrap();
+        // The same screenshot, recording and evidence again, and a new shot.
+        store
+            .create_capture(Some(first.observation), capture_row('a', Some('r'), 't'))
+            .unwrap();
+        let audio = BlobRef {
+            sha256: "f".repeat(64),
+            size: 50,
+            media_type: "audio/wav".into(),
+        };
+        store
+            .add_voice_note(first.observation, 1, 100, &audio)
+            .unwrap();
+        assert_eq!(
+            store.storage_summary().unwrap(),
+            CategoryCounts {
+                recordings_bytes: 1000,
+                audio_bytes: 50,
+                screenshots_bytes: 100 + 20 + 20,
+                other_bytes: 7,
+                observation_count: 1,
+                review_count: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn pruning_takes_old_observations_and_what_hangs_on_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("lens.sqlite")).unwrap();
+        // Two old observations (one filed, one not) and a new one.
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            let capture = store
+                .create_capture(None, capture_row('a', None, 's'))
+                .unwrap()
+                .unwrap();
+            ids.push(capture.observation);
+            store
+                .set_setting(&pending_pictures(capture.id), "1")
+                .unwrap();
+        }
+        let (filed, draft, new) = (ids[0], ids[1], ids[2]);
+        store
+            .db
+            .execute(
+                "UPDATE observations SET updated_at = 5000 WHERE id = ?1",
+                [new],
+            )
+            .unwrap();
+        for (review, observation) in [(1, filed), (2, draft)] {
+            store
+                .db
+                .execute(
+                    "INSERT INTO reviews (id, observation_id, body) VALUES (?1, ?2, '{}')",
+                    params![review, observation],
+                )
+                .unwrap();
+        }
+        store
+            .db
+            .execute(
+                "INSERT INTO filings (review_id, observation_id, body) VALUES
+                 (1, ?1, '{\"receipt\":{\"taskId\":\"t\",\"taskUrl\":\"https://v.test/t\"}}'),
+                 (2, ?2, '{\"receipt\":null}')",
+                params![filed, draft],
+            )
+            .unwrap();
+        store.set_setting(&format!("issues.{filed}"), "[]").unwrap();
+
+        assert_eq!(store.prune_observations(1000, true).unwrap(), 1);
+        assert!(store.get_observation(filed).unwrap().is_none());
+        assert!(store.get_observation(draft).unwrap().is_some(), "not filed");
+        assert!(store.setting(&format!("issues.{filed}")).unwrap().is_none());
+
+        assert_eq!(store.prune_observations(1000, false).unwrap(), 1);
+        assert!(store.get_observation(draft).unwrap().is_none());
+        assert!(store.get_observation(new).unwrap().is_some(), "too new");
+        let count = |table: &str| store.count(table).unwrap();
+        assert_eq!(
+            [count("captures"), count("reviews"), count("filings")],
+            [1, 0, 0]
+        );
+        let pending: u32 = store
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM settings WHERE key LIKE 'pictures.pending.%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending, 1, "only the new capture's pictures still wait");
+    }
+
+    #[test]
+    fn a_read_only_notebook_reads_and_refuses_another_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lens.sqlite");
+        Store::open(&path)
+            .unwrap()
+            .create_observation("a", None, 1)
+            .unwrap();
+        let store = Store::open_read_only(&path).unwrap();
+        assert_eq!(store.count("observations").unwrap(), 1);
+        assert!(store.set_setting("x", "y").is_err(), "read only");
+        assert!(Store::open_read_only(&dir.path().join("missing.sqlite")).is_err());
     }
 
     #[test]

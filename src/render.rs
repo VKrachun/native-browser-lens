@@ -9,10 +9,23 @@ const ARROW_HEAD: f32 = 14.0;
 pub fn render(png: &[u8], shapes: &[Shape]) -> Result<Vec<u8>, String> {
     let mut pixmap =
         Pixmap::decode_png(png).map_err(|e| format!("the screenshot cannot be read: {e}"))?;
+    let scale = text_scale(&pixmap);
     for shape in shapes {
-        draw_mark(&mut pixmap, shape);
+        draw_mark(&mut pixmap, shape, scale);
     }
-    // Masks last, over every mark, so nothing drawn can show through them.
+    // Blurs and masks last, over every mark, so nothing drawn can show through them; masks
+    // after blurs, so a blur never averages black into what a mask left.
+    for shape in shapes {
+        if let Shape::Blur {
+            x,
+            y,
+            width,
+            height,
+        } = shape
+        {
+            pixelate(&mut pixmap, *x, *y, *width, *height);
+        }
+    }
     for shape in shapes {
         if let Shape::Mask {
             x,
@@ -79,6 +92,55 @@ pub fn mask_webp(webp: &[u8], areas: &[crate::protocol::Area]) -> Result<Vec<u8>
     Ok(out)
 }
 
+/// Whole pixels, rounded outwards and clipped to the image: left, top, right, bottom.
+fn pixel_box(pixmap: &Pixmap, x: f64, y: f64, width: f64, height: f64) -> [usize; 4] {
+    let (w, h) = (f64::from(pixmap.width()), f64::from(pixmap.height()));
+    let clamp = |v: f64, max: f64| {
+        if v.is_finite() {
+            v.clamp(0.0, max) as usize
+        } else {
+            0
+        }
+    };
+    [
+        clamp(x.min(x + width).floor(), w),
+        clamp(y.min(y + height).floor(), h),
+        clamp(x.max(x + width).ceil(), w),
+        clamp(y.max(y + height).ceil(), h),
+    ]
+}
+
+/// Large blocks of one average color: text under them cannot be read back, as a soft blur can.
+fn pixelate(pixmap: &mut Pixmap, x: f64, y: f64, width: f64, height: f64) {
+    let [left, top, right, bottom] = pixel_box(pixmap, x, y, width, height);
+    let block = (pixmap.width() as usize / 120).clamp(12, 48);
+    let stride = pixmap.width() as usize * 4;
+    let data = pixmap.data_mut();
+    for by in (top..bottom).step_by(block) {
+        for bx in (left..right).step_by(block) {
+            let (ex, ey) = ((bx + block).min(right), (by + block).min(bottom));
+            let mut sum = [0u64; 4];
+            for y in by..ey {
+                for x in bx..ex {
+                    let at = y * stride + x * 4;
+                    for c in 0..4 {
+                        sum[c] += u64::from(data[at + c]);
+                    }
+                }
+            }
+            let count = ((ex - bx) * (ey - by)) as u64;
+            // Premultiplied channels average to premultiplied channels.
+            let mean = sum.map(|v| (v / count) as u8);
+            for y in by..ey {
+                for x in bx..ex {
+                    let at = y * stride + x * 4;
+                    data[at..at + 4].copy_from_slice(&mean);
+                }
+            }
+        }
+    }
+}
+
 /// Opaque black on whole pixels, without anti-aliasing: a partly covered edge pixel could still
 /// show part of what is under it.
 fn burn(pixmap: &mut Pixmap, x: f64, y: f64, width: f64, height: f64) {
@@ -93,9 +155,18 @@ fn burn(pixmap: &mut Pixmap, x: f64, y: f64, width: f64, height: f64) {
     pixmap.fill_rect(rect, &paint, Transform::identity(), None);
 }
 
-fn draw_mark(pixmap: &mut Pixmap, shape: &Shape) {
+fn draw_mark(pixmap: &mut Pixmap, shape: &Shape, scale: f32) {
     let (points, color, closed): (Vec<Point>, &str, bool) = match shape {
-        Shape::Mask { .. } => return,
+        Shape::Mask { .. } | Shape::Blur { .. } => return,
+        Shape::Text { x, y, text, color } => {
+            return draw_label(pixmap, *x as f32, *y as f32, text, color, scale);
+        }
+        Shape::Badge {
+            x,
+            y,
+            number,
+            color,
+        } => return draw_badge(pixmap, *x as f32, *y as f32, *number, color, scale),
         Shape::Rectangle {
             x,
             y,
@@ -176,13 +247,259 @@ fn draw_arrow_head(pixmap: &mut Pixmap, from: Point, to: Point, color: &str) {
 }
 
 /// `#rrggbb`, validated when the shape was saved.
-fn paint(color: &str) -> Paint<'static> {
+fn rgb(color: &str) -> [u8; 3] {
     let channel =
         |at: usize| u8::from_str_radix(color.get(at..at + 2).unwrap_or("00"), 16).unwrap_or(0);
+    [channel(1), channel(3), channel(5)]
+}
+
+fn paint(color: &str) -> Paint<'static> {
+    let [r, g, b] = rgb(color);
     let mut paint = Paint::default();
-    paint.set_color_rgba8(channel(1), channel(3), channel(5), 255);
+    paint.set_color_rgba8(r, g, b, 255);
     paint.anti_alias = true;
     paint
+}
+
+/// White text on dark colors, black on light ones.
+fn ink(color: &str) -> &'static str {
+    let [r, g, b] = rgb(color).map(f32::from);
+    if 0.299 * r + 0.587 * g + 0.114 * b > 160.0 {
+        "#000000"
+    } else {
+        "#ffffff"
+    }
+}
+
+/// Font pixels per screenshot pixel: labels stay readable on a 4K screenshot too.
+fn text_scale(pixmap: &Pixmap) -> f32 {
+    (pixmap.width() / 500).clamp(2, 6) as f32
+}
+
+/// The 5x7 glyphs of printable ASCII, one byte per column, bit 0 at the top.
+const FONT: [[u8; 5]; 95] = [
+    [0x00, 0x00, 0x00, 0x00, 0x00],
+    [0x00, 0x00, 0x5F, 0x00, 0x00],
+    [0x00, 0x07, 0x00, 0x07, 0x00],
+    [0x14, 0x7F, 0x14, 0x7F, 0x14],
+    [0x24, 0x2A, 0x7F, 0x2A, 0x12],
+    [0x23, 0x13, 0x08, 0x64, 0x62],
+    [0x36, 0x49, 0x55, 0x22, 0x50],
+    [0x00, 0x05, 0x03, 0x00, 0x00],
+    [0x00, 0x1C, 0x22, 0x41, 0x00],
+    [0x00, 0x41, 0x22, 0x1C, 0x00],
+    [0x08, 0x2A, 0x1C, 0x2A, 0x08],
+    [0x08, 0x08, 0x3E, 0x08, 0x08],
+    [0x00, 0x50, 0x30, 0x00, 0x00],
+    [0x08, 0x08, 0x08, 0x08, 0x08],
+    [0x00, 0x60, 0x60, 0x00, 0x00],
+    [0x20, 0x10, 0x08, 0x04, 0x02],
+    [0x3E, 0x51, 0x49, 0x45, 0x3E],
+    [0x00, 0x42, 0x7F, 0x40, 0x00],
+    [0x42, 0x61, 0x51, 0x49, 0x46],
+    [0x21, 0x41, 0x45, 0x4B, 0x31],
+    [0x18, 0x14, 0x12, 0x7F, 0x10],
+    [0x27, 0x45, 0x45, 0x45, 0x39],
+    [0x3C, 0x4A, 0x49, 0x49, 0x30],
+    [0x01, 0x71, 0x09, 0x05, 0x03],
+    [0x36, 0x49, 0x49, 0x49, 0x36],
+    [0x06, 0x49, 0x49, 0x29, 0x1E],
+    [0x00, 0x36, 0x36, 0x00, 0x00],
+    [0x00, 0x56, 0x36, 0x00, 0x00],
+    [0x08, 0x14, 0x22, 0x41, 0x00],
+    [0x14, 0x14, 0x14, 0x14, 0x14],
+    [0x00, 0x41, 0x22, 0x14, 0x08],
+    [0x02, 0x01, 0x51, 0x09, 0x06],
+    [0x32, 0x49, 0x79, 0x41, 0x3E],
+    [0x7E, 0x11, 0x11, 0x11, 0x7E],
+    [0x7F, 0x49, 0x49, 0x49, 0x36],
+    [0x3E, 0x41, 0x41, 0x41, 0x22],
+    [0x7F, 0x41, 0x41, 0x22, 0x1C],
+    [0x7F, 0x49, 0x49, 0x49, 0x41],
+    [0x7F, 0x09, 0x09, 0x01, 0x01],
+    [0x3E, 0x41, 0x41, 0x51, 0x32],
+    [0x7F, 0x08, 0x08, 0x08, 0x7F],
+    [0x00, 0x41, 0x7F, 0x41, 0x00],
+    [0x20, 0x40, 0x41, 0x3F, 0x01],
+    [0x7F, 0x08, 0x14, 0x22, 0x41],
+    [0x7F, 0x40, 0x40, 0x40, 0x40],
+    [0x7F, 0x02, 0x04, 0x02, 0x7F],
+    [0x7F, 0x04, 0x08, 0x10, 0x7F],
+    [0x3E, 0x41, 0x41, 0x41, 0x3E],
+    [0x7F, 0x09, 0x09, 0x09, 0x06],
+    [0x3E, 0x41, 0x51, 0x21, 0x5E],
+    [0x7F, 0x09, 0x19, 0x29, 0x46],
+    [0x46, 0x49, 0x49, 0x49, 0x31],
+    [0x01, 0x01, 0x7F, 0x01, 0x01],
+    [0x3F, 0x40, 0x40, 0x40, 0x3F],
+    [0x1F, 0x20, 0x40, 0x20, 0x1F],
+    [0x7F, 0x20, 0x18, 0x20, 0x7F],
+    [0x63, 0x14, 0x08, 0x14, 0x63],
+    [0x03, 0x04, 0x78, 0x04, 0x03],
+    [0x61, 0x51, 0x49, 0x45, 0x43],
+    [0x00, 0x7F, 0x41, 0x41, 0x00],
+    [0x02, 0x04, 0x08, 0x10, 0x20],
+    [0x00, 0x41, 0x41, 0x7F, 0x00],
+    [0x04, 0x02, 0x01, 0x02, 0x04],
+    [0x40, 0x40, 0x40, 0x40, 0x40],
+    [0x00, 0x01, 0x02, 0x04, 0x00],
+    [0x20, 0x54, 0x54, 0x54, 0x78],
+    [0x7F, 0x48, 0x44, 0x44, 0x38],
+    [0x38, 0x44, 0x44, 0x44, 0x20],
+    [0x38, 0x44, 0x44, 0x48, 0x7F],
+    [0x38, 0x54, 0x54, 0x54, 0x18],
+    [0x08, 0x7E, 0x09, 0x01, 0x02],
+    [0x0C, 0x52, 0x52, 0x52, 0x3E],
+    [0x7F, 0x08, 0x04, 0x04, 0x78],
+    [0x00, 0x44, 0x7D, 0x40, 0x00],
+    [0x20, 0x40, 0x44, 0x3D, 0x00],
+    [0x7F, 0x10, 0x28, 0x44, 0x00],
+    [0x00, 0x41, 0x7F, 0x40, 0x00],
+    [0x7C, 0x04, 0x18, 0x04, 0x78],
+    [0x7C, 0x08, 0x04, 0x04, 0x78],
+    [0x38, 0x44, 0x44, 0x44, 0x38],
+    [0x7C, 0x14, 0x14, 0x14, 0x08],
+    [0x08, 0x14, 0x14, 0x18, 0x7C],
+    [0x7C, 0x08, 0x04, 0x04, 0x08],
+    [0x48, 0x54, 0x54, 0x54, 0x20],
+    [0x04, 0x3F, 0x44, 0x40, 0x20],
+    [0x3C, 0x40, 0x40, 0x20, 0x7C],
+    [0x1C, 0x20, 0x40, 0x20, 0x1C],
+    [0x3C, 0x40, 0x30, 0x40, 0x3C],
+    [0x44, 0x28, 0x10, 0x28, 0x44],
+    [0x0C, 0x50, 0x50, 0x50, 0x3C],
+    [0x44, 0x64, 0x54, 0x4C, 0x44],
+    [0x00, 0x08, 0x36, 0x41, 0x00],
+    [0x00, 0x00, 0x7F, 0x00, 0x00],
+    [0x00, 0x41, 0x36, 0x08, 0x00],
+    [0x08, 0x04, 0x08, 0x10, 0x08],
+];
+
+/// One glyph cell, with its gap: 6 by 8 font pixels.
+const CELL: (f32, f32) = (6.0, 8.0);
+
+/// ponytail: printable ASCII only, other characters show as `?`; a real font (fontdue) if labels
+/// in other scripts matter.
+fn draw_text(pixmap: &mut Pixmap, x: f32, y: f32, line: &str, color: &str, scale: f32) {
+    let paint = Paint {
+        anti_alias: false,
+        ..paint(color)
+    };
+    for (n, c) in line.chars().enumerate() {
+        let glyph = FONT[(c as usize)
+            .checked_sub(32)
+            .filter(|i| *i < 95)
+            .unwrap_or(31)];
+        let left = x + n as f32 * CELL.0 * scale;
+        for (column, bits) in glyph.iter().enumerate() {
+            for row in 0..7 {
+                if (bits >> row) & 1 == 1
+                    && let Some(rect) = Rect::from_xywh(
+                        left + column as f32 * scale,
+                        y + row as f32 * scale,
+                        scale,
+                        scale,
+                    )
+                {
+                    pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+                }
+            }
+        }
+    }
+}
+
+/// Lines of at most `width` characters, broken between words where it can.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    for paragraph in text.lines() {
+        let mut line = String::new();
+        for word in paragraph.split_whitespace() {
+            let mut word: Vec<char> = word.chars().collect();
+            while !word.is_empty() {
+                let used = line.chars().count();
+                let room = width.saturating_sub(used + usize::from(used > 0));
+                if word.len() <= room {
+                    if used > 0 {
+                        line.push(' ');
+                    }
+                    line.extend(word.drain(..));
+                } else if used > 0 {
+                    lines.push(std::mem::take(&mut line));
+                } else {
+                    line.extend(word.drain(..width));
+                    lines.push(std::mem::take(&mut line));
+                }
+            }
+        }
+        lines.push(line);
+    }
+    lines
+}
+
+/// The text on a rounded pill of its color, the pill's top left corner at `x`, `y`.
+fn draw_label(pixmap: &mut Pixmap, x: f32, y: f32, text: &str, color: &str, scale: f32) {
+    let lines = wrap(text, 48);
+    let longest = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as f32;
+    let pad = 3.0 * scale;
+    let width = longest * CELL.0 * scale - scale + 2.0 * pad;
+    let height = lines.len() as f32 * CELL.1 * scale - scale + 2.0 * pad;
+    if let Some(pill) = rounded(x, y, width, height, 2.0 * scale) {
+        pixmap.fill_path(
+            &pill,
+            &paint(color),
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+    }
+    for (n, line) in lines.iter().enumerate() {
+        let top = y + pad + n as f32 * CELL.1 * scale;
+        draw_text(pixmap, x + pad, top, line, ink(color), scale);
+    }
+}
+
+fn rounded(x: f32, y: f32, width: f32, height: f32, radius: f32) -> Option<tiny_skia::Path> {
+    let r = radius.min(width / 2.0).min(height / 2.0);
+    let (right, bottom) = (x + width, y + height);
+    let mut path = PathBuilder::new();
+    path.move_to(x + r, y);
+    path.line_to(right - r, y);
+    path.quad_to(right, y, right, y + r);
+    path.line_to(right, bottom - r);
+    path.quad_to(right, bottom, right - r, bottom);
+    path.line_to(x + r, bottom);
+    path.quad_to(x, bottom, x, bottom - r);
+    path.line_to(x, y + r);
+    path.quad_to(x, y, x + r, y);
+    path.close();
+    path.finish()
+}
+
+/// A filled circle with a white ring, the step number in its middle.
+fn draw_badge(pixmap: &mut Pixmap, x: f32, y: f32, number: u32, color: &str, scale: f32) {
+    let digits = number.to_string();
+    let text_width = digits.len() as f32 * CELL.0 * scale - scale;
+    let radius = (6.0 * scale).max(text_width / 2.0 + 2.0 * scale);
+    for (r, fill) in [(radius + scale, "#ffffff"), (radius, color)] {
+        if let Some(circle) = PathBuilder::from_circle(x, y, r) {
+            pixmap.fill_path(
+                &circle,
+                &paint(fill),
+                FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
+        }
+    }
+    let (left, top) = (x - text_width / 2.0, y - 3.5 * scale);
+    draw_text(
+        pixmap,
+        left.round(),
+        top.round(),
+        &digits,
+        ink(color),
+        scale,
+    );
 }
 
 #[cfg(test)]
@@ -275,6 +592,89 @@ mod tests {
         ];
         let out = render(&white(20, 20), &shapes).unwrap();
         assert_eq!(pixel(&out, 19, 19), [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn a_blur_leaves_one_color_per_block_and_nothing_outside() {
+        // Black and white stripes one pixel wide: a 12 px block averages them to grey.
+        let mut pixmap = Pixmap::new(40, 40).unwrap();
+        pixmap.fill(tiny_skia::Color::WHITE);
+        for x in (0..40).step_by(2) {
+            burn(&mut pixmap, x as f64, 0.0, 1.0, 40.0);
+        }
+        let png = pixmap.encode_png().unwrap();
+        let shapes = [
+            Shape::Rectangle {
+                x: 2.0,
+                y: 2.0,
+                width: 6.0,
+                height: 6.0,
+                color: "#ff0000".into(),
+            },
+            Shape::Blur {
+                x: 0.0,
+                y: 0.0,
+                width: 12.0,
+                height: 12.0,
+            },
+        ];
+        let out = render(&png, &shapes).unwrap();
+        let block = pixel(&out, 0, 0);
+        for (x, y) in [(1, 1), (5, 11), (11, 0), (2, 2)] {
+            assert_eq!(pixel(&out, x, y), block, "pixel {x},{y}");
+        }
+        assert!(
+            block[0] > block[1],
+            "the red mark under it is averaged in, not on top"
+        );
+        assert_eq!(pixel(&out, 12, 0), [0, 0, 0, 255]);
+        assert_eq!(pixel(&out, 13, 0), [255, 255, 255, 255]);
+        assert!(shapes[1].hides() && !shapes[0].hides());
+    }
+
+    #[test]
+    fn a_label_is_a_pill_with_readable_text() {
+        let shape = Shape::Text {
+            x: 10.0,
+            y: 10.0,
+            text: "Hi".into(),
+            color: "#2f7bff".into(),
+        };
+        let out = render(&white(100, 60), &[shape]).unwrap();
+        // Scale 2: padding 6, so the H's left column runs down from (16, 16).
+        assert_eq!(pixel(&out, 16, 16), [255, 255, 255, 255], "white ink");
+        assert_eq!(pixel(&out, 13, 13), [0x2f, 0x7b, 0xff, 255], "the pill");
+        assert_eq!(pixel(&out, 5, 5), [255, 255, 255, 255], "outside");
+        assert_eq!(wrap("one two three", 7), ["one two", "three"]);
+        assert_eq!(wrap("abcdefghij", 4), ["abcd", "efgh", "ij"]);
+        assert_eq!(wrap("a\n\nb", 4), ["a", "", "b"]);
+    }
+
+    #[test]
+    fn a_badge_is_a_circle_with_its_number() {
+        let shape = Shape::Badge {
+            x: 30.0,
+            y: 30.0,
+            number: 1,
+            color: "#ffb000".into(),
+        };
+        let out = render(&white(60, 60), &[shape]).unwrap();
+        // A light color gets black ink: the 1's stem is the glyph's third column.
+        let (left, top) = (30 - 5, 30 - 7);
+        assert_eq!(pixel(&out, left + 4, top + 4), [0, 0, 0, 255], "the digit");
+        assert_eq!(
+            pixel(&out, 30 - 9, 30),
+            [0xff, 0xb0, 0x00, 255],
+            "the circle"
+        );
+        assert_eq!(pixel(&out, 0, 0), [255, 255, 255, 255]);
+        let bad = Shape::Badge {
+            x: 0.0,
+            y: 0.0,
+            number: 0,
+            color: "#ffb000".into(),
+        };
+        assert!(bad.validate().is_err());
     }
 
     #[test]

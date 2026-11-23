@@ -163,13 +163,26 @@ pub fn steps(status: &SetupStatus) -> Vec<Step> {
 /// Browsers used this week whose extension is older than the app, as "chromium 0.12.14".
 pub fn older_extensions(status: &SetupStatus) -> Vec<String> {
     let week_ago = crate::daemon::now_ms() - 7 * 24 * 60 * 60 * 1000;
+    let old = |e: &&crate::protocol::ClientSeen| {
+        crate::update::newer(&status.version, &e.client.extension_version)
+    };
+    // Each extension copy has its own profile ID: a current one in the same browser, seen later,
+    // replaced the old copy (a store build in place of an unpacked one).
+    let replaced = |e: &crate::protocol::ClientSeen| {
+        status
+            .extensions
+            .iter()
+            .any(|c| c.client.browser == e.client.browser && c.last_seen > e.last_seen && !old(&c))
+    };
     let mut older: Vec<String> = status
         .extensions
         .iter()
         .filter(|e| e.last_seen >= week_ago)
-        .filter(|e| crate::update::newer(&status.version, &e.client.extension_version))
+        .filter(old)
+        .filter(|e| !replaced(e))
         .map(|e| format!("{} {}", e.client.browser, e.client.extension_version))
         .collect();
+    older.sort();
     older.dedup();
     older
 }
@@ -204,6 +217,58 @@ fn agent_step(info: &crate::investigate::AgentInfo) -> Step {
     }
 }
 
+/// The doctor's line for a Lens that does not run. Not a failed step: the browser starts Lens
+/// when it needs it, unless the person quit it.
+/// Voice notes need a local Whisper model; any downloaded one counts.
+fn speech_step(paths: &Paths) -> Step {
+    let ready: Vec<&str> = crate::speech::MODELS
+        .iter()
+        .filter(|m| crate::speech::models_ready_for(paths, m.id))
+        .map(|m| m.name)
+        .collect();
+    Step {
+        name: "Speech model".into(),
+        mark: if ready.is_empty() {
+            Mark::Optional
+        } else {
+            Mark::Done
+        },
+        detail: if ready.is_empty() {
+            "not downloaded: voice notes wait until you download it in Lens settings".into()
+        } else {
+            format!("ready: {}", ready.join(", "))
+        },
+    }
+}
+
+/// MP4 export of recordings needs Node.js, FFmpeg and the replay packages.
+fn video_tools_step(paths: &Paths) -> Step {
+    let check = crate::attachments::check_video_tools(&paths.data.join("video-tools"));
+    Step {
+        name: "Video tools".into(),
+        mark: if check.ready {
+            Mark::Done
+        } else {
+            Mark::Optional
+        },
+        detail: check
+            .detail
+            .unwrap_or_else(|| "ready: recordings export as MP4".into()),
+    }
+}
+
+fn stopped_step(quit: bool) -> Step {
+    Step {
+        name: "Lens running".into(),
+        mark: Mark::Optional,
+        detail: if quit {
+            "no: you quit Lens; open Sirv Lens or run lens start to start it".into()
+        } else {
+            "no: the browser starts it when needed, or run lens start".into()
+        },
+    }
+}
+
 fn extension_instructions() -> String {
     format!(
         "add the extension in Chrome, Edge or Brave from {CHROME_STORE}; in Firefox, from {FIREFOX_STORE}"
@@ -231,15 +296,72 @@ fn print(steps: &[Step]) {
     }
 }
 
-/// Prints every check once. Fails when a required step is open.
+/// The checks, from this computer and the notebook's records (`store`; None: no records yet).
+/// The daemon answers SetupStatus with it; `lens doctor` runs it itself while Lens is stopped.
+pub fn setup_status(paths: &Paths, store: Option<&crate::store::Store>) -> io::Result<SetupStatus> {
+    let executable = crate::paths::executable()?;
+    let service = match crate::service::state(paths) {
+        crate::service::State::Installed { manager } => Some(manager.to_string()),
+        crate::service::State::NotInstalled => None,
+    };
+    let records = |e: rusqlite::Error| io::Error::other(format!("the notebook: {e}"));
+    let mut status = SetupStatus {
+        version: env!("CARGO_PKG_VERSION").into(),
+        protocol: PROTOCOL_VERSION,
+        binary: executable.display().to_string(),
+        service,
+        browsers: crate::register::check(paths, &executable),
+        extensions: store
+            .map_or(Ok(Vec::new()), |s| s.list_clients())
+            .map_err(records)?,
+        projects: store
+            .map_or(Ok(0), |s| s.count("projects"))
+            .map_err(records)?,
+        captures: store
+            .map_or(Ok(0), |s| s.count("captures"))
+            .map_err(records)?,
+        vibeq_configured: store
+            .map_or(Ok(None), |s| s.setting("vibeq.endpoint"))
+            .map_err(records)?
+            .is_some(),
+        coding_agents_connected: crate::agents::connected(),
+        steps: Vec::new(),
+    };
+    status.steps = steps(&status);
+    Ok(status)
+}
+
+/// Prints every check once. Fails when a required step is open. It never starts Lens and never
+/// removes the quit marker, so a Lens the person quit stays quit: while Lens is stopped, the
+/// checks run here, on the notebook opened read-only.
 pub fn doctor(paths: &Paths) -> io::Result<()> {
-    let mut client = Client::connect(paths)?;
-    let steps = status(&mut client)?.steps;
+    let (steps, agents) = match Client::attach(paths) {
+        Ok(mut client) => {
+            let steps = status(&mut client)?.steps;
+            // As the daemon sees them: its PATH can differ from this terminal's.
+            let agents = match client.call(Request::ListAgents) {
+                Ok(Reply::Agents(agents)) => agents,
+                _ => Vec::new(),
+            };
+            (steps, agents)
+        }
+        Err(_) => {
+            let store = crate::store::Store::open_read_only(&paths.database()).ok();
+            let mut steps = setup_status(paths, store.as_ref())?.steps;
+            steps.push(stopped_step(paths.quit_marker().exists()));
+            let agents = [
+                crate::investigate::Agent::Codex,
+                crate::investigate::Agent::Claude,
+            ]
+            .into_iter()
+            .map(crate::investigate::info)
+            .collect();
+            (steps, agents)
+        }
+    };
     print(&steps);
-    // As the daemon sees them: its PATH can differ from this terminal's.
-    if let Ok(Reply::Agents(agents)) = client.call(Request::ListAgents) {
-        print(&agents.iter().map(agent_step).collect::<Vec<_>>());
-    }
+    print(&agents.iter().map(agent_step).collect::<Vec<_>>());
+    print(&[speech_step(paths), video_tools_step(paths)]);
     match steps.iter().filter(|s| s.mark == Mark::Todo).count() {
         0 => {
             println!("\nEverything required is in order.");
@@ -562,12 +684,38 @@ mod tests {
             seen("chrome", "0.12.5", now - 30 * 24 * 60 * 60 * 1000),
         ];
         assert_eq!(older_extensions(&current), vec!["chromium 0.12.14"]);
+        let mut replaced = current.clone();
+        replaced.extensions.extend([
+            // The same old copy in another profile, not next to the first: named once.
+            seen("chromium", "0.12.14", now - 2),
+            // Brave's unpacked copy, then its store build: nothing to say.
+            seen("brave", "0.12.14", now - 1),
+            seen("brave", "0.12.22", now),
+        ]);
+        assert_eq!(older_extensions(&replaced), vec!["chromium 0.12.14"]);
         let note = steps(&current)
             .into_iter()
             .find(|s| s.name == "Extension updates")
             .unwrap();
         assert_eq!(note.mark, Mark::Optional);
         assert!(note.detail.contains("chromium 0.12.14"));
+    }
+
+    #[test]
+    fn a_stopped_lens_is_noted_and_its_checks_run_here() {
+        assert_eq!(stopped_step(false).mark, Mark::Optional);
+        assert!(stopped_step(true).detail.contains("you quit Lens"));
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            data: dir.path().join("data"),
+            runtime: dir.path().join("run"),
+            logs: dir.path().join("logs"),
+        };
+        // No notebook yet: the local checks still run, and nothing is written.
+        let found = setup_status(&paths, None).unwrap();
+        assert_eq!(mark(&found.steps, "Lens app"), Mark::Done);
+        assert_eq!(mark(&found.steps, "Browser extension"), Mark::Todo);
+        assert!(!paths.data.exists() && !paths.runtime.exists());
     }
 
     #[test]

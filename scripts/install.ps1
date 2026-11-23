@@ -46,8 +46,8 @@ try {
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     $exe = Join-Path $dir 'lens.exe'
     if (Test-Path $exe) { & $exe stop 2>$null | Out-Null }
-    # The tray (lensw.exe and its lens.exe) keeps running after stop and holds the files.
-    Get-Process -Name lens, lensw -ErrorAction SilentlyContinue |
+    # The tray (lensw.exe and its lens.exe) and a speech program keep running after stop and hold the files.
+    Get-Process -Name lens, lensw, lens-speech, lens-speech-gpu -ErrorAction SilentlyContinue |
         Where-Object { $_.Path -and $_.Path.StartsWith($dir, [StringComparison]::OrdinalIgnoreCase) } |
         Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 500
@@ -72,12 +72,20 @@ try {
         }
     } catch { Write-Host 'The extension package is not in this release; skipped.' }
 
-    $path = [Environment]::GetEnvironmentVariable('Path', 'User')
+    # A fresh profile has no user Path at all.
+    $path = [string][Environment]::GetEnvironmentVariable('Path', 'User')
     if (($path -split ';') -notcontains $dir) {
         [Environment]::SetEnvironmentVariable('Path', ($path.TrimEnd(';') + ";$dir").TrimStart(';'), 'User')
     }
     & $exe register
-    & $exe service install
+    if ($LASTEXITCODE -ne 0) { throw "lens register failed ($LASTEXITCODE)" }
+    # A Lens with its own data folder never starts at login (lens service install refuses it).
+    if ($env:LENS_HOME) {
+        Write-Host 'LENS_HOME is set: the login service was not installed for this custom data folder.'
+    } else {
+        & $exe service install
+        if ($LASTEXITCODE -ne 0) { throw "lens service install failed ($LASTEXITCODE)" }
+    }
     Write-Host ''
     Write-Host "Lens $version is installed in $exe."
     if ([Environment]::UserInteractive -and -not $env:CI) { & $exe setup } else { & $exe doctor }

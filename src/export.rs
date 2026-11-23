@@ -63,6 +63,16 @@ pub fn export(review: &Review, blobs: &Blobs, root: &Path) -> io::Result<PathBuf
                 blobs.read_all(&recording.sha256)?,
             )?;
         }
+        // The review keeps the tab video only where it shares the replay (see the daemon's review).
+        let video = parsed
+            .iter()
+            .flat_map(|e| &e.events)
+            .find(|e| e.kind == "video")
+            .and_then(|e| e.data["blob"]["sha256"].as_str())
+            .and_then(|sha256| blobs.read_all(sha256).ok());
+        if let Some(bytes) = &video {
+            std::fs::write(folder.join(format!("capture-{n}.webm")), bytes)?;
+        }
         let title = if item.page_title.is_empty() {
             &item.page_url
         } else {
@@ -77,6 +87,12 @@ pub fn export(review: &Review, blobs: &Blobs, root: &Path) -> io::Result<PathBuf
         );
         if screenshot {
             let _ = write!(report, "![Capture {n}](capture-{n}.png)\n\n");
+        }
+        if video.is_some() {
+            let _ = write!(
+                report,
+                "Tab video: [capture-{n}.webm](capture-{n}.webm)\n\n"
+            );
         }
         if !item.annotations.is_empty() {
             report.push_str("The person's notes on the recording:\n\n");
@@ -425,7 +441,7 @@ pub fn code(text: &str) -> String {
     format!("{fence} {flat} {fence}")
 }
 
-/// Failed requests, console errors and exceptions, in the order they happened.
+/// Failed requests, console errors, exceptions and WebSocket errors, in the order they happened.
 pub fn findings(evidence: &Value) -> Vec<String> {
     let events = evidence["events"]
         .as_array()
@@ -449,6 +465,7 @@ pub fn findings(evidence: &Value) -> Vec<String> {
                     Some(format!("Console error: {}", text("text")))
                 }
                 "exception" => Some(format!("Exception: {}", text("text"))),
+                "webSocketError" => Some(format!("WebSocket error: {}", text("errorText"))),
                 _ => None,
             }
         })
@@ -526,12 +543,14 @@ mod tests {
             { "kind": "response", "data": { "status": 200, "url": "https://a.test/ok" } },
             { "kind": "console", "data": { "level": "error", "text": "total is NaN" } },
             { "kind": "console", "data": { "level": "log", "text": "hello" } },
+            { "kind": "webSocketError", "data": { "errorText": "reset" } },
         ]});
         assert_eq!(
             findings(&evidence),
             [
                 "HTTP 500 from https://a.test/api",
-                "Console error: total is NaN"
+                "Console error: total is NaN",
+                "WebSocket error: reset"
             ]
         );
     }

@@ -149,7 +149,6 @@ try {
   // Sign in to the VibeQ stand-in, so the review page can look for duplicates.
   const settings = await context.newPage();
   await settings.goto(`chrome-extension://${id}/options.html`);
-  await settings.getByText('Other integrations', { exact: true }).click();
   await settings.getByLabel('VibeQ address').fill(vibeqOrigin);
   await settings.getByRole('button', { name: 'Sign in with VibeQ' }).click();
   await context.addCookies([{ name: 'session', value: 'demo', url: vibeqOrigin }]);

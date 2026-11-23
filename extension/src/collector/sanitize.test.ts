@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { bodyEvidence, REDACTED, requestBody, sanitize, sanitizeText, sanitizeUrl } from './sanitize';
+import { afterEach, describe, expect, it } from 'vitest';
+import { bodyEvidence, countRedactions, privacySettings, REDACTED, requestBody, sanitize, sanitizeText, sanitizeUrl, setCustomRedaction } from './sanitize';
 
 const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl';
 
@@ -96,5 +96,30 @@ describe('second bug hunt', () => {
     expect(body).not.toMatch(/DEMO_[AB]/);
     expect(body).toContain('grant_type=authorization_code');
     expect(sanitizeUrl('https://a.test/pay?cvv=123&step=2')).not.toContain('123');
+  });
+});
+
+describe('custom redaction', () => {
+  afterEach(() => setCustomRedaction({}));
+
+  it('redacts the person own header names and patterns', () => {
+    expect(setCustomRedaction({ sensitiveHeaders: ['X-Tenant'], sensitivePatterns: ['ACME-\\d{4}'] })).toEqual([]);
+    expect(sanitize([{ name: 'x-tenant', value: 'blue' }, { name: 'accept', value: 'json' }])).toEqual([
+      { name: 'x-tenant', value: REDACTED },
+      { name: 'accept', value: 'json' },
+    ]);
+    expect(sanitize({ 'X-TENANT': 'blue' })).toEqual({ 'X-TENANT': REDACTED });
+    expect(sanitizeText('order acme-1234 shipped')).toBe(`order ${REDACTED} shipped`);
+    expect(sanitizeUrl('https://a.test/o/ACME-9999?tenant=x')).not.toContain('9999');
+  });
+
+  it('refuses patterns that do not compile, are too long or match nothing', () => {
+    expect(setCustomRedaction({ sensitivePatterns: ['(unclosed', 'a'.repeat(201), 'x*', 'ok'] })).toEqual(['(unclosed', 'a'.repeat(201), 'x*']);
+    expect(sanitizeText('ok x')).toBe(`${REDACTED} x`);
+  });
+
+  it('reads anything else as no rules, and counts what it replaced', () => {
+    expect(privacySettings({ maskSelectors: ['.a', 3, ' '], sensitiveHeaders: 'x' })).toEqual({ maskSelectors: ['.a'], sensitiveHeaders: [], sensitivePatterns: [] });
+    expect(countRedactions(sanitize({ password: 'a', token: 'b', page: 1 }))).toBe(2);
   });
 });

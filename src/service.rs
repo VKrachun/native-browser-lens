@@ -244,20 +244,38 @@ fn systemd_user() -> bool {
 
 #[cfg(all(unix, not(target_os = "macos")))]
 pub fn unit(executable: &Path, paths: &Paths) -> String {
+    // systemd expands `%` specifiers in both lines, and `$` variables in ExecStart.
+    let specifiers = |p: &Path| p.display().to_string().replace('%', "%%");
     let quote = |p: &Path| {
         format!(
             "\"{}\"",
-            p.display()
-                .to_string()
+            specifiers(p)
                 .replace('\\', "\\\\")
                 .replace('"', "\\\"")
+                .replace('$', "$$")
         )
     };
     format!(
         "[Unit]\nDescription=Sirv Lens\n\n[Service]\nExecStart={} daemon --service\nRestart=on-failure\nRestartSec=2\nStandardError=append:{}\n\n[Install]\nWantedBy=default.target\n",
         quote(executable),
-        paths.logs.join("lensd.log").display()
+        specifiers(&paths.logs.join("lensd.log"))
     )
+}
+
+/// The Exec line of the XDG autostart entry. The path is a quoted argument, where `"`, `` ` ``,
+/// `$` and `\` take a backslash; the key file's own escaping then doubles every backslash; `%`
+/// starts a field code.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn desktop_exec(executable: &Path) -> String {
+    let mut quoted = String::new();
+    for c in executable.display().to_string().chars() {
+        match c {
+            '"' | '`' | '$' | '\\' => quoted.extend(['\\', c]),
+            '%' => quoted.push_str("%%"),
+            _ => quoted.push(c),
+        }
+    }
+    format!("Exec=\"{}\" daemon", quoted.replace('\\', "\\\\"))
 }
 
 /// Whether the installed service starts `executable`.
@@ -268,7 +286,7 @@ fn runs(paths: &Paths, executable: &Path) -> bool {
         .lines()
         .find(|l| l.starts_with("ExecStart="))
         .unwrap_or_default();
-    let autostart = format!("Exec=\"{}\" daemon", executable.display());
+    let autostart = desktop_exec(executable);
     unit_path()
         .and_then(std::fs::read_to_string)
         .is_ok_and(|have| have.lines().any(|l| l == program))
@@ -300,8 +318,8 @@ fn install_os(paths: &Paths, executable: &Path) -> io::Result<()> {
     std::fs::write(
         &path,
         format!(
-            "[Desktop Entry]\nType=Application\nName=Sirv Lens\nExec=\"{}\" daemon --service\nNoDisplay=true\nX-GNOME-Autostart-enabled=true\n",
-            executable.display()
+            "[Desktop Entry]\nType=Application\nName=Sirv Lens\n{} --service\nNoDisplay=true\nX-GNOME-Autostart-enabled=true\n",
+            desktop_exec(executable)
         ),
     )?;
     let _ = crate::stop_daemon(paths);
@@ -464,6 +482,12 @@ mod tests {
         assert!(unit.contains("ExecStart=\"/home/a b/.local/bin/lens\" daemon --service"));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("StandardError=append:/logs/lensd.log"));
+        let odd = super::unit(Path::new("/home/a%b/$x\"/lens"), &paths());
+        assert!(odd.contains(r#"ExecStart="/home/a%%b/$$x\"/lens" daemon --service"#));
+        assert_eq!(
+            desktop_exec(Path::new("/home/a%b/$x\"\\/lens")),
+            r#"Exec="/home/a%%b/\\$x\\"\\\\/lens" daemon"#
+        );
     }
 
     #[cfg(windows)]

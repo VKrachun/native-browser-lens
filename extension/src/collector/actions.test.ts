@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cleanName, privateValue, type FieldFacts } from './actions';
+import { blocked, cleanName, fileType, privateValue, setMaskSelectors, type FieldFacts } from './actions';
 
 const field = (facts: Partial<FieldFacts>): FieldFacts => ({
   type: 'text',
@@ -38,6 +38,20 @@ describe('privateValue', () => {
     expect(privateValue(field({ label: 'Notes' }), 'Bearer abc.def')).toBe(true);
     expect(privateValue(field({ label: 'Notes' }), 'eyJhbGciOi.eyJzdWIi.c2lnbmF0dXJl')).toBe(true);
   });
+});
+
+it('setMaskSelectors adds the valid selectors to [data-lens-block]', () => {
+  const probe = { querySelector: (selector: string) => (selector.includes('((') ? (() => { throw new SyntaxError(selector); })() : null) };
+  expect(setMaskSelectors(['.salary', 'div((', '#ssn'], probe)).toEqual(['.salary', '#ssn']);
+  const seen: string[] = [];
+  const el = { closest: (selector: string) => (seen.push(selector), null) };
+  expect(blocked(el)).toBe(false);
+  expect(seen).toEqual(['[data-lens-block], .salary, #ssn']);
+  setMaskSelectors([], probe);
+});
+
+it('fileType names an extension only when the file has one', () => {
+  expect(['photo.JPG', 'a.tar.gz', 'id_rsa', '.bashrc', 'name.'].map(fileType)).toEqual(['jpg', 'gz', '?', '?', '?']);
 });
 
 describe('cleanName', () => {

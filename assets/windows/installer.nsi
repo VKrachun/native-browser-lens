@@ -128,9 +128,9 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 !endif
 
 
-; Sirv Lens: stops the background app, its tray and the browsers' connections to it: lens.exe and
-; lensw.exe from this folder only, since another program may be called lens.exe too. A running
-; lens.exe keeps its file from changing.
+; Sirv Lens: stops the background app, its tray, its speech programs and the browsers' connections
+; to it: lens.exe, lensw.exe and lens-speech*.exe from this folder only, since another program may be
+; called lens.exe too. A running program keeps its file from changing.
 ; $LensRan is 1 once the background app was found running, so the update starts it again; the
 ; old version's uninstaller can stop it before the Install section looks.
 Var LensRan
@@ -143,16 +143,16 @@ Var LensRan
     ${IfThen} $R1 == "stopped" ${|} StrCpy $LensRan 1 ${|}
   ${EndIf}
   System::Call 'Kernel32::SetEnvironmentVariable(t "LENS_DIR", t "$INSTDIR")'
-  nsExec::Exec `powershell -NoProfile -NonInteractive -Command "Get-Process -Name lens, lensw -ErrorAction SilentlyContinue | Where-Object { $$_.Path -and $$_.Path.StartsWith($$env:LENS_DIR + '\', [StringComparison]::OrdinalIgnoreCase) } | Stop-Process -Force -ErrorAction SilentlyContinue"`
+  nsExec::Exec `powershell -NoProfile -NonInteractive -Command "Get-Process -Name lens, lensw, lens-speech, lens-speech-gpu -ErrorAction SilentlyContinue | Where-Object { $$_.Path -and $$_.Path.StartsWith($$env:LENS_DIR + '\', [StringComparison]::OrdinalIgnoreCase) } | Stop-Process -Force -ErrorAction SilentlyContinue"`
   Pop $R0
   Sleep 500
 !macroend
 
-; Sirv Lens: $R1 is "running" when lens.exe or lensw.exe from this folder still runs. By path, never
-; by name: another installation, or another program, may run a lens.exe of its own.
+; Sirv Lens: $R1 is "running" when lens.exe, lensw.exe or a speech program from this folder still
+; runs. By path, never by name: another installation, or another program, may run a lens.exe of its own.
 !macro LensStillRuns
   System::Call 'Kernel32::SetEnvironmentVariable(t "LENS_DIR", t "$INSTDIR")'
-  nsExec::ExecToStack `powershell -NoProfile -NonInteractive -Command "if (Get-Process -Name lens, lensw -ErrorAction SilentlyContinue | Where-Object { $$_.Path -and $$_.Path.StartsWith($$env:LENS_DIR + '\', [StringComparison]::OrdinalIgnoreCase) }) { 'running' }"`
+  nsExec::ExecToStack `powershell -NoProfile -NonInteractive -Command "if (Get-Process -Name lens, lensw, lens-speech, lens-speech-gpu -ErrorAction SilentlyContinue | Where-Object { $$_.Path -and $$_.Path.StartsWith($$env:LENS_DIR + '\', [StringComparison]::OrdinalIgnoreCase) }) { 'running' }"`
   Pop $R0
   Pop $R1
   StrCpy $R1 $R1 7

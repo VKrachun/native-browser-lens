@@ -88,12 +88,10 @@ async function transact<T>(mode: IDBTransactionMode, work: (tx: IDBTransaction) 
 }
 
 function removeIn(tx: IDBTransaction, session: number) {
-  const index = tx.objectStore(CHUNKS).index('session');
-  index.openKeyCursor(IDBKeyRange.only(session)).onsuccess = (event) => {
-    const cursor = (event.target as IDBRequest<IDBCursor | null>).result;
-    if (!cursor) return;
-    tx.objectStore(CHUNKS).delete(cursor.primaryKey);
-    cursor.continue();
+  // The keys as they are now, in one request: a cursor would go on into chunks this same
+  // transaction adds after it (write with `fresh`), and delete those too.
+  tx.objectStore(CHUNKS).index('session').getAllKeys(IDBKeyRange.only(session)).onsuccess = (event) => {
+    for (const key of (event.target as IDBRequest<IDBValidKey[]>).result) tx.objectStore(CHUNKS).delete(key);
   };
   tx.objectStore(STATES).delete(session);
 }

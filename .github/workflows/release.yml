@@ -15,8 +15,26 @@ env:
 
 # Third-party actions are pinned to a commit; the comment records the tag. Move both together.
 jobs:
+  # First, so a forgotten version number fails before the long builds.
+  versions:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Every version number matches (and the tag, on a release)
+        run: |
+          versions=$(
+            sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1
+            sed -n 's/^version = "\(.*\)"/\1/p' speech/Cargo.toml | head -1
+            jq -r .version extension/package.json plugin/.claude-plugin/plugin.json plugin/.codex-plugin/plugin.json
+          )
+          echo "$versions"
+          test "$(echo "$versions" | sort -u | wc -l)" = 1
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then test "v$(echo "$versions" | head -1)" = "$GITHUB_REF_NAME"; fi
+
   binary:
     name: ${{ matrix.target }}
+    needs: versions
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
@@ -27,8 +45,9 @@ jobs:
       matrix:
         include:
           # musl: one static binary for every Linux distribution, no glibc floor. The speech
-          # programs are C++ (whisper.cpp) and link glibc; without them Lens still runs, only
-          # voice notes wait. gpu: the backend of lens-speech-gpu, none where it does not pay.
+          # programs are C++ (whisper.cpp) and link glibc: built on Ubuntu 22.04 in Docker, they
+          # need glibc 2.34 at most; without them Lens still runs, only voice notes wait.
+          # gpu: the backend of lens-speech-gpu, none where it does not pay.
           - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl, speech: x86_64-unknown-linux-gnu, gpu: vulkan }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, speech: aarch64-unknown-linux-gnu, gpu: vulkan }
           - { os: macos-15, target: aarch64-apple-darwin, speech: aarch64-apple-darwin, gpu: metal }
@@ -43,6 +62,13 @@ jobs:
         run: |
           rustup toolchain install
           rustup target add ${{ matrix.target }}
+      # target-gpu holds the GPU build of lens-speech (Speech programs).
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.target }}
+          workspaces: |
+            . -> target
+            . -> target-gpu
       - name: libclang for bindgen (Windows)
         # .cargo/config.toml makes whisper-rs-sys use its bundled bindings, made on Linux, so
         # building needs no libclang. Their struct sizes are wrong on Windows (long is 32 bits
@@ -61,9 +87,6 @@ jobs:
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: Vulkan headers and shader compiler (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get install -y --no-install-recommends libvulkan-dev glslc
       - name: Vulkan SDK (Windows)
         if: runner.os == 'Windows' && matrix.gpu == 'vulkan'
         uses: jakoch/install-vulkan-sdk-action@7fe84289ddbf750f7eff9f8e4588e600e1dd06c8 # v1.8.1
@@ -73,17 +96,22 @@ jobs:
       - name: Speech programs
         shell: bash
         run: |
-          rustup target add ${{ matrix.speech }}
-          cargo build --release --locked -p lens-speech --target ${{ matrix.speech }}
-          if [[ -n "${{ matrix.gpu }}" ]]; then
-            cargo build --release --locked -p lens-speech --features ${{ matrix.gpu }} \
-              --target ${{ matrix.speech }} --target-dir target-gpu
-          fi
           ext=""; [[ "$RUNNER_OS" == "Windows" ]] && ext=.exe
           mkdir -p speech-bin
-          cp "target/${{ matrix.speech }}/release/lens-speech$ext" "speech-bin/lens-speech$ext"
-          if [[ -n "${{ matrix.gpu }}" ]]; then
-            cp "target-gpu/${{ matrix.speech }}/release/lens-speech$ext" "speech-bin/lens-speech-gpu$ext"
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            docker run --rm -v "$PWD:/src" -w /src ubuntu:22.04 sh scripts/speech-linux.sh speech-bin ${{ matrix.gpu }}
+            sh scripts/glibc-floor.sh 2.34 speech-bin
+          else
+            rustup target add ${{ matrix.speech }}
+            cargo build --release --locked -p lens-speech --target ${{ matrix.speech }}
+            if [[ -n "${{ matrix.gpu }}" ]]; then
+              cargo build --release --locked -p lens-speech --features ${{ matrix.gpu }} \
+                --target ${{ matrix.speech }} --target-dir target-gpu
+            fi
+            cp "target/${{ matrix.speech }}/release/lens-speech$ext" "speech-bin/lens-speech$ext"
+            if [[ -n "${{ matrix.gpu }}" ]]; then
+              cp "target-gpu/${{ matrix.speech }}/release/lens-speech$ext" "speech-bin/lens-speech-gpu$ext"
+            fi
           fi
           # Without arguments it prints its usage and fails: proof that it starts.
           out=$("speech-bin/lens-speech$ext" 2>&1 || true)
@@ -161,68 +189,92 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  # Friendly installers, one build per platform: Sirv Lens.app in a DMG, a per-user setup program,
-  # and an AppImage, a .deb and an Arch package. Each runs the first run when opened (lens open).
+  # Friendly installers, one per platform: Sirv Lens.app in a DMG, a per-user setup program, and
+  # an AppImage, a .deb and an Arch package. Each runs the first run when opened (lens open).
+  # They package the binary job's programs (signed, glibc floor checked, same speech GPU backend)
+  # and the extension job's store build: nothing compiles twice.
   installers:
     name: installers ${{ matrix.os }}
+    needs: [binary, extension]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 45
     env:
       CAN_SIGN_APPLE: ${{ secrets.APPLE_SIGNING_IDENTITY != '' }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-15, formats: "app,dmg", gpu: metal }
-          - { os: macos-15-intel, formats: "app,dmg", gpu: "" }
-          - { os: windows-2025, formats: nsis, gpu: "" }
-          - { os: ubuntu-24.04, formats: "appimage,deb,pacman", gpu: vulkan }
+          - { os: macos-15, formats: "app,dmg", target: aarch64-apple-darwin }
+          - { os: macos-15-intel, formats: "app,dmg", target: x86_64-apple-darwin }
+          - { os: windows-2025, formats: nsis, target: x86_64-pc-windows-msvc }
+          # Linux packages carry the static musl Lens.
+          - { os: ubuntu-24.04, formats: "appimage,deb,pacman", target: x86_64-unknown-linux-musl }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
-        with:
-          package_json_file: extension/package.json
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
-          cache: pnpm
-          cache-dependency-path: extension/pnpm-lock.yaml
+      # scripts/package.mjs reads `cargo metadata` and runs `cargo packager`.
       - name: Rust toolchain
-        shell: bash
         run: rustup toolchain install
-      - name: libclang for bindgen (Windows)
-        # .cargo/config.toml makes whisper-rs-sys use its bundled bindings, made on Linux, so
-        # building needs no libclang. Their struct sizes are wrong on Windows (long is 32 bits
-        # there): Windows generates its own with the runner's LLVM.
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          test -f "/c/Program Files/LLVM/bin/libclang.dll"
-          echo 'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"
-          sed -i '/WHISPER_DONT_GENERATE_BINDINGS/d' .cargo/config.toml
-          cargo clean -p whisper-rs-sys
+      - uses: cargo-bins/cargo-binstall@851112458b5f28a29e5bc14a690c3f283d9dcc6f # v1.26.2
+        with:
+          version: 1.26.2
+      # A prebuilt, signature-checked packager; binstall compiles it only when none exists.
+      - name: Packager
+        run: cargo binstall cargo-packager@0.11.8 --locked --no-confirm
       - name: Tools (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvulkan-dev glslc libfuse2 file
+        # linuxdeploy looks for the speech programs' Vulkan library here.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvulkan1 libfuse2 file
       - name: Tools (Windows)
         if: runner.os == 'Windows'
         run: choco install nsis -y --no-progress
-      - name: Vulkan SDK (Windows)
-        if: runner.os == 'Windows' && matrix.gpu == 'vulkan'
-        uses: jakoch/install-vulkan-sdk-action@7fe84289ddbf750f7eff9f8e4588e600e1dd06c8 # v1.8.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          cache: true
-      - name: Packager
-        run: cargo install cargo-packager --version 0.11.8 --locked
-      - name: Extension dependencies
-        working-directory: extension
-        run: pnpm install --frozen-lockfile
-      # A released Mac installer is always signed and notarized: the download page says so.
-      - name: Signing is set up (macOS release)
-        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v') && env.CAN_SIGN_APPLE != 'true'
+          name: binary-${{ matrix.target }}
+          path: artifacts
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: extension
+          path: artifacts
+      - name: The built programs and extensions where package.mjs looks
+        shell: bash
         run: |
-          echo "::error::The Apple signing secrets are missing; a release must not ship unsigned Mac installers."
-          exit 1
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          name="sirv-lens-$version-${{ matrix.target }}"
+          python=python3; [[ "$RUNNER_OS" == "Windows" ]] && python=python
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            "$python" -m zipfile -e "artifacts/$name.zip" artifacts
+          else
+            tar -C artifacts -xzf "artifacts/$name.tar.gz"
+          fi
+          release="target/${{ matrix.target }}/release"
+          mkdir -p "$release"
+          find "artifacts/$name" -type f ! -name README.md -exec cp -p {} "$release/" \;
+          ls -l "$release"
+          for browser in chrome firefox; do
+            "$python" -m zipfile -e "artifacts/sirv-lens-extension-$version-$browser.zip" "extension/.output/$browser-mv3"
+          done
+      # A released Mac installer is always signed and notarized: the download page says so.
+      - name: Signing and notarization are set up (macOS release)
+        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY != '' }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE != '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD != '' }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID != '' }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER != '' }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 != '' }}
+        run: |
+          missing=""
+          for name in APPLE_SIGNING_IDENTITY APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_API_KEY_ID APPLE_API_ISSUER APPLE_API_KEY_P8; do
+            [[ "${!name}" == true ]] || missing="$missing $name"
+          done
+          if [[ -n "$missing" ]]; then
+            echo "::error::Missing secrets:$missing. A release must not ship unsigned or un-notarized Mac installers."
+            exit 1
+          fi
       - name: Signing keychain (macOS)
         if: runner.os == 'macOS' && env.CAN_SIGN_APPLE == 'true'
         env:
@@ -251,14 +303,15 @@ jobs:
             printf '%s\n' "$APPLE_API_KEY_P8" > "$APPLE_API_KEY_PATH"
           fi
           unset APPLE_API_KEY_P8
-          gpu=(); [[ -n "${{ matrix.gpu }}" ]] && gpu=(--gpu "${{ matrix.gpu }}")
-          node scripts/package.mjs --formats "${{ matrix.formats }}" "${gpu[@]}"
+          node scripts/package.mjs --formats "${{ matrix.formats }}" --target "${{ matrix.target }}" --skip-build
           rm -f "$RUNNER_TEMP/AuthKey.p8"
           # The installers' speech programs: no AVX-512 either (see the Speech programs step).
           if [[ "$RUNNER_OS" == "Linux" ]]; then
             for program in $(find target -path '*release/lens-speech' -type f); do
               if objdump -d "$program" | grep -q zmm; then echo "$program uses AVX-512"; exit 1; fi
             done
+            # Ubuntu 22.04, Debian 12 and RHEL 9 run every program in the packages.
+            sh scripts/glibc-floor.sh 2.34 dist/*.deb dist/*.AppImage dist/*-pacman.tar.gz
           fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -272,6 +325,7 @@ jobs:
           if-no-files-found: error
 
   extension:
+    needs: versions
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -313,11 +367,6 @@ jobs:
       # Every installed copy takes this release: only a commit already on main ships.
       - name: The tag is on main
         run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
-      - name: The tag matches both version numbers
-        run: |
-          crate="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
-          extension="v$(jq -r .version extension/package.json)"
-          test "$crate" = "$GITHUB_REF_NAME" && test "$extension" = "$GITHUB_REF_NAME"
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: release
@@ -333,9 +382,11 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y --no-install-recommends minisign
           version="${GITHUB_REF_NAME#v}"
-          python3 - "$version" <<'PY'
+          # Installed copies refuse a feed older than one they already saw (src/update.rs).
+          released_at=$(date -u +%s)
+          python3 - "$version" "$released_at" <<'PY'
           import json, re, sys
-          version = sys.argv[1]
+          version, released_at = sys.argv[1], int(sys.argv[2])
           sums = dict(reversed(line.split(maxsplit=1)) for line in open("SHA256SUMS").read().splitlines())
           sums = {name.lstrip("*"): digest for name, digest in sums.items()}
           v = re.escape(version)
@@ -350,7 +401,7 @@ jobs:
               if found:
                   installers[found.group(1) or found.group(2)] = {"file": name, "sha256": digest}
           extension = f"sirv-lens-extension-{version}-chrome.zip"
-          manifest = {"version": version, "assets": assets, "installers": installers,
+          manifest = {"version": version, "released_at": released_at, "assets": assets, "installers": installers,
                       "extension": {"file": extension, "sha256": sums[extension]} if extension in sums else None}
           assert len(assets) == 5, f"expected five platform archives, found {sorted(assets)}"
           assert len(installers) == 3, f"expected three installers, found {sorted(installers)}"
@@ -358,9 +409,11 @@ jobs:
           PY
           key="$RUNNER_TEMP/minisign.key"
           printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key"
-          minisign -S -s "$key" -m latest.json -t "Sirv Lens $version"
+          # The trusted comment is signed too: Lens checks that it names this version and time.
+          minisign -S -s "$key" -m latest.json -t "Sirv Lens $version version=$version timestamp=$released_at"
           rm -f "$key"
-          minisign -V -P RWRUIk1sA/LfACfTQLljdyJArqZHzXbSZB32dsXEr2AMUrXAmSXevoDr -m latest.json
+          minisign -V -P RWRUIk1sA/LfACfTQLljdyJArqZHzXbSZB32dsXEr2AMUrXAmSXevoDr -m latest.json \
+            | grep -F "version=$version timestamp=$released_at"
           sha256sum latest.json latest.json.minisig >> SHA256SUMS
       # Published at once: installed copies read releases/latest, which skips drafts.
       - name: Release

@@ -86,7 +86,7 @@ async function open(tools, events) {
     ({ chromium } = load('playwright-core'));
     playerDir = path.dirname(load.resolve('rrweb-player'));
   } catch {
-    throw new Error('Install the optional video tools: npm install --prefix "' + tools + '" playwright-core@1.65.0 rrweb-player@2.2.2');
+    throw new Error('Install the video tools with `lens video-tools install` or in Settings → Video export.');
   }
   if (!events.some(e => e.type === 2) || events.length < 2) throw new Error('The reviewed recording has no replayable snapshot.');
   const view = events.find(e => e.type === 4 && e.data.width > 0 && e.data.height > 0)?.data;
@@ -95,6 +95,8 @@ async function open(tools, events) {
   const viewport = { width: even((view?.width || 1280) * scale), height: even((view?.height || 720) * scale) };
   // Recorded pages are untrusted: the renderer keeps Chromium's process sandbox on every system.
   const browser = await chromium.launch({ chromiumSandbox: true }).catch(error => {
+    if (/Executable doesn't exist/.test(error.message))
+      throw new Error('Chromium for the video tools is missing. Install the video tools with `lens video-tools install` or in Settings → Video export.');
     throw new Error(`Chromium did not start with its sandbox, so Lens did not render the replay: ${error.message}`);
   });
   try {

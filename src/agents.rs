@@ -5,7 +5,6 @@ use crate::investigate::program;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use ts_rs::TS;
 
 pub const SKILL: &str = include_str!("../plugin/skills/sirv-lens/SKILL.md");
@@ -68,13 +67,31 @@ fn result(agent: impl Into<String>, outcome: Result<String, String>) -> AgentSet
     }
 }
 
-/// Whether the agents here have the sirv-lens skill: the sign that `connect` ran.
+/// Whether an agent here has the sirv-lens skill or MCP server: the sign that `connect` ran.
 pub fn connected() -> bool {
-    home().is_some_and(|home| {
-        skill_folders(&home)
+    home().is_some_and(|home| connected_in(&home))
+}
+
+fn connected_in(home: &Path) -> bool {
+    // Codex keeps its servers in TOML, as [mcp_servers.sirv-lens].
+    let codex = std::fs::read_to_string(home.join(".codex/config.toml")).is_ok_and(|text| {
+        text.lines().map(str::trim).any(|line| {
+            line == format!("[mcp_servers.{NAME}]") || line == format!("[mcp_servers.\"{NAME}\"]")
+        })
+    });
+    codex
+        || skill_folders(home)
             .iter()
             .any(|folder| folder.join("SKILL.md").is_file())
-    })
+        || json_settings(home).iter().any(|(_, file)| has_server(file))
+}
+
+/// Whether a JSON settings file lists the sirv-lens server.
+fn has_server(file: &Path) -> bool {
+    std::fs::read(file)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .is_some_and(|settings| settings["mcpServers"].get(NAME).is_some())
 }
 
 /// Adds the skill and the MCP server for every agent found. `lens` is the program agents start.
@@ -148,7 +165,7 @@ pub fn disconnect() -> Vec<AgentSetup> {
         done.push(result("Codex", outcome));
     }
     for (agent, file) in json_settings(&home) {
-        if file.is_file() {
+        if has_server(&file) {
             let outcome = edit_json(&file, |servers| {
                 servers.remove(NAME);
             })
@@ -159,21 +176,19 @@ pub fn disconnect() -> Vec<AgentSetup> {
     done
 }
 
+/// Runs the agent's CLI as investigations do: the PATH that finds its node under launchd or
+/// systemd, npm's .cmd files on Windows run as their node script, and a time limit.
 fn run(program: &Path, args: &[&str]) -> Result<String, String> {
-    // npm's claude.cmd and codex.cmd on Windows: run their node script, not cmd.exe's quoting.
-    let output = crate::investigate::command(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("cannot start {}: {e}", program.display()))?;
-    let said = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout).trim(),
-        String::from_utf8_lossy(&output.stderr).trim()
-    )
-    .trim()
-    .to_string();
-    if output.status.success() {
+    let (success, output) = crate::investigate::run_with(
+        program,
+        args,
+        None,
+        None,
+        std::time::Duration::from_secs(60),
+        true,
+    )?;
+    let said = String::from_utf8_lossy(&output).trim().to_string();
+    if success {
         Ok(said)
     } else {
         Err(said.lines().last().unwrap_or("it failed").to_string())
@@ -186,10 +201,17 @@ fn edit_json(
     file: &Path,
     change: impl FnOnce(&mut serde_json::Map<String, Value>),
 ) -> Result<(), String> {
-    let mut settings: Value = match std::fs::read_to_string(file) {
-        Ok(text) if !text.trim().is_empty() => serde_json::from_str(&text)
-            .map_err(|e| format!("{} is not JSON ({e}); add the server by hand", shown(file)))?,
-        _ => json!({}),
+    // Only a missing file is empty; one Lens cannot read stays as it is.
+    let text = match std::fs::read_to_string(file) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("cannot read {}: {e}", shown(file))),
+    };
+    let mut settings: Value = if text.trim().is_empty() {
+        json!({})
+    } else {
+        serde_json::from_str(&text)
+            .map_err(|e| format!("{} is not JSON ({e}); add the server by hand", shown(file)))?
     };
     let root = settings
         .as_object_mut()
@@ -206,27 +228,29 @@ fn edit_json(
     let target = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
     let fresh = target.with_extension("lens-new");
     let permissions = std::fs::metadata(&target).map(|m| m.permissions()).ok();
-    std::fs::write(&fresh, text)
+    // A copy left by an earlier failure goes first, so the new one is made readable by its
+    // owner only before the settings are in it.
+    let _ = std::fs::remove_file(&fresh);
+    let written = create_private(&fresh)
+        .and_then(|mut new| std::io::Write::write_all(&mut new, text.as_bytes()))
         .and_then(|()| match permissions {
             Some(permissions) => std::fs::set_permissions(&fresh, permissions),
-            None => restrict(&fresh),
+            None => Ok(()),
         })
-        .and_then(|()| std::fs::rename(&fresh, &target))
-        .map_err(|e| format!("cannot write {}: {e}", shown(file)))
+        .and_then(|()| std::fs::rename(&fresh, &target));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&fresh);
+    }
+    written.map_err(|e| format!("cannot write {}: {e}", shown(file)))
 }
 
-/// A new settings file is readable by its owner only.
-fn restrict(file: &Path) -> std::io::Result<()> {
+/// A new file that only its owner can read.
+fn create_private(file: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = file;
-        Ok(())
-    }
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(file)
 }
 
 #[cfg(test)]
@@ -286,6 +310,46 @@ mod tests {
         std::fs::write(&file, "{ not json").unwrap();
         assert!(edit_json(&file, |_| {}).is_err());
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "{ not json");
+        // A file Lens cannot read is not an empty one.
+        std::fs::write(&file, b"{\"key\":\"\xff\"}").unwrap();
+        assert!(edit_json(&file, |_| {}).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), b"{\"key\":\"\xff\"}");
+        assert!(!file.with_extension("lens-new").exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let new = folder.path().join("new.json");
+            edit_json(&new, |_| {}).unwrap();
+            let mode = std::fs::metadata(&new).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn any_agent_with_the_server_or_skill_counts_as_connected() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        assert!(!connected_in(home));
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::write(home.join(".codex/config.toml"), "[mcp_servers.other]\n").unwrap();
+        assert!(!connected_in(home));
+        std::fs::write(
+            home.join(".codex/config.toml"),
+            "[mcp_servers.sirv-lens]\ncommand = \"lens\"\n",
+        )
+        .unwrap();
+        assert!(connected_in(home), "Codex only");
+        std::fs::remove_file(home.join(".codex/config.toml")).unwrap();
+        std::fs::create_dir_all(home.join(".gemini")).unwrap();
+        std::fs::write(home.join(".gemini/settings.json"), r#"{"mcpServers":{}}"#).unwrap();
+        assert!(!connected_in(home));
+        std::fs::write(
+            home.join(".gemini/settings.json"),
+            r#"{"mcpServers":{"sirv-lens":{"command":"lens"}}}"#,
+        )
+        .unwrap();
+        assert!(connected_in(home), "Gemini CLI only");
     }
 
     #[test]

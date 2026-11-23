@@ -9,19 +9,20 @@ import { readable } from '@/findings';
 import type { BlobRef } from '@/protocol/BlobRef';
 import { Notes } from './Notes';
 import { VoiceNotes } from './Voice';
-import { RecordControls, ScreenNotice, useStored, type PanelMode } from './Record';
+import { Keys, RecordControls, ScreenNotice, shortcutText, useStored, type PanelMode } from './Record';
 import { DestinationForm } from '@/ui/Destination';
 import { InstallApp, SetupCard, hostNotFound } from './Onboarding';
 
-type Connection = { state: 'connecting' } | { state: 'ready'; hello: Hello } | { state: 'failed'; message: string };
+type Connection = { state: 'connecting' } | { state: 'ready'; hello: Hello } | { state: 'failed'; message: string; quit: boolean };
+
+/** 3 s for the first tries (an update restarts the app), then twice as long each time, up to a minute. */
+const retryAfter = (failures: number) => Math.min(60_000, 3000 * 2 ** Math.max(0, failures - 4));
 
 const MODE = {
   deep: { tone: 'success', label: 'Collecting', detail: 'Collecting network, console and errors' },
   limited: { tone: 'info', label: 'Collecting', detail: 'Network metadata only: this browser has no debugger' },
   screenshotOnly: { tone: 'warning', label: 'Screenshots only', detail: 'The browser refused the debugger' },
 } as const;
-
-const SHORTCUT = navigator.userAgent.includes('Mac') ? ['⌥', '⇧', 'L'] : ['Alt', 'Shift', 'L'];
 
 function hostOf(url: string | null | undefined) {
   try {
@@ -73,6 +74,8 @@ export function App() {
   const wasReady = useRef(false);
   const failures = useRef(0);
   const [reconnecting, setReconnecting] = useState(false);
+  /** The person quit the app (the host said so): the panel says that, not that it failed. */
+  const [quit, setQuit] = useState(false);
   const session = useRef(false);
   session.current = site?.session != null;
   const [panelMode, setPanelMode] = useStored<PanelMode>('lens.mode', 'record');
@@ -105,11 +108,13 @@ export function App() {
       if (failed || !alive) return;
       failed = true;
       failures.current += 1;
-      retry = setTimeout(() => setAttempt((n) => n + 1), 3000);
+      retry = setTimeout(() => setAttempt((n) => n + 1), retryAfter(failures.current));
+      setQuit(error.code === 'quit');
       // A connection that worked and dropped (the app restarts for an update) heals within a few
-      // tries: the panel stays as it was, so a recording and its microphone keep going.
-      if (wasReady.current && failures.current <= 4) setReconnecting(true);
-      else setConnection({ state: 'failed', message: error.message });
+      // tries: the panel stays as it was. During a recording it always stays, so the recording
+      // and its microphone keep going.
+      if (wasReady.current && (failures.current <= 4 || session.current)) setReconnecting(true);
+      else setConnection({ state: 'failed', message: error.message, quit: error.code === 'quit' });
       // The port itself still fails after a retry while the background reaches the app: this page
       // outlived its extension (Firefox can keep a sidebar open across an add-on update), and a
       // reload gives it a live one. Never during a recording: the reload would end its voice.
@@ -126,6 +131,7 @@ export function App() {
         wasReady.current = true;
         failures.current = 0;
         setReconnecting(false);
+        setQuit(false);
         setConnection({ state: 'ready', hello });
         setObservations(list);
         // The background script connects and announces too, now that the app exists.
@@ -207,8 +213,10 @@ export function App() {
           title={connection.state === 'failed' ? connection.message : undefined}
         >
           {connection.state === 'connecting' && 'Connecting…'}
-          {connection.state === 'ready' && (reconnecting ? 'Reconnecting…' : `Connected · Lens ${connection.hello.version}`)}
-          {connection.state === 'failed' && (hostNotFound(connection.message) ? 'App not found' : 'Disconnected')}
+          {connection.state === 'ready' &&
+            (reconnecting ? (quit ? 'Lens quit' : 'Reconnecting…') : `Connected · Lens ${connection.hello.version}`)}
+          {connection.state === 'failed' &&
+            (connection.quit ? 'Lens quit' : hostNotFound(connection.message) ? 'App not found' : 'Disconnected')}
         </span>
         <button
           type="button"
@@ -221,10 +229,16 @@ export function App() {
         </button>
       </header>
 
-      {connection.state === 'failed' && <InstallApp reason={connection.message} />}
+      {connection.state === 'failed' && <InstallApp reason={connection.message} quit={connection.quit} />}
 
       {connection.state === 'ready' && client && (
         <>
+          {reconnecting && quit && (
+            <div role="alert" className="notice" data-tone="warning">
+              <AlertIcon />
+              <span>You quit the Lens app. Open Sirv Lens from your applications. This panel continues when the app answers.</span>
+            </div>
+          )}
           {connection.hello.protocol !== PROTOCOL_VERSION && (
             <div role="alert" className="notice" data-tone="warning">
               <AlertIcon />
@@ -248,7 +262,6 @@ export function App() {
                   role="tab"
                   className="btn btn-sm"
                   aria-selected={panelMode === m}
-                  aria-pressed={panelMode === m}
                   onClick={() => setPanelMode(m)}
                   disabled={site?.session != null}
                 >
@@ -266,7 +279,7 @@ export function App() {
             {site?.origin ? (
               <>
                 <div className="site-row">
-                  <SiteIcon origin={site.origin} />
+                  <SiteIcon key={site.origin} origin={site.origin} />
                   <div className="site-text">
                     <span className="site-host" title={site.origin}>
                       {hostOf(site.origin)}
@@ -304,16 +317,11 @@ export function App() {
               className="btn btn-primary btn-lg btn-block capture"
               onClick={capture}
               disabled={busy || !site?.origin}
+              title={`Capture (${shortcutText('L')})`}
             >
               <CameraIcon size={18} />
               <span>{busy ? 'Capturing…' : current ? `Capture to “${current.title}”` : 'Capture to a new observation'}</span>
-              <span className="keys" aria-hidden="true">
-                {SHORTCUT.map((k) => (
-                  <kbd key={k} className="kbd">
-                    {k}
-                  </kbd>
-                ))}
-              </span>
+              <Keys letter="L" />
             </button>
             )}
             {problem && (
@@ -388,6 +396,7 @@ function Observations({
   // Search the titles and findings; show all, the ones still to file, or the filed ones.
   const [query, setQuery] = useState('');
   const [show, setShow] = useStored<'all' | 'open' | 'filed'>('lens.listFilter', 'all');
+  const [problem, setProblem] = useState<string | null>(null);
   if (list === null) {
     return (
       <div className="list-skeleton" aria-hidden="true">
@@ -410,7 +419,10 @@ function Observations({
   }
   async function remove(o: ObservationSummary) {
     if (!confirm(`Delete “${o.title}” with its recordings and notes? Tasks already filed stay in your tracker.`)) return;
-    await client.request({ method: 'deleteObservation', params: { id: o.id } }).catch(() => {});
+    setProblem(null);
+    await client
+      .request({ method: 'deleteObservation', params: { id: o.id } })
+      .catch((error: Error) => setProblem(`“${o.title}” was not deleted: ${error.message}`));
     onChanged();
   }
   return (
@@ -421,6 +433,12 @@ function Observations({
           <span className="small muted num">{shown.length === list.length ? list.length : `${shown.length} of ${list.length}`}</span>
         )}
       </div>
+      {problem && (
+        <div role="alert" className="notice">
+          <AlertIcon />
+          <span>{problem}</span>
+        </div>
+      )}
       {/* Shown while a filter or search is on, so it can always be cleared. */}
       {(list.length > 5 || show !== 'all' || words) && (
         <div className="obs-tools">
@@ -540,16 +558,25 @@ function Detail({
 }) {
   const append = useRef<((text: string) => void) | null>(null);
   const [captures, setCaptures] = useState<Capture[] | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
+    let alive = true;
     const load = () =>
-      void client.request({ method: 'listCaptures', params: { observation: observation.id } }).then(setCaptures);
+      void client
+        .request({ method: 'listCaptures', params: { observation: observation.id } })
+        .then((list) => alive && (setCaptures(list), setProblem(null)))
+        .catch((error: Error) => alive && setProblem(error.message));
     load();
     const listener = (message: Broadcast) => {
       if ((message.kind === 'captured' || message.kind === 'annotated') && message.capture.observation === observation.id) load();
     };
     browser.runtime.onMessage.addListener(listener);
-    return () => browser.runtime.onMessage.removeListener(listener);
-  }, [client, observation.id]);
+    return () => {
+      alive = false;
+      browser.runtime.onMessage.removeListener(listener);
+    };
+  }, [client, observation.id, attempt]);
   const open = (path: string) => void browser.tabs.create({ url: browser.runtime.getURL(path as '/') });
   const newest = captures?.at(-1);
   return (
@@ -571,7 +598,17 @@ function Detail({
           )
         )}
       </div>
-      {captures === null ? (
+      {captures === null && problem ? (
+        <div role="alert" className="notice">
+          <AlertIcon />
+          <span>
+            The captures did not load: {problem}.{' '}
+            <button type="button" className="btn btn-ghost btn-sm" onClick={() => setAttempt((n) => n + 1)}>
+              Try again
+            </button>
+          </span>
+        </div>
+      ) : captures === null ? (
         <span className="hero skeleton" aria-hidden="true" />
       ) : newest ? (
         <Hero client={client} capture={newest} onOpen={() => open(newest.recording ? `/replay.html?capture=${newest.id}` : `/annotate.html?capture=${newest.id}`)} />
@@ -658,8 +695,13 @@ function Screenshot({ client, capture }: { client: LensClient; capture: Capture 
   const [src, setSrc] = useState<string | null>(null);
   useEffect(() => {
     let url: string | null = null;
-    void client.readBlob(capture.screenshot).then((blob) => setSrc((url = URL.createObjectURL(blob))));
+    let alive = true;
+    client
+      .readBlob(capture.screenshot)
+      .then((blob) => alive && setSrc((url = URL.createObjectURL(blob))))
+      .catch(() => {});
     return () => {
+      alive = false;
       if (url) URL.revokeObjectURL(url);
     };
   }, [client, capture.screenshot]);

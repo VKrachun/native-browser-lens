@@ -19,6 +19,23 @@ async function fromSpool(tab: number, session: number): Promise<Kept | null> {
   return wav && { wav, startedAt: found.startedAt, tab, session };
 }
 
+/** The default shortcut with Alt, Shift and this key, as the keyboard shows it. */
+export const shortcut = (key: string) => (navigator.userAgent.includes('Mac') ? ['⌥', '⇧', key] : ['Alt', 'Shift', key]);
+export const shortcutText = (key: string) => shortcut(key).join(navigator.userAgent.includes('Mac') ? '' : '+');
+
+/** The keys of a shortcut inside a button; hidden from its accessible name. */
+export function Keys({ letter }: { letter: string }) {
+  return (
+    <span className="keys" aria-hidden="true">
+      {shortcut(letter).map((k) => (
+        <kbd key={k} className="kbd">
+          {k}
+        </kbd>
+      ))}
+    </span>
+  );
+}
+
 const clock = (ms: number) => {
   const s = Math.max(0, Math.floor(ms / 1000));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
@@ -89,6 +106,10 @@ export function RecordControls({
   onProblem: (message: string | null) => void;
 }) {
   const [voice, setVoice] = useStored('lens.voice', true);
+  /** Chrome: also film the tab, for canvas, WebGL and video that the DOM recording replays blank. */
+  const [videoMode, setVideoMode] = useStored('lens.videoMode', false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [marked, setMarked] = useState(false);
   const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(Date.now());
   /** Firefox: the panel's one microphone, and the tab whose recording it belongs to. */
@@ -103,6 +124,8 @@ export function RecordControls({
   /** The recording whose Stop failed: it can then be discarded, after a second click to confirm. */
   const [failedStop, setFailedStop] = useState<number | null>(null);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
+  // A confirmation belongs to one recording in one tab.
+  useEffect(() => setConfirmDiscard(false), [tabId, running]);
   // With the voice on, the speech model must be there to write it down: offer it here, once.
   const [speech, setSpeech] = useState<SpeechStatus | null>(null);
   const downloading = speech?.model.state === 'downloading';
@@ -138,15 +161,36 @@ export function RecordControls({
   // and the second start cancels the first one's voice.
   async function start() {
     if (busy) return;
+    // The first await of the click: Chrome shows the permission prompt only during the gesture.
+    const video =
+      inBackground && videoMode && (await browser.permissions.request({ permissions: ['tabCapture'] }).catch(() => false));
     setBusy(true);
+    setNotice(inBackground && videoMode && !video ? 'No tab video: the browser did not allow it. Lens records the page and steps.' : null);
     try {
-      await begin();
+      await begin(video);
     } finally {
       setBusy(false);
     }
   }
 
-  async function begin() {
+  async function mark() {
+    if (tabId === null) return;
+    const reply = (await send<{ ok: boolean; error?: string }>({ kind: 'dropMarker', tabId })) ?? NO_ANSWER;
+    if (!reply.ok) return onProblem(`The marker was not added: ${reply.error}`);
+    setMarked(true);
+  }
+  useEffect(() => {
+    if (!marked) return;
+    const timer = setTimeout(() => setMarked(false), 1500);
+    return () => clearTimeout(timer);
+  }, [marked]);
+  useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(null), 8000);
+    return () => clearTimeout(timer);
+  }, [notice]);
+
+  async function begin(video: boolean) {
     if (tabId === null) return;
     onProblem(null);
     if (voice && !inBackground) {
@@ -177,7 +221,7 @@ export function RecordControls({
         return onProblem(`The microphone did not start: ${(error as Error).message}`);
       }
     }
-    const started = (await send<SessionStart>({ kind: 'startSession', tabId, voice: voice && inBackground })) ?? NO_ANSWER;
+    const started = (await send<SessionStart>({ kind: 'startSession', tabId, voice: voice && inBackground, videoMode: video })) ?? NO_ANSWER;
     if (!started.ok) {
       if (microphoneTab.current === tabId) {
         microphone.current?.cancel();
@@ -197,6 +241,7 @@ export function RecordControls({
     if (tabId === null || running === null) return;
     const session = running;
     setBusy(true);
+    setConfirmDiscard(false);
     const mine = microphoneTab.current === tabId;
     const spoken = mine ? microphone.current : null;
     if (mine) microphone.current = microphoneTab.current = null;
@@ -224,6 +269,8 @@ export function RecordControls({
       }
       if (kept) keptVoice.current = null;
       setFailedStop(null);
+      // The recording is saved: a voice note that fails says so, and the review still opens.
+      let voiceProblem: string | null = null;
       try {
         if (wav && startedAt !== undefined) {
           const audio = await client.upload(wav, 'audio/wav');
@@ -232,11 +279,12 @@ export function RecordControls({
             params: { observation: result.capture.observation, startedAt, audio },
           });
         }
-      } finally {
-        // The recording is saved: its voice, attached or not, belongs to no later recording.
         await unspool(tabId, session);
+      } catch (error) {
+        // The voice stays in the browser's spool; only the voice note is missing.
+        voiceProblem = `The recording is saved, but its voice note is not: ${(error as Error).message}`;
       }
-      onProblem(null);
+      onProblem(voiceProblem);
       await browser.tabs.create({
         url: browser.runtime.getURL(`/review.html?observation=${result.capture.observation}`),
       });
@@ -253,15 +301,19 @@ export function RecordControls({
     if (!confirmDiscard) return setConfirmDiscard(true);
     setBusy(true);
     try {
+      // The voice goes only once the background confirms: else Stop again can still save it.
+      const done = (await send<{ ok: boolean; error?: string }>({ kind: 'discardSession', tabId })) ?? NO_ANSWER;
+      if (!done.ok) return onProblem(`The recording was not discarded: ${done.error}`);
       if (microphoneTab.current === tabId) {
         microphone.current?.cancel();
         microphone.current = microphoneTab.current = null;
       }
       keptVoice.current = null;
-      await send({ kind: 'discardSession', tabId });
       await unspool(tabId, running).catch(() => {});
       setFailedStop(null);
       onProblem(null);
+    } catch (error) {
+      onProblem(`The recording was not discarded: ${(error as Error).message}`);
     } finally {
       setConfirmDiscard(false);
       setBusy(false);
@@ -270,21 +322,42 @@ export function RecordControls({
 
   if (running !== null) {
     return (
-      <div className="record-live" role="status" aria-label="Recording">
+      <div className="record-live">
         <span className="rec-dot" aria-hidden="true" />
         <span className="record-time num">{clock(now - running)}</span>
-        <span className="small muted record-what">
+        {/* The status is what is recorded, not the clock: a ticking live region reads out every second. */}
+        <span className="small muted record-what" role="status" aria-label="Recording">
           {microphone.current || keptVoice.current || site?.voice ? 'Screen, steps and your voice' : 'Screen and steps'}
+          {site?.videoMode && ' · video'}
         </span>
+        <button
+          type="button"
+          className="btn btn-secondary btn-sm record-mark"
+          title={`Drop a marker (${shortcutText('M')})`}
+          onClick={() => void mark()}
+        >
+          {marked ? 'Marked ✓' : 'Mark'}
+        </button>
         {failedStop === running && (
           <button type="button" className="btn btn-ghost" onClick={() => void discard()} disabled={busy}>
             {confirmDiscard ? 'Discard it for good' : 'Discard recording'}
           </button>
         )}
-        <button type="button" className="btn btn-danger" onClick={() => void stop()} disabled={busy}>
+        <button
+          type="button"
+          className="btn btn-danger"
+          title={`Stop and save (${shortcutText('R')})`}
+          onClick={() => void stop()}
+          disabled={busy}
+        >
           <StopIcon />
           {busy ? 'Saving…' : failedStop === running ? 'Stop again' : 'Stop'}
         </button>
+        {notice && (
+          <span className="small muted record-notice" role="note">
+            {notice}
+          </span>
+        )}
       </div>
     );
   }
@@ -308,16 +381,38 @@ export function RecordControls({
         </span>
       </label>
       {voice && speech && speech.model.state !== 'ready' && (
-        <ModelNotice speech={speech} onInstall={() => void client.request({ method: 'installSpeech' }).then(setSpeech)} />
+        <ModelNotice
+          speech={speech}
+          onInstall={() => client.request({ method: 'installSpeech' }).then(setSpeech)}
+          onCancel={() => client.request({ method: 'cancelSpeechDownload' }).then(setSpeech)}
+        />
+      )}
+      {inBackground && (
+        <label className="check">
+          <input type="checkbox" checked={videoMode} onChange={(e) => setVideoMode(e.target.checked)} />
+          <span>
+            Video mode
+            <span className="small muted" style={{ display: 'block' }}>
+              Record tab video for canvas, WebGL and video
+            </span>
+          </span>
+        </label>
+      )}
+      {inBackground && !videoMode && site?.hasHeavyMedia && (
+        <p className="small muted record-hint" role="note">
+          Canvas or video detected on this page — turn on Video mode to capture pixels.
+        </p>
       )}
       <button
         type="button"
-        className="btn btn-primary btn-lg btn-block"
+        className="btn btn-primary btn-lg btn-block record-go"
         onClick={() => void start()}
         disabled={!site?.mode || busy}
+        title={`Record (${shortcutText('R')})`}
       >
         <span className="rec-dot rec-dot-still" aria-hidden="true" />
         Record
+        <Keys letter="R" />
       </button>
     </div>
   );

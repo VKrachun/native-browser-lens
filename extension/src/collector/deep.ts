@@ -1,6 +1,6 @@
 import type { EvidenceBuffer } from './buffer';
 import { noiseReason } from './noise';
-import { bodyEvidence, requestBody } from './sanitize';
+import { bodyEvidence, requestBody, sanitize, sanitizeText, sanitizeUrl } from './sanitize';
 
 type Params = Record<string, any>;
 
@@ -10,6 +10,76 @@ interface Request {
   status?: number;
   mimeType?: string;
 }
+
+/** A WebSocket frame keeps this much of its text; the rest of a noisy socket is counted, not kept. */
+export const MAX_FRAME_CHARS = 2048;
+export const MAX_FRAMES_PER_MINUTE = 120;
+const MAX_SOCKETS = 64;
+/** A GraphQL answer is read for its errors up to this size, past the 16 KiB a body may keep. */
+const MAX_GRAPHQL_BODY = 256 * 1024;
+
+/** The GraphQL operation a request body names: its operationName, else the name in its query. */
+export function graphqlOperation(body: unknown): string | undefined {
+  if (typeof body !== 'string' || !body.includes('query')) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return undefined;
+  }
+  // A batch is an array of operations.
+  const names = (Array.isArray(parsed) ? parsed : [parsed]).flatMap((op) => {
+    if (!op || typeof op !== 'object' || typeof (op as Params).query !== 'string') return [];
+    const { operationName, query } = op as Params;
+    if (typeof operationName === 'string' && operationName) return [operationName];
+    const named = /\b(query|mutation|subscription)\s+([_A-Za-z]\w{0,99})/.exec(query);
+    return [named ? named[2]! : `anonymous ${/^\s*(mutation|subscription)\b/.exec(query)?.[1] ?? 'query'}`];
+  });
+  return names.length ? names.slice(0, 10).join(', ').slice(0, 200) : undefined;
+}
+
+/**
+ * The errors of a GraphQL answer, which comes with status 200: at most five, each its message
+ * (only when `withText`), path and code. Undefined when the body is no GraphQL answer with errors.
+ */
+export function graphqlErrors(body: string, withText: boolean): Params[] | undefined {
+  if (body.length > MAX_GRAPHQL_BODY || !body.includes('"errors"')) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return undefined;
+  }
+  const errors = (Array.isArray(parsed) ? parsed : [parsed]).flatMap((answer) =>
+    answer && typeof answer === 'object' && Array.isArray((answer as Params).errors) ? (answer as Params).errors : [],
+  );
+  if (!errors.length) return undefined;
+  return errors.slice(0, 5).map((error: Params) => ({
+    message: withText && typeof error?.message === 'string' ? sanitizeText(error.message.slice(0, 300)) : undefined,
+    path: Array.isArray(error?.path) ? error.path.slice(0, 10).join('.') : undefined,
+    code: typeof error?.extensions?.code === 'string' ? error.extensions.code.slice(0, 80) : undefined,
+  }));
+}
+
+/** A frame's text without secrets: JSON by field name and content, other text by content. */
+export function framePayload(text: string): string {
+  let clean: string;
+  try {
+    clean = JSON.stringify(sanitize(JSON.parse(text)));
+  } catch {
+    clean = sanitizeText(text);
+  }
+  return clean.length > MAX_FRAME_CHARS ? `${clean.slice(0, MAX_FRAME_CHARS)}… (${text.length} characters)` : clean;
+}
+
+/** Two URLs share an origin, or a host (a page's own WebSocket has a ws: origin). */
+const same = (a: string, b: string, part: 'origin' | 'host') => {
+  try {
+    return new URL(a)[part] === new URL(b)[part];
+  } catch {
+    return false;
+  }
+};
 
 /**
  * Chromium's debugger channel: network with failed same-origin response bodies, console,
@@ -21,6 +91,8 @@ export class DeepCollector {
   private readonly requests = new Map<string, Request>();
   /** Requests left out as noise: their answers are left out too. */
   private readonly ignored = new Set<string>();
+  /** Open WebSockets: their URL, and the frames kept in the current minute. */
+  private readonly sockets = new Map<string, { url?: string; minute: number; frames: number }>();
 
   constructor(
     private readonly buffer: EvidenceBuffer,
@@ -61,8 +133,15 @@ export class DeepCollector {
     const target = { tabId };
     await browser.debugger.attach(target, '1.3');
     this.attached.add(tabId);
-    for (const domain of ['Network.enable', 'Runtime.enable', 'Log.enable']) {
-      await browser.debugger.sendCommand(target, domain);
+    try {
+      for (const domain of ['Network.enable', 'Runtime.enable', 'Log.enable']) {
+        await browser.debugger.sendCommand(target, domain);
+      }
+    } catch (error) {
+      // Half attached collects nothing but shows the debugging bar: let go of the tab.
+      this.attached.delete(tabId);
+      await browser.debugger.detach(target).catch(() => {});
+      throw error;
     }
   }
 
@@ -99,7 +178,7 @@ export class DeepCollector {
   async detach(tabId: number) {
     this.declined.delete(tabId);
     if (!this.attached.delete(tabId)) return;
-    for (const key of this.requests.keys()) if (key.startsWith(`${tabId}:`)) this.requests.delete(key);
+    for (const map of [this.requests, this.sockets]) for (const key of map.keys()) if (key.startsWith(`${tabId}:`)) map.delete(key);
     await browser.debugger.detach({ tabId }).catch(() => {});
   }
 
@@ -129,6 +208,7 @@ export class DeepCollector {
           // What the page sent to its own origin, for a test that replays the request.
           postData: requestBody(p.request.postData, contentType(p.request.headers) ?? '', p.request.url, this.pageUrl(tabId) ?? ''),
           postDataType: contentType(p.request.headers),
+          graphqlOperation: graphqlOperation(p.request.postData),
         });
         break;
       case 'Network.responseReceived': {
@@ -161,7 +241,21 @@ export class DeepCollector {
           const evidence = base64Encoded
             ? { omission: 'Binary body left out' }
             : bodyEvidence(body, request.mimeType ?? '', request.url, page ?? '');
-          this.buffer.record(tabId, 'responseBody', { requestId: p.requestId, url: request.url, ...evidence });
+          // GraphQL answers its errors with 200: they count as a failed request. Their text only
+          // from the page's own origin, as with bodies.
+          const errors = !failed && !base64Encoded && /json/i.test(request.mimeType ?? '')
+            ? graphqlErrors(body, same(request.url, page ?? '', 'origin'))
+            : undefined;
+          this.buffer.record(tabId, 'responseBody', { requestId: p.requestId, url: request.url, ...evidence, ...(errors ? { graphqlError: true } : {}) });
+          if (errors) {
+            this.buffer.record(tabId, 'networkFailure', {
+              requestId: p.requestId,
+              errorText: `GraphQL error: ${errors.map((e) => e.message ?? e.code ?? 'error').join('; ')}`.slice(0, 600),
+              canceled: false,
+              graphqlError: true,
+              graphqlErrors: errors,
+            });
+          }
         } catch (error) {
           this.buffer.gap(tabId, 'responseBody', `Body unavailable: ${(error as Error).message}`);
         }
@@ -175,6 +269,42 @@ export class DeepCollector {
           canceled: p.canceled ?? false,
           blockedReason: p.blockedReason,
         });
+        break;
+      case 'Network.webSocketCreated':
+        if (this.sockets.size >= MAX_SOCKETS) this.sockets.delete(this.sockets.keys().next().value!);
+        this.sockets.set(key, { url: p.url, minute: 0, frames: 0 });
+        this.buffer.record(tabId, 'webSocket', { requestId: p.requestId, url: sanitizeUrl(p.url ?? ''), initiator: p.initiator?.type });
+        break;
+      case 'Network.webSocketFrameSent':
+      case 'Network.webSocketFrameReceived': {
+        // A socket opened before Lens attached has no URL here: its frames count, their text does not.
+        const socket = this.sockets.get(key) ?? { minute: 0, frames: 0 };
+        if (!this.sockets.has(key) && this.sockets.size < MAX_SOCKETS) this.sockets.set(key, socket);
+        const minute = Math.floor(Date.now() / 60_000);
+        if (socket.minute !== minute) Object.assign(socket, { minute, frames: 0 });
+        if (++socket.frames > MAX_FRAMES_PER_MINUTE) {
+          this.buffer.drop(tabId, 'websocket-frames-over-limit');
+          break;
+        }
+        const { opcode, payloadData } = (p.response ?? {}) as { opcode?: number; payloadData?: string };
+        const text = opcode === 1 && typeof payloadData === 'string';
+        // Only what the page's own server sent and got, as with request bodies.
+        const own = socket.url !== undefined && same(socket.url, this.pageUrl(tabId) ?? '', 'host');
+        this.buffer.record(tabId, 'webSocketFrame', {
+          requestId: p.requestId,
+          direction: method === 'Network.webSocketFrameSent' ? 'sent' : 'received',
+          opcode,
+          length: payloadData?.length ?? 0,
+          ...(text && own ? { payload: framePayload(payloadData!) } : { omission: text ? 'Frame of another site left out' : 'Binary or control frame left out' }),
+        });
+        break;
+      }
+      case 'Network.webSocketFrameError':
+        this.buffer.record(tabId, 'webSocketError', { requestId: p.requestId, errorText: p.errorMessage });
+        break;
+      case 'Network.webSocketClosed':
+        this.sockets.delete(key);
+        this.buffer.record(tabId, 'webSocketClosed', { requestId: p.requestId });
         break;
       case 'Runtime.consoleAPICalled':
         this.buffer.record(tabId, 'console', {

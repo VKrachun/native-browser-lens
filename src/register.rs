@@ -31,6 +31,11 @@ pub struct Browser {
     /// exists, so Lens never creates folders for browsers that are not installed.
     #[cfg(unix)]
     pub root: PathBuf,
+    /// Extra folders that also prove this browser is installed, even before `root` exists (such as
+    /// macOS's `Application Support/Firefox` or Ubuntu's Snap `~/snap/firefox`, whose
+    /// `xdg-desktop-portal` WebExtensions bridge reads `~/.mozilla/native-messaging-hosts`).
+    #[cfg(unix)]
+    pub also_installed_if: Vec<PathBuf>,
     #[cfg(windows)]
     pub registry_key: &'static str,
 }
@@ -69,6 +74,16 @@ pub fn browsers(home: &Path, _config: &Path) -> Vec<Browser> {
         name,
         family,
         root: support.join(dir),
+        also_installed_if: if family == Family::Firefox {
+            vec![
+                support.join("Firefox"),
+                PathBuf::from("/Applications/Firefox.app"),
+                PathBuf::from("/Applications/Firefox Developer Edition.app"),
+                PathBuf::from("/Applications/Firefox Nightly.app"),
+            ]
+        } else {
+            Vec::new()
+        },
     })
     .collect()
 }
@@ -80,34 +95,47 @@ pub fn browsers(home: &Path, config: &Path) -> Vec<Browser> {
             name: "Google Chrome",
             family: Family::Chromium,
             root: config.join("google-chrome"),
+            also_installed_if: Vec::new(),
         },
         Browser {
             name: "Chromium",
             family: Family::Chromium,
             root: config.join("chromium"),
+            also_installed_if: Vec::new(),
         },
         Browser {
             name: "Microsoft Edge",
             family: Family::Chromium,
             root: config.join("microsoft-edge"),
+            also_installed_if: Vec::new(),
         },
         Browser {
             name: "Brave",
             family: Family::Chromium,
             root: config.join("BraveSoftware/Brave-Browser"),
+            also_installed_if: Vec::new(),
         },
+        // Native Firefox (pre-147 or legacy profile) reads ~/.mozilla/native-messaging-hosts.
+        // Snap Firefox (default on Ubuntu) and portal-enabled Flatpak Firefox also read this path
+        // through xdg-desktop-portal's WebExtensions portal, even though their profiles live in
+        // ~/snap/firefox or ~/.var/app/org.mozilla.firefox.
         Browser {
             name: "Firefox",
             family: Family::Firefox,
             root: home.join(".mozilla"),
+            also_installed_if: vec![
+                home.join("snap/firefox"),
+                home.join(".var/app/org.mozilla.firefox"),
+            ],
         },
         // Firefox 147 and later keep a new profile here (XDG) and read native manifests here too.
-        // Lens writes to each Mozilla folder that exists and never creates ~/.mozilla, which would
-        // move Firefox back to its old folder.
+        // Lens writes to each Mozilla folder that exists and never creates ~/.mozilla for an XDG-only
+        // install, which would move Firefox back to its old folder.
         Browser {
             name: "Firefox",
             family: Family::Firefox,
             root: config.join("mozilla"),
+            also_installed_if: Vec::new(),
         },
     ]
 }
@@ -164,15 +192,11 @@ pub type Report = Vec<(&'static str, String)>;
 
 #[cfg(unix)]
 impl Browser {
-    /// Whether the browser is on this computer. Firefox on macOS keeps its profiles in
-    /// Application Support/Firefox and may never have made the Mozilla folder, where it still
-    /// reads native messaging hosts; registering creates that folder.
+    /// Whether the browser is on this computer. Some installations (Firefox on macOS, or Snap
+    /// Firefox on Ubuntu) keep their profiles elsewhere and may never have created `root`;
+    /// registering creates the native-messaging-hosts folder there.
     pub fn installed(&self) -> bool {
-        self.root.is_dir()
-            || (cfg!(target_os = "macos")
-                && self.family == Family::Firefox
-                && (self.root.with_file_name("Firefox").is_dir()
-                    || Path::new("/Applications/Firefox.app").is_dir()))
+        self.root.is_dir() || self.also_installed_if.iter().any(|p| p.is_dir())
     }
 }
 
@@ -184,19 +208,37 @@ pub fn register(_paths: &Paths, executable: &Path) -> io::Result<Report> {
 
 #[cfg(unix)]
 pub fn register_unix(browsers: &[Browser], executable: &Path) -> io::Result<Report> {
-    let mut report = Vec::new();
-    for browser in browsers {
-        if !browser.installed() {
-            report.push((browser.name, "not installed".to_string()));
-            continue;
-        }
+    let mut report: Report = Vec::new();
+    let (mut written, mut failed) = (false, None);
+    for browser in browsers.iter().filter(|b| b.installed()) {
         let path = manifest_path(browser);
-        std::fs::create_dir_all(path.parent().expect("manifest has a folder"))?;
-        let body = serde_json::to_vec_pretty(&manifest(browser.family, executable))?;
-        write_atomically(&path, &body)?;
-        report.push((browser.name, path.display().to_string()));
+        let outcome = std::fs::create_dir_all(path.parent().expect("manifest has a folder"))
+            .and_then(|()| {
+                let body = serde_json::to_vec_pretty(&manifest(browser.family, executable))?;
+                write_atomically(&path, &body)
+            });
+        // One browser's failure leaves the others registered and shows in its line.
+        match outcome {
+            Ok(()) => {
+                written = true;
+                report.push((browser.name, path.display().to_string()));
+            }
+            Err(e) => {
+                report.push((browser.name, format!("cannot register: {e}")));
+                failed.get_or_insert(e);
+            }
+        }
     }
-    Ok(report)
+    // Firefox reads two folders on Linux: "not installed" only when it has neither.
+    for browser in browsers {
+        if !report.iter().any(|(name, _)| *name == browser.name) {
+            report.push((browser.name, "not installed".to_string()));
+        }
+    }
+    match failed {
+        Some(e) if !written => Err(e),
+        _ => Ok(report),
+    }
 }
 
 #[cfg(unix)]
@@ -230,21 +272,36 @@ pub fn register(paths: &Paths, executable: &Path) -> io::Result<Report> {
     let hosts = paths.data.join("hosts");
     std::fs::create_dir_all(&hosts)?;
     let mut report = Vec::new();
+    let (mut written, mut failed) = (false, None);
     for browser in browsers() {
         let file = hosts.join(match browser.family {
             Family::Chromium => "chromium.json",
             Family::Firefox => "firefox.json",
         });
-        write_atomically(
-            &file,
-            &serde_json::to_vec_pretty(&manifest(browser.family, executable))?,
-        )?;
-        let (key, _) = RegKey::predef(HKEY_CURRENT_USER)
-            .create_subkey(format!(r"{}\{HOST_NAME}", browser.registry_key))?;
-        key.set_value("", &file.as_os_str())?;
-        report.push((browser.name, file.display().to_string()));
+        let outcome = serde_json::to_vec_pretty(&manifest(browser.family, executable))
+            .map_err(io::Error::from)
+            .and_then(|body| write_atomically(&file, &body))
+            .and_then(|()| {
+                let (key, _) = RegKey::predef(HKEY_CURRENT_USER)
+                    .create_subkey(format!(r"{}\{HOST_NAME}", browser.registry_key))?;
+                key.set_value("", &file.as_os_str())
+            });
+        // One browser's failure leaves the others registered and shows in its line.
+        match outcome {
+            Ok(()) => {
+                written = true;
+                report.push((browser.name, file.display().to_string()));
+            }
+            Err(e) => {
+                report.push((browser.name, format!("cannot register: {e}")));
+                failed.get_or_insert(e);
+            }
+        }
     }
-    Ok(report)
+    match failed {
+        Some(e) if !written => Err(e),
+        _ => Ok(report),
+    }
 }
 
 #[cfg(windows)]
@@ -325,25 +382,43 @@ pub fn check(_paths: &Paths, executable: &Path) -> Vec<BrowserCheck> {
             }
             checks
         });
-    // Sandboxed packages cannot start a program outside their sandbox through a plain manifest.
+    // Sandboxed packages without a WebExtensions desktop portal cannot start a program outside
+    // their sandbox through a plain manifest. Snap Firefox on Ubuntu uses xdg-desktop-portal and
+    // is registered via ~/.mozilla/native-messaging-hosts above.
     #[cfg(not(target_os = "macos"))]
-    for (name, folder) in [
-        ("Firefox (Flatpak)", ".var/app/org.mozilla.firefox"),
-        ("Google Chrome (Flatpak)", ".var/app/com.google.Chrome"),
-        ("Chromium (Flatpak)", ".var/app/org.chromium.Chromium"),
-        ("Brave (Flatpak)", ".var/app/com.brave.Browser"),
-        ("Firefox (Snap)", "snap/firefox"),
-        ("Chromium (Snap)", "snap/chromium"),
+    for (name, folder, problem) in [
+        (
+            "Firefox (Flatpak)",
+            ".var/app/org.mozilla.firefox",
+            "needs the WebExtensions desktop portal; if it cannot connect, use Firefox's system package",
+        ),
+        (
+            "Google Chrome (Flatpak)",
+            ".var/app/com.google.Chrome",
+            "a sandboxed browser cannot start Lens yet; use this browser's system package",
+        ),
+        (
+            "Chromium (Flatpak)",
+            ".var/app/org.chromium.Chromium",
+            "a sandboxed browser cannot start Lens yet; use this browser's system package",
+        ),
+        (
+            "Brave (Flatpak)",
+            ".var/app/com.brave.Browser",
+            "a sandboxed browser cannot start Lens yet; use this browser's system package",
+        ),
+        (
+            "Chromium (Snap)",
+            "snap/chromium",
+            "a sandboxed browser cannot start Lens yet; use this browser's system package",
+        ),
     ] {
         if home.join(folder).is_dir() {
             checks.push(BrowserCheck {
                 name: name.into(),
                 installed: true,
                 registered: false,
-                problem: Some(
-                    "a sandboxed browser cannot start Lens yet; use this browser's system package"
-                        .into(),
-                ),
+                problem: Some(problem.into()),
             });
         }
     }
@@ -398,9 +473,13 @@ pub fn check(_paths: &Paths, executable: &Path) -> Vec<BrowserCheck> {
 }
 
 fn write_atomically(path: &Path, body: &[u8]) -> io::Result<()> {
-    let temporary = path.with_extension("json.tmp");
-    std::fs::write(&temporary, body)?;
-    std::fs::rename(&temporary, path)
+    // Its own name per call: two registrations at once (daemon and setup) do not share a file.
+    let temporary = path.with_extension(format!("json.{}.tmp", uuid::Uuid::new_v4()));
+    let written = std::fs::write(&temporary, body).and_then(|()| std::fs::rename(&temporary, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    written
 }
 
 #[cfg(all(test, unix))]
@@ -415,11 +494,13 @@ mod tests {
             name: "Firefox",
             family: Family::Firefox,
             root: dir.path().join("Mozilla"),
+            also_installed_if: vec![dir.path().join("Firefox")],
         };
         let chrome = Browser {
             name: "Google Chrome",
             family: Family::Chromium,
             root: dir.path().join("Google/Chrome"),
+            also_installed_if: Vec::new(),
         };
         std::fs::create_dir_all(dir.path().join("Firefox")).unwrap();
         assert!(
@@ -436,7 +517,9 @@ mod tests {
         let config = home.path().join("custom-xdg-config");
         std::fs::create_dir_all(config.join("mozilla/firefox")).unwrap();
         let executable = Path::new("/opt/lens/lens");
-        register_unix(&browsers(home.path(), &config), executable).unwrap();
+        let report = register_unix(&browsers(home.path(), &config), executable).unwrap();
+        let firefox: Vec<_> = report.iter().filter(|(n, _)| *n == "Firefox").collect();
+        assert_eq!(firefox.len(), 1, "one Firefox line, not also not installed");
         let xdg = config.join("mozilla/native-messaging-hosts/studio.sirv.lens.json");
         assert_eq!(manifest_problem(&xdg, Family::Firefox, executable), None);
         assert!(
@@ -450,6 +533,26 @@ mod tests {
             .path()
             .join(".mozilla/native-messaging-hosts/studio.sirv.lens.json");
         assert_eq!(manifest_problem(&legacy, Family::Firefox, executable), None);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn snap_firefox_registers_in_mozilla_native_messaging_hosts() {
+        let home = tempfile::tempdir().unwrap();
+        let config = home.path().join(".config");
+        std::fs::create_dir_all(home.path().join("snap/firefox/common")).unwrap();
+        let executable = Path::new("/opt/lens/lens");
+        let report = register_unix(&browsers(home.path(), &config), executable).unwrap();
+        let firefox: Vec<_> = report.iter().filter(|(n, _)| *n == "Firefox").collect();
+        assert_eq!(firefox.len(), 1);
+        assert_ne!(firefox[0].1, "not installed");
+        let manifest = home
+            .path()
+            .join(".mozilla/native-messaging-hosts/studio.sirv.lens.json");
+        assert_eq!(
+            manifest_problem(&manifest, Family::Firefox, executable),
+            None
+        );
     }
 
     #[test]
@@ -466,9 +569,27 @@ mod tests {
             .filter(|(_, line)| line != "not installed")
             .collect();
         // A Mac with Firefox in /Applications (CI runners have it) counts Firefox as installed.
-        let firefox_app =
-            cfg!(target_os = "macos") && Path::new("/Applications/Firefox.app").is_dir();
+        let firefox_app = cfg!(target_os = "macos")
+            && [
+                "/Applications/Firefox.app",
+                "/Applications/Firefox Developer Edition.app",
+                "/Applications/Firefox Nightly.app",
+            ]
+            .iter()
+            .any(|p| Path::new(p).is_dir());
         assert_eq!(written.len(), 1 + usize::from(firefox_app));
+
+        // A browser whose folder Lens cannot write to does not stop the others.
+        let chromium = browsers.iter().find(|b| b.name == "Chromium").unwrap();
+        std::fs::create_dir_all(&chromium.root).unwrap();
+        std::fs::write(manifest_path(chromium).parent().unwrap(), "a file").unwrap();
+        let report = register_unix(&browsers, Path::new("/opt/lens/lens")).unwrap();
+        assert!(
+            report
+                .iter()
+                .any(|(n, line)| *n == "Chromium" && line.starts_with("cannot register"))
+        );
+        assert!(manifest_path(chrome).is_file());
 
         let manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(manifest_path(chrome)).unwrap()).unwrap();

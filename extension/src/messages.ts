@@ -6,8 +6,14 @@ export type BackgroundRequest =
   | { kind: 'capture'; tabId: number; observation: number | null }
   /** Record mode: everything from now until stopSession becomes one recording. */
   /** `voice`: Chrome records the microphone in the background's offscreen page. */
-  | { kind: 'startSession'; tabId: number; voice?: boolean }
+  /**
+   * `videoMode`: Chrome also films the tab (canvas, WebGL, video that the DOM recording cannot
+   * replay). The panel asks for the optional tabCapture permission first, in the click.
+   */
+  | { kind: 'startSession'; tabId: number; voice?: boolean; videoMode?: boolean }
   | { kind: 'stopSession'; tabId: number }
+  /** A timestamped marker in the tab's running recording: "here it went wrong". */
+  | { kind: 'dropMarker'; tabId: number; label?: string }
   /** Ends the recording without saving it: the way out when Stop cannot save it. */
   | { kind: 'discardSession'; tabId: number }
   | { kind: 'tabStatus'; tabId: number }
@@ -24,14 +30,17 @@ export type SessionStart =
 
 /** Background → the offscreen page (Chrome), which holds a session's microphone. */
 export type OffscreenRequest =
-  | { target: 'offscreen'; kind: 'mic-start' | 'mic-stop' | 'mic-cancel' }
-  | { target: 'offscreen'; kind: 'mic-part'; id: number; offset: number };
+  | { target: 'offscreen'; kind: 'mic-start' | 'mic-stop' | 'mic-cancel' | 'video-stop' | 'video-cancel' }
+  | { target: 'offscreen'; kind: 'mic-part' | 'video-part'; id: number; offset: number }
+  /** `streamId`: from tabCapture.getMediaStreamId in the background. */
+  | { target: 'offscreen'; kind: 'video-start'; streamId: string };
 /**
  * mic-stop gives the WAV's size and an id; mic-part then gives that WAV in base64 parts from
- * `offset` on. The id makes sure every part comes from the same WAV.
+ * `offset` on. The id makes sure every part comes from the same WAV. The video (WebM) goes the
+ * same way, its parts also in `wav`; `truncated` says it stopped at its size limit.
  */
 export type OffscreenReply =
-  | { ok: true; startedAt: number; size?: number; id?: number; wav?: string }
+  | { ok: true; startedAt: number; size?: number; id?: number; wav?: string; truncated?: boolean }
   | { ok: false; error: string; blocked?: boolean };
 /** One message carries at most 64 MiB: a long voice note goes in parts of this many bytes. */
 export const OFFSCREEN_PART_BYTES = 8 * 1024 * 1024;
@@ -55,6 +64,10 @@ export interface TabStatus {
    * that was open before its site was allowed and the browser kept the recorder out: a reload fixes it.
    */
   recorder: boolean | null;
+  /** The page shows a large canvas or a video, which the DOM recording replays blank. */
+  hasHeavyMedia?: boolean;
+  /** The session also films the tab (Chrome). */
+  videoMode?: boolean;
 }
 
 /** Background → every extension page. */

@@ -1,15 +1,20 @@
 import { StrictMode, useCallback, useEffect, useState, type FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import { LensClient } from '@/lens-client';
+import { sitePattern } from '@/messages';
 import type { VibeQSettings } from '@/protocol/VibeQSettings';
 import type { UpdateState } from '@/protocol/UpdateState';
-import type { SpeechStatus } from '@/protocol/SpeechStatus';
+import type { FindingsSettings } from '@/protocol/FindingsSettings';
 import type { Agent } from '@/protocol/Agent';
 import type { AgentInfo } from '@/protocol/AgentInfo';
 import type { AgentSetup } from '@/protocol/AgentSetup';
-import { ModelNotice } from '../sidepanel/Voice';
 import { useStored } from '../sidepanel/Record';
 import { AlertIcon, DoneIcon, LensMark, LinkIcon } from '@/ui/icons';
+import { Problem, useLoadOnFocus } from './shared';
+import { Voice } from './VoiceSettings';
+import { VideoExport } from './VideoExport';
+import { Storage } from './Storage';
+import { PrivacyRules } from './PrivacyRules';
 import '@/ui/base.css';
 import { followSystemTheme } from '@/ui/theme';
 import './style.css';
@@ -40,13 +45,13 @@ function Settings() {
       </header>
       <StatusLine client={client} />
       <DestinationForm client={client} />
+      <VibeQ client={client} />
       <Voice client={client} />
       <Models client={client} />
       <CodingAgents client={client} />
-      <details className="card optional-integrations">
-        <summary>Other integrations</summary>
-        <VibeQ client={client} />
-      </details>
+      <VideoExport client={client} />
+      <Storage client={client} />
+      <PrivacyRules client={client} />
       <Updates client={client} />
       <section className="card settings-section" aria-label="Privacy">
         <h2>What Lens reads</h2>
@@ -158,7 +163,7 @@ function VibeQ({ client }: { client: LensClient }) {
       return setProblem('Type the VibeQ address, for example https://work.sirv.studio');
     }
     // Chrome grants a permission only while the click is in progress, so Lens asks before anything else.
-    const granted = await browser.permissions.request({ origins: [`${origin}/*`] });
+    const granted = await browser.permissions.request({ origins: [sitePattern(origin)] });
     if (!granted) return setProblem('Lens needs access to VibeQ to sign in.');
     setBusy(true);
     setProblem(null);
@@ -179,16 +184,20 @@ function VibeQ({ client }: { client: LensClient }) {
     if (!waitingFor) return;
     const started = Date.now();
     let running = false;
+    // Cancel during a request: its token, when it comes, is not saved.
+    let cancelled = false;
     const attempt = async () => {
-      if (running) return;
+      if (running || cancelled) return;
       if (Date.now() - started > SIGN_IN_WAIT_MS) {
         setWaitingFor(null);
         return setProblem('Lens stopped waiting for the VibeQ sign-in. Try again.');
       }
       running = true;
       try {
-        await tryToken(waitingFor);
+        const token = await mintToken(waitingFor);
+        if (token !== null && !cancelled) await save(waitingFor, token);
       } catch (error) {
+        if (cancelled) return;
         setWaitingFor(null);
         setProblem((error as Error).message);
       } finally {
@@ -198,10 +207,11 @@ function VibeQ({ client }: { client: LensClient }) {
     const timer = setInterval(attempt, 2000);
     window.addEventListener('focus', attempt);
     return () => {
+      cancelled = true;
       clearInterval(timer);
       window.removeEventListener('focus', attempt);
     };
-  }, [waitingFor, tryToken]);
+  }, [waitingFor, save]);
 
   async function signOut() {
     try {
@@ -349,14 +359,24 @@ function Models({ client }: { client: LensClient }) {
   const [agents, setAgents] = useState<AgentInfo[] | null>(null);
   const [choice, setChoice] = useState<Agent | null | undefined>(undefined);
   const [problem, setProblem] = useState<string | null>(null);
-  useEffect(() => {
-    Promise.all([client.request({ method: 'listAgents' }), client.request({ method: 'getSummaryAgent' })])
-      .then(([found, chosen]) => {
-        setAgents(found);
-        setChoice(chosen);
-      })
-      .catch((error: Error) => setProblem(error.message));
-  }, [client]);
+  const [findings, setFindings] = useState<FindingsSettings | null>(null);
+  // Again when the window comes back: the person may sign in to an agent in a terminal meanwhile.
+  const load = useCallback(
+    () =>
+      Promise.all([
+        client.request({ method: 'listAgents' }),
+        client.request({ method: 'getSummaryAgent' }),
+        client.request({ method: 'getFindingsSettings' }).catch(() => null),
+      ])
+        .then(([found, chosen, settings]) => {
+          setAgents(found);
+          setChoice(chosen);
+          setFindings(settings);
+        })
+        .catch((error: Error) => setProblem(error.message)),
+    [client],
+  );
+  useLoadOnFocus(load);
   if (!agents || choice === undefined) return problem ? <p role="alert" className="notice">{problem}</p> : null;
   const state = (agent: Agent) => agents.find((a) => a.agent === agent)?.state ?? 'missing';
   const options: { value: Agent | null; label: string; detail: string }[] = [
@@ -372,6 +392,18 @@ function Models({ client }: { client: LensClient }) {
       await client.request({ method: 'setSummaryAgent', params: { agent: value } });
     } catch (error) {
       setChoice(before ?? null);
+      setProblem((error as Error).message);
+    }
+  }
+  /** The provider is the agent chosen above: the app keeps one setting for both. */
+  async function saveFindings(change: Partial<FindingsSettings>) {
+    if (!findings) return;
+    setProblem(null);
+    try {
+      setFindings(
+        await client.request({ method: 'setFindingsSettings', params: { ...findings, provider: choice ?? null, ...change } }),
+      );
+    } catch (error) {
       setProblem((error as Error).message);
     }
   }
@@ -407,6 +439,41 @@ function Models({ client }: { client: LensClient }) {
           titles or findings until you install it and sign in, or choose Automatic.
         </p>
       )}
+      {findings && (
+        <>
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={findings.enabled}
+              onChange={(e) => void saveFindings({ enabled: e.target.checked })}
+            />
+            <span>
+              Draft the title and findings after each recording
+              <span className="small muted" style={{ display: 'block' }}>
+                Off: you write the title and findings yourself.
+              </span>
+            </span>
+          </label>
+          <div className="field">
+            <label htmlFor="findings-model" className="label">
+              Model name (optional)
+            </label>
+            <input
+              key={findings.model ?? ''}
+              id="findings-model"
+              className="input"
+              defaultValue={findings.model ?? ''}
+              placeholder={choice === 'codex' ? 'The Codex default, or for example gpt-5' : 'haiku by default, or for example sonnet'}
+              maxLength={100}
+              spellCheck={false}
+              onBlur={(e) => {
+                const model = e.target.value.trim();
+                if (model !== (findings.model ?? '')) void saveFindings({ model: model || null });
+              }}
+            />
+          </div>
+        </>
+      )}
       {problem && (
         <p role="alert" className="small">
           {problem}
@@ -434,18 +501,22 @@ function CodingAgents({ client }: { client: LensClient }) {
   );
   useEffect(() => {
     void load();
+    window.addEventListener('focus', load);
+    return () => window.removeEventListener('focus', load);
   }, [load]);
   async function run(method: 'connectAgents' | 'disconnectAgents') {
     setBusy(true);
     setProblem(null);
+    // The result of an earlier run is not the result of this one.
+    setDone(null);
     try {
       setDone(await client.request({ method }));
     } catch (error) {
       setProblem((error as Error).message);
-    } finally {
-      setBusy(false);
-      void load();
     }
+    // The buttons follow the new state, not the one before the run.
+    await load();
+    setBusy(false);
   }
   return (
     <section aria-label="Coding agents" className="card settings-section">
@@ -471,7 +542,8 @@ function CodingAgents({ client }: { client: LensClient }) {
         >
           {busy ? 'Working…' : connected ? 'Connect again' : 'Connect coding agents'}
         </button>
-        {connected && (
+        {/* Unknown (the app did not answer) keeps the way out. */}
+        {connected !== false && (
           <button type="button" className="btn btn-ghost" onClick={() => void run('disconnectAgents')} disabled={busy}>
             Disconnect
           </button>
@@ -501,58 +573,25 @@ function CodingAgents({ client }: { client: LensClient }) {
   );
 }
 
-/** The speech model for voice notes: where it runs, and the one-time download. */
-function Voice({ client }: { client: LensClient }) {
-  const [speech, setSpeech] = useState<SpeechStatus | null>(null);
-  const load = useCallback(() => client.request({ method: 'speechStatus' }).then(setSpeech).catch(() => {}), [client]);
-  useEffect(() => {
-    void load();
-  }, [load]);
-  useEffect(() => {
-    if (speech?.model.state !== 'downloading') return;
-    const timer = setInterval(() => void load(), 1000);
-    return () => clearInterval(timer);
-  }, [speech?.model.state, load]);
-  if (!speech) return null;
-  const engines = speech.engines.length ? speech.engines.join(', then ') : 'none found';
-  return (
-    <section aria-label="Voice notes" className="card settings-section">
-      <div className="section">
-        <h2>Voice notes</h2>
-        <p className="small muted">
-          Lens writes down what you say with {speech.modelName}, on this computer. The recordings never leave it; transcripts leave
-          only in a review you create.
-        </p>
-      </div>
-      {speech.model.state === 'ready' ? (
-        <p className="small" role="status" aria-label="Speech model">
-          <DoneIcon size={14} /> {speech.modelName} is ready. Engine: {engines}.
-        </p>
-      ) : (
-        <ModelNotice speech={speech} onInstall={() => void client.request({ method: 'installSpeech' }).then(setSpeech)} />
-      )}
-    </section>
-  );
-}
-
 /** Lens updates itself from signed releases, unless a package manager or the Store does. */
 function Updates({ client }: { client: LensClient }) {
   const [state, setState] = useState<UpdateState | null>(null);
-  const [busy, setBusy] = useState(false);
+  /** What runs now: the button says it, and nothing else starts meanwhile. */
+  const [busy, setBusy] = useState<'install' | 'check' | 'automatic' | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   useEffect(() => {
     client.request({ method: 'getUpdates' }).then(setState).catch(() => {});
   }, [client]);
   if (!state) return null;
-  const act = async (work: Promise<UpdateState>) => {
-    setBusy(true);
+  const act = async (what: NonNullable<typeof busy>, work: () => Promise<UpdateState>) => {
+    setBusy(what);
     try {
-      setState(await work);
+      setState(await work());
       setProblem(null);
     } catch (error) {
       setProblem((error as Error).message);
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   };
   return (
@@ -575,10 +614,14 @@ function Updates({ client }: { client: LensClient }) {
             type="button"
             className="btn btn-secondary btn-sm"
             // Check now only checks; the button installs only when it says so.
-            onClick={() => void act(client.request({ method: state.available ? 'updateNow' : 'checkUpdates' }))}
-            disabled={busy}
+            onClick={() =>
+              void (state.available
+                ? act('install', () => client.request({ method: 'updateNow' }))
+                : act('check', () => client.request({ method: 'checkUpdates' })))
+            }
+            disabled={busy !== null}
           >
-            {busy ? 'Checking…' : state.available ? 'Install now' : 'Check now'}
+            {busy === 'install' ? 'Installing…' : busy === 'check' ? 'Checking…' : state.available ? 'Install now' : 'Check now'}
           </button>
         )}
       </div>
@@ -589,9 +632,11 @@ function Updates({ client }: { client: LensClient }) {
           <input
             type="checkbox"
             checked={state.automatic}
-            onChange={(e) =>
-              void act(client.request({ method: 'setAutomaticUpdates', params: { enabled: e.target.checked } }))
-            }
+            disabled={busy !== null}
+            onChange={(e) => {
+              const enabled = e.target.checked;
+              void act('automatic', () => client.request({ method: 'setAutomaticUpdates', params: { enabled } }));
+            }}
           />
           <span>
             Install updates automatically
@@ -603,15 +648,6 @@ function Updates({ client }: { client: LensClient }) {
       )}
       {(problem || state.lastError) && <Problem text={(problem ?? state.lastError)!} />}
     </section>
-  );
-}
-
-function Problem({ text }: { text: string }) {
-  return (
-    <div role="alert" className="notice">
-      <AlertIcon size={16} />
-      <span>{text}</span>
-    </div>
   );
 }
 

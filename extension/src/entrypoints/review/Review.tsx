@@ -4,28 +4,29 @@ import { originOf } from '@/messages';
 import type { Capture } from '@/protocol/Capture';
 import type { Observation } from '@/protocol/Observation';
 import type { Review as FrozenReview } from '@/protocol/Review';
-import type { BlobRef } from '@/protocol/BlobRef';
 import type { Filing } from '@/protocol/Filing';
 import type { Member } from '@/protocol/Member';
 import type { AgentInfo } from '@/protocol/AgentInfo';
 import type { Agent } from '@/protocol/Agent';
 import type { Suggestion } from '@/protocol/Suggestion';
-import type { Action } from '@/protocol/Action';
-import type { Locator } from '@/protocol/Locator';
 import type { VoiceNote } from '@/protocol/VoiceNote';
-import type { ReviewVoice } from '@/protocol/ReviewVoice';
 import { AlertIcon, DoneIcon, DraftIcon, ExportIcon, FileIcon, MaskIcon } from '@/ui/icons';
 import { useDestination } from '@/ui/Destination';
 import { Attachments } from './Attachments';
 import { TrackerDraft } from './TrackerDraft';
 import { Handoff, handoffName, useHandoff } from './Handoff';
 import { Notes } from '../sidepanel/Notes';
-import { FINDINGS_HEADER, joinNotes, splitNotes } from '@/findings';
+import { findingsHeader, findingsLabel, joinNotes, modelLabel } from '@/findings';
+import type { FindingsSettings } from '@/protocol/FindingsSettings';
+import type { Summary } from '@/protocol/Summary';
 import { useStored } from '../sidepanel/Record';
-import { clock, useSince } from '../sidepanel/Voice';
 import type { SirvantRun } from '@/protocol/SirvantRun';
-import type { Issue } from '@/protocol/Issue';
-import type { Duplicate } from '@/protocol/Duplicate';
+import { BlobImage, ReviewedNotes, Running, SharedEvidence, Steps } from './Evidence';
+import { Issues, Split } from './Issues';
+import { Duplicates } from './Duplicates';
+import { PrivacySummary, usePrivacySummary } from './PrivacySummary';
+import { VoiceTranscriptEditor } from './VoiceTranscriptEditor';
+import { siteOf } from './reviewHelpers';
 
 /**
  * What leaves the notebook: every capture with its recording, as the edits left it. The daemon freezes the
@@ -39,7 +40,10 @@ export function Review({ observation: id }: { observation: number }) {
   const [typedValues, setTypedValues] = useState(true);
   const [voice, setVoice] = useState<VoiceNote[]>([]);
   const [review, setReview] = useState<FrozenReview | null>(null);
-  const [exported, setExported] = useState<string | null>(null);
+  // An export, a filing and a running request each belong to one review: a new review starts clean.
+  const [lastExport, setExported] = useState<{ review: number; folder: string } | null>(null);
+  const exported = review && lastExport?.review === review.id ? lastExport.folder : null;
+  const [exporting, setExporting] = useState<number | null>(null);
   const [members, setMembers] = useState<Member[] | null>(null);
   const [assignee, setAssignee] = useState('');
   const { settings: destinations, error: destinationError } = useDestination(client);
@@ -48,12 +52,16 @@ export function Review({ observation: id }: { observation: number }) {
   const [lastFiling, setFiling] = useState<Filing | null>(null);
   // A filing reply can land after a newer review replaced its own: it then belongs to no review here.
   const filing = review && lastFiling?.review === review.id ? lastFiling : null;
-  const [sending, setSending] = useState(false);
+  /** Filed for good: the task is there with every file. Otherwise filing again finishes it. */
+  const filed = Boolean(filing?.taskUrl && filing.missingFiles === 0);
+  const [sendingReview, setSending] = useState<number | null>(null);
+  const sending = review !== null && sendingReview === review.id;
   /** Put Sirvant, VibeQ's agent, to work right after filing; remembered for the next review. */
   const [sirvantNext, setSirvantNext] = useStored('lens.sirvant', false);
   const [lastSirvant, setSirvant] = useState<{ review: number; run: SirvantRun } | null>(null);
   const sirvant = review && lastSirvant?.review === review.id ? lastSirvant.run : null;
-  const [starting, setStarting] = useState(false);
+  const [startingReview, setStarting] = useState<number | null>(null);
+  const starting = review !== null && startingReview === review.id;
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [drafting, setDrafting] = useState<Agent | null>(null);
   const [suggestion, setSuggestion] = useState<Suggestion | null>(null);
@@ -64,6 +72,11 @@ export function Review({ observation: id }: { observation: number }) {
   /** The task of an earlier filing of this observation, when the page opens again. */
   const [filedTask, setFiledTask] = useState<string | null>(null);
   const handoff = useHandoff(client, siteOf(review?.items[0]?.pageUrl ?? captures[0]?.pageUrl));
+  const privacy = usePrivacySummary(client, captures, typedValues);
+  /** The person looked at the screenshots that have no mask. */
+  const [screenshotsChecked, setScreenshotsChecked] = useState(false);
+  /** The review whose tracker draft opens by itself: it came from the one-click button. */
+  const [autoDraft, setAutoDraft] = useState<number | null>(null);
   // The review and filing on the page now. A reply that comes back after the person made a new
   // review, or cleared it with "Use as my notes", belongs to the old one and must not show here:
   // the page would offer Sirvant or filing for a review the reply was not about.
@@ -99,6 +112,8 @@ export function Review({ observation: id }: { observation: number }) {
   // Until the app answers, the page tries again every few seconds (the banner says why).
   const [loadAttempt, setLoadAttempt] = useState(0);
   useEffect(() => {
+    // The client serves the whole page: this load only stops listening, it never disconnects it.
+    let alive = true;
     let retry: ReturnType<typeof setTimeout> | undefined;
     Promise.all([
       client.request({ method: 'getObservation', params: { id } }),
@@ -106,6 +121,7 @@ export function Review({ observation: id }: { observation: number }) {
       client.request({ method: 'listVoiceNotes', params: { observation: id } }),
     ])
       .then(([found, list, notes]) => {
+        if (!alive) return;
         void client
           .request({ method: 'listObservations' })
           .then((all) => setFiledTask(all.find((o) => o.id === id)?.taskUrl ?? null))
@@ -117,6 +133,7 @@ export function Review({ observation: id }: { observation: number }) {
         void restoreUnfinished(found.revision);
       })
       .catch((error: Error) => {
+        if (!alive) return;
         // Split into tasks or deleted (an old tab, Back): asking again will not bring it back.
         if (error instanceof LensError && error.code === 'notFound') {
           return setProblem('This recording no longer exists: it was split into separate tasks or deleted.');
@@ -125,26 +142,35 @@ export function Review({ observation: id }: { observation: number }) {
         retry = setTimeout(() => setLoadAttempt((n) => n + 1), 5000);
       });
     return () => {
+      alive = false;
       clearTimeout(retry);
-      client.disconnect();
     };
   }, [client, id, loadAttempt]);
 
   // A title and findings from a small model, once the person's words are written down.
   const [summary, setSummary] = useState<
-    { state: 'idle' } | { state: 'running' } | { state: 'done'; agent: Agent } | { state: 'failed'; reason: string }
+    { state: 'idle' } | { state: 'running' } | { state: 'done'; label: string } | { state: 'failed'; reason: string }
   >({ state: 'idle' });
   const [notesVersion, setNotesVersion] = useState(0);
   const summarized = useRef(false);
   const flushNotes = useRef<(() => Promise<void>) | null>(null);
+  // Undefined until the app answers. An app too old to answer has findings on, as before.
+  const [findingsSettings, setFindingsSettings] = useState<FindingsSettings | null | undefined>(undefined);
+  useEffect(() => {
+    client.request({ method: 'getFindingsSettings' }).then(setFindingsSettings, () => setFindingsSettings(null));
+  }, [client]);
+  const findingsOff = findingsSettings?.enabled === false;
   const summarize = useCallback(async () => {
     setSummary({ state: 'running' });
     try {
-      const found = await client.request({ method: 'summarize', params: { observation: id } });
+      const found: Summary & { label?: string } = await client.request({ method: 'summarize', params: { observation: id } });
       const latest = await client.request({ method: 'getObservation', params: { id } });
+      // The model that wrote them, as the app names it in its own headers.
+      const chosen = findingsSettings && (!findingsSettings.provider || findingsSettings.provider === found.agent);
+      const label = found.label || modelLabel(found.agent, chosen ? findingsSettings.model : null);
       // The findings go first in the notes; what the person wrote stays below them.
       const previous = latest.notes.replace(/^Findings[^\n]*:\n(- .*\n?)+\n*/, '').trim();
-      const findings = joinNotes(found.findings, '');
+      const findings = joinNotes(found.findings, '', findingsHeader(label));
       const saved = await client.request({
         method: 'updateObservation',
         params: {
@@ -158,27 +184,30 @@ export function Review({ observation: id }: { observation: number }) {
       });
       setObservation(saved);
       setNotesVersion((v) => v + 1);
-      setSummary({ state: 'done', agent: found.agent });
+      setSummary({ state: 'done', label });
     } catch (error) {
       setSummary({ state: 'failed', reason: (error as Error).message });
     }
-  }, [client, id]);
-  // The daemon may have written them already, in the background.
+  }, [client, id, findingsSettings]);
+  // The daemon may have written them already, in the background, with any model.
   useEffect(() => {
-    if (summary.state === 'idle' && observation?.notes.startsWith(FINDINGS_HEADER)) {
+    const label = findingsLabel(observation?.notes.split('\n', 1)[0] ?? '');
+    if (summary.state === 'idle' && label) {
       summarized.current = true;
-      setSummary({ state: 'done', agent: 'claude' });
+      setSummary({ state: 'done', label });
     }
   }, [observation, summary.state]);
   const waitingForWords = voice.some((v) => v.state === 'transcribing' || (v.state === 'waiting' && !v.detail));
   useEffect(() => {
+    // Findings off in Settings: no model runs, and the page says so quietly instead of an error.
+    if (findingsSettings === undefined || findingsOff) return;
     if (review || !observation || summarized.current || waitingForWords || captures.length === 0) return;
     // Only a title nobody chose: the page's own title, or its address.
     const automatic = captures.some((c) => observation.title === c.pageTitle || observation.title === c.pageUrl) || !observation.title.trim();
     if (!automatic) return;
     summarized.current = true;
     void summarize();
-  }, [review, observation, captures, waitingForWords, summarize]);
+  }, [review, observation, captures, waitingForWords, summarize, findingsSettings, findingsOff]);
 
   // Transcripts finish in the daemon after the page opens: look again until each one is done.
   const transcribing = voice.some((v) => v.state === 'waiting' || v.state === 'transcribing');
@@ -193,8 +222,9 @@ export function Review({ observation: id }: { observation: number }) {
     return () => clearInterval(timer);
   }, [client, id, transcribing]);
 
-  async function freeze() {
-    if (!observation || freezing) return;
+  /** Freezes the review; returns it, or null when it did not freeze. */
+  async function freeze(): Promise<FrozenReview | null> {
+    if (!observation || freezing) return null;
     setFreezing(true);
     // The title and notes are edited on this page: the review takes their latest revision, after
     // the draft typed in the last moment is saved. An autosave or the background title can still
@@ -228,43 +258,57 @@ export function Review({ observation: id }: { observation: number }) {
       // A new revision is not filed yet: the last filing was of the review before it.
       setFiling(null);
       setProblem(null);
+      // "Create a new review" is done: that notice is old now.
+      setNotice(null);
+      return frozen;
     } catch (error) {
       setProblem((error as Error).message);
+      return null;
     } finally {
       setFreezing(false);
     }
   }
 
-  async function file() {
-    if (!review) return;
-    setSending(true);
+  /** One click: the review, then the filing or the tracker draft right after it. */
+  async function freezeAndSend() {
+    const frozen = await freeze();
+    if (!frozen) return;
+    if (destination === 'vibeq') await file(frozen);
+    else setAutoDraft(frozen.id);
+  }
+
+  // The review comes as an argument from the one-click path: the state has not caught up yet.
+  async function file(target = review) {
+    if (!target || sendingReview === target.id) return;
+    setSending(target.id);
     try {
-      const done = await client.request({ method: 'fileReview', params: { review: review.id, assignee: assignee || null } });
-      if (!stillShown(review)) return;
+      const done = await client.request({ method: 'fileReview', params: { review: target.id, assignee: assignee || null } });
+      if (!stillShown(target)) return;
       setFiling(done);
       setProblem(done.missingFiles ? `${done.missingFiles} files did not reach VibeQ; file again to send them.` : null);
       // An agent starts on the whole evidence only: a filing with missing files waits for the retry.
       const complete = done.taskUrl && !done.missingFiles;
-      if (complete && sirvantNext && !sirvant) await startSirvant();
+      if (complete && sirvantNext && !sirvant) await startSirvant(target);
       // The agent's prompt then links the VibeQ task.
-      if (complete && handoff.afterFiling && handoff.ready && !handoff.done) await handoff.handOff(review.id);
+      if (complete && handoff.afterFiling && handoff.ready && handoff.done?.review !== target.id) await handoff.handOff(target.id);
     } catch (error) {
-      if (stillShown(review)) setProblem(`Not filed: ${(error as Error).message}. Filing again is safe: it never creates a second task.`);
+      if (stillShown(target)) setProblem(`Not filed: ${(error as Error).message}. Filing again is safe: it never creates a second task.`);
     } finally {
-      setSending(false);
+      // Only this review's flag: a newer review's filing may run now.
+      setSending((current) => (current === target.id ? null : current));
     }
   }
 
-  async function startSirvant() {
-    if (!review) return;
-    setStarting(true);
+  async function startSirvant(target = review) {
+    if (!target || startingReview === target.id) return;
+    setStarting(target.id);
     try {
-      const run = await client.request({ method: 'startSirvant', params: { review: review.id } });
-      setSirvant({ review: review.id, run });
+      const run = await client.request({ method: 'startSirvant', params: { review: target.id } });
+      setSirvant({ review: target.id, run });
     } catch (error) {
-      if (stillShown(review)) setProblem(`Filed, but Sirvant did not start: ${(error as Error).message}.`);
+      if (stillShown(target)) setProblem(`Filed, but Sirvant did not start: ${(error as Error).message}.`);
     } finally {
-      setStarting(false);
+      setStarting((current) => (current === target.id ? null : current));
     }
   }
 
@@ -324,12 +368,15 @@ export function Review({ observation: id }: { observation: number }) {
   }
 
   async function exportReview() {
-    if (!review) return;
+    if (!review || exporting === review.id) return;
+    setExporting(review.id);
     try {
       const done = await client.request({ method: 'exportReview', params: { review: review.id } });
-      if (stillShown(review)) setExported(done.folder);
+      setExported({ review: review.id, folder: done.folder });
     } catch (error) {
       if (stillShown(review)) setProblem((error as Error).message);
+    } finally {
+      setExporting((current) => (current === review.id ? null : current));
     }
   }
 
@@ -342,6 +389,16 @@ export function Review({ observation: id }: { observation: number }) {
   }
   const readyAgents = agents.filter((a) => a.state === 'ready');
   const name = (agent: Agent) => (agent === 'codex' ? 'Codex' : 'Claude');
+  // The one-click label never holds "Create review": that button stays, and its tests find it by name.
+  const quickLabel =
+    destination === 'vibeq'
+      ? 'Create the review and file'
+      : destination === 'clipboard'
+        ? 'Create the review and copy summary'
+        : destination && defaultChoice
+          ? 'Create the review and open draft'
+          : null;
+  const privacyClear = Boolean(privacy && (privacy.unmasked === 0 || screenshotsChecked));
   return (
     <main className="page review">
       <header className="page-head">
@@ -358,58 +415,7 @@ export function Review({ observation: id }: { observation: number }) {
 
       {review ? (
         <>
-          <details className="card shared-evidence">
-            <summary>View shared evidence ({review.items.length} {review.items.length === 1 ? 'capture' : 'captures'})</summary>
-            <p className="muted small">
-              {review.items.every((i) => i.kind === 'session')
-                ? 'The steps, your words and notes from the parts you kept, with a test that repeats them. Evidence is redacted.'
-                : 'The screenshots below are rendered with your marks, and masks are burned in. Evidence is redacted.'}
-            </p>
-            <ol aria-label="Reviewed captures" className="review-list">
-              {review.items.map((item, index) => (
-                <li key={item.capture} className="card review-item" data-session={item.kind === 'session' || undefined}>
-                  {item.kind !== 'session' && (
-                    <BlobImage client={client} blob={item.screenshot} alt={`Reviewed capture ${item.capture}`} />
-                  )}
-                  <div className="review-side">
-                    <a className="small url" href={originOf(item.pageUrl) ? item.pageUrl : undefined} target="_blank" rel="noreferrer">
-                      {item.pageUrl}
-                    </a>
-                    {item.findings.length > 0 ? (
-                      <ul aria-label={`Findings of capture ${item.capture}`} className="findings">
-                        {item.findings.map((finding, n) => (
-                          <li key={n}>
-                            <code>{finding}</code>
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p className="small muted">No failed requests, console errors or exceptions.</p>
-                    )}
-                    <Steps client={client} evidence={item.evidence} label={`Steps of capture ${index + 1}`} />
-                    {item.annotations.length > 0 && (
-                      <ul className="small notes-shared" aria-label={`Notes of capture ${index + 1}`}>
-                        {item.annotations.map((a) => (
-                          <li key={a.id}>
-                            {a.text || 'Drawing'}
-                            {a.elements.length > 0 && <span className="muted"> · {a.elements.map(describeTarget).join(', ')}</span>}
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                    <p className="small muted" aria-label={`Files of capture ${item.capture}`}>
-                      Files: capture-{index + 1}.lens.json, capture-{index + 1}.png
-                      {item.shots.length > 0 && `, ${item.shots.length} shots`}
-                      {item.shotsDropped > 0 && ` (${item.shotsDropped} left out to fit the filing)`}
-                      {item.recording && `, capture-${index + 1}.rrweb.json`}
-                    </p>
-                  </div>
-                </li>
-              ))}
-            </ol>
-
-            {review.voice.length > 0 && <VoiceList notes={review.voice} label="Reviewed voice notes" />}
-          </details>
+          <SharedEvidence client={client} review={review} />
 
           <Attachments includeVoice={includeVoice} setIncludeVoice={setIncludeVoice} key={review.id} client={client} review={review} />
 
@@ -480,9 +486,14 @@ export function Review({ observation: id }: { observation: number }) {
               </button>
             ))}
             <span className="spacer" />
-            <button type="button" className="btn btn-secondary" onClick={exportReview} disabled={exported !== null}>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={exportReview}
+              disabled={exported !== null || exporting === review.id}
+            >
               <ExportIcon />
-              Export to Downloads
+              {exporting === review.id ? 'Exporting…' : 'Export to Downloads'}
             </button>
             {destination === 'vibeq' ? <>
               {members && members.length > 0 && (
@@ -503,7 +514,7 @@ export function Review({ observation: id }: { observation: number }) {
                   </select>
                 </label>
               )}
-              {filing?.taskUrl ? (
+              {filed ? (
                 !sirvant && (
                   <button type="button" className="btn btn-secondary" onClick={() => void startSirvant()} disabled={starting}>
                     {starting ? 'Starting Sirvant…' : 'Put Sirvant to work'}
@@ -515,7 +526,7 @@ export function Review({ observation: id }: { observation: number }) {
                   <span>Then put Sirvant to work</span>
                 </label>
               )}
-              {!filing?.taskUrl && handoff.app && (
+              {!filed && handoff.app && (
                 <label
                   className="check"
                   title={handoff.ready ? 'Files the task, then hands it off with its VibeQ link.' : 'Choose the project folder under Hand off first.'}
@@ -532,14 +543,21 @@ export function Review({ observation: id }: { observation: number }) {
               <button
                 type="button"
                 className="btn btn-primary"
-                onClick={file}
-                disabled={sending || (filing !== null && filing.missingFiles === 0)}
+                onClick={() => void file()}
+                disabled={sending || filed}
               >
                 <FileIcon />
-                {sending ? 'Filing…' : filing ? 'Filed' : 'File to VibeQ'}
+                {sending ? 'Filing…' : filed ? 'Filed' : filing ? 'File again' : 'File to VibeQ'}
               </button>
             </> : destination && defaultChoice ? (
-              <TrackerDraft includeVoice={includeVoice} key={destination + defaultChoice.address + review.id} tracker={destination} address={defaultChoice.address} review={review} />
+              <TrackerDraft
+                includeVoice={includeVoice}
+                key={destination + defaultChoice.address + review.id}
+                tracker={destination}
+                address={defaultChoice.address}
+                review={review}
+                autoOpen={autoDraft === review.id}
+              />
             ) : destinationError ? <span role="alert">{destinationError}</span> : destinations ? (
               <button type="button" className="btn btn-primary" onClick={() => void browser.runtime.openOptionsPage()}>Choose default destination</button>
             ) : null}
@@ -551,10 +569,11 @@ export function Review({ observation: id }: { observation: number }) {
             <Notes key={notesVersion} client={client} id={id} onSaved={() => {}} flushRef={flushNotes} />
             <p className="small muted summary-state" role="status" aria-label="Summary">
               {summary.state === 'running' && <Running text="Claude is writing a title and the findings…" />}
-              {summary.state === 'idle' && waitingForWords && <>The title and findings follow once your words are written down.</>}
-              {summary.state === 'done' && <>{summary.agent === 'claude' ? 'Claude Haiku' : 'Codex'} wrote the title and the findings. Edit them as you like.</>}
+              {summary.state === 'idle' && findingsOff && <>Automatic findings are off in Settings.</>}
+              {summary.state === 'idle' && !findingsOff && waitingForWords && <>The title and findings follow once your words are written down.</>}
+              {summary.state === 'done' && <>{summary.label} wrote the title and the findings. Edit them as you like.</>}
               {summary.state === 'failed' && <>No title was written: {summary.reason}</>}
-              {summary.state !== 'running' && (
+              {summary.state !== 'running' && !findingsOff && (
                 <button type="button" className="btn btn-ghost btn-sm" onClick={() => void summarize()}>
                   <DraftIcon /> {summary.state === 'done' ? 'Write them again' : 'Write a title and findings'}
                 </button>
@@ -594,7 +613,12 @@ export function Review({ observation: id }: { observation: number }) {
           {voice.length > 0 && !captures.some((c) => c.kind === 'session') && (
             <details className="card shared-evidence">
               <summary>View voice notes</summary>
-              <VoiceList notes={voice.filter((v) => v.state === 'done')} label="Voice notes to share" />
+              <VoiceTranscriptEditor
+                client={client}
+                notes={voice.filter((v) => v.state === 'done')}
+                label="Voice notes to share"
+                onChange={(note) => setVoice((all) => all.map((v) => (v.id === note.id ? note : v)))}
+              />
               {voice.some((v) => v.state !== 'done') && (
                 <p className="small muted">Voice notes that are not transcribed yet stay out of this review.</p>
               )}
@@ -628,6 +652,7 @@ export function Review({ observation: id }: { observation: number }) {
                 </span>
               </span>
             </label>
+            <PrivacySummary counts={privacy} checked={screenshotsChecked} onChecked={setScreenshotsChecked} />
           </section>
           {problem && (
             <div role="alert" className="notice">
@@ -636,415 +661,29 @@ export function Review({ observation: id }: { observation: number }) {
             </div>
           )}
           <footer className="action-bar">
-            <button type="button" className="btn btn-primary" onClick={freeze} disabled={captures.length === 0 || freezing}>
+            <button
+              type="button"
+              className={quickLabel ? 'btn btn-secondary' : 'btn btn-primary'}
+              onClick={() => void freeze()}
+              disabled={captures.length === 0 || freezing}
+            >
               {freezing ? 'Creating review…' : 'Create review'}
             </button>
+            {quickLabel && (
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => void freezeAndSend()}
+                disabled={captures.length === 0 || freezing || !privacyClear}
+                title={privacyClear ? undefined : 'Check the screenshots without a mask first, under Choose what to share.'}
+              >
+                <FileIcon />
+                {quickLabel}
+              </button>
+            )}
           </footer>
         </>
       )}
     </main>
   );
-}
-
-function ReviewedNotes({ review }: { review: FrozenReview }) {
-  const { findings, rest } = splitNotes(review.notes);
-  return (
-    <>
-      {review.tags.length > 0 && (
-        <div className="tag-chips" aria-label="Tags">
-          {review.tags.map((tag) => <span key={tag} className="tag-chip">{tag}</span>)}
-        </div>
-      )}
-      {findings && findings.length > 0 && (
-        <section className="section" aria-label="Report findings">
-          <h2>Findings</h2>
-          <ul>{findings.map((finding, i) => <li key={i}>{finding}</li>)}</ul>
-        </section>
-      )}
-      {rest && <p className="notes-text">{rest}</p>}
-    </>
-  );
-}
-
-/** Transcripts, with the time of each stretch of speech. */
-function VoiceList({ notes, label }: { notes: (VoiceNote | ReviewVoice)[]; label: string }) {
-  if (!notes.length) return null;
-  const at = (ms: number) => `${Math.floor(ms / 60000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, '0')}`;
-  return (
-    <section className="section voice-review-list">
-      <h2>Voice notes</h2>
-      <ol aria-label={label} className="small">
-        {notes.map((note, n) => (
-          <li key={n}>
-            {note.segments.map((s, i) => (
-              <p key={i}>
-                <span className="muted num">[{at(Number(s.startMs))}]</span> {s.text}
-              </p>
-            ))}
-          </li>
-        ))}
-      </ol>
-    </section>
-  );
-}
-
-/** The person's steps from a capture's evidence, as the review will share them. */
-function Steps({
-  client,
-  evidence,
-  label,
-  hideValues = false,
-}: {
-  client: LensClient;
-  evidence: BlobRef;
-  label: string;
-  hideValues?: boolean;
-}) {
-  const [actions, setActions] = useState<Action[] | null>(null);
-  useEffect(() => {
-    void client
-      .readBlob(evidence)
-      .then((data) => data.text())
-      .then((text) => setActions((JSON.parse(text) as { actions?: Action[] }).actions ?? []))
-      .catch(() => setActions([]));
-  }, [client, evidence]);
-  if (!actions?.length) return actions ? <p className="small muted">Lens recorded no steps.</p> : null;
-  const shown = actions.filter((a) => a.kind !== 'scroll');
-  return (
-    <details className="steps">
-      <summary className="small">
-        {shown.length} {shown.length === 1 ? 'step' : 'steps'}
-      </summary>
-      <ol aria-label={label} className="small">
-        {shown.map((a, n) => (
-          <li key={n}>{describeStep(a, hideValues)}</li>
-        ))}
-      </ol>
-    </details>
-  );
-}
-
-function describeTarget(l: Locator | null) {
-  if (!l) return 'the page';
-  if (l.testId) return `[data-testid=${l.testId}]`;
-  if (l.role && l.name) return `${l.role} “${l.name}”`;
-  if (l.text) return `“${l.text}”`;
-  return l.css;
-}
-
-function describeStep(a: Action, hideValues: boolean) {
-  const target = describeTarget(a.target);
-  const hidden = a.masked || hideValues;
-  switch (a.kind) {
-    case 'click':
-      return `Click ${target}`;
-    case 'fill':
-      return hidden ? `Type a private value into ${target}` : `Type “${a.value}” into ${target}`;
-    case 'press':
-      return `Press ${a.value} in ${target}`;
-    case 'select':
-      return hidden ? `Choose a private option in ${target}` : `Choose “${a.value}” in ${target}`;
-    case 'check':
-      return `Check ${target}`;
-    case 'uncheck':
-      return `Uncheck ${target}`;
-    case 'upload':
-      return `Choose files (${a.value}) in ${target}`;
-    case 'navigate':
-      return `Go to ${a.url}`;
-    default:
-      return `Scroll to ${a.value}`;
-  }
-}
-
-const seconds = (s: number | null) => (s === null ? '' : `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`);
-
-/**
- * A long recording with unrelated problems becomes one task per problem: the summary model names
- * them with their time ranges, and each task keeps only its part of the recording.
- */
-function Issues({ client, id, refresh }: { client: LensClient; id: number; refresh: number }) {
-  const [issues, setIssues] = useState<Issue[]>([]);
-  const [hidden, setHidden] = useStored(`lens.issues.hidden.${id}`, false);
-  const [busy, setBusy] = useState(false);
-  const [problem, setProblem] = useState<string | null>(null);
-  useEffect(() => {
-    // The summary may still run in the background: look again a few times.
-    let alive = true;
-    const load = () =>
-      client
-        .request({ method: 'listIssues', params: { observation: id } })
-        .then((found) => alive && setIssues(found))
-        .catch(() => {});
-    void load();
-    const timer = setInterval(load, 5000);
-    const stop = setTimeout(() => clearInterval(timer), 60_000);
-    return () => {
-      alive = false;
-      clearInterval(timer);
-      clearTimeout(stop);
-    };
-  }, [client, id, refresh]);
-  if (issues.length < 2 || hidden) return null;
-
-  async function split() {
-    setBusy(true);
-    setProblem(null);
-    try {
-      const latest = await client.request({ method: 'getObservation', params: { id } });
-      const created = await client.request({
-        method: 'splitIntoTasks',
-        params: { observation: id, revision: latest.revision, issues },
-      });
-      // The first task opens here; the others beside it.
-      for (const task of created.slice(1)) {
-        void browser.tabs.create({ url: browser.runtime.getURL(`/review.html?observation=${task.id}`), active: false });
-      }
-      if (created[0]) location.href = browser.runtime.getURL(`/review.html?observation=${created[0].id}`);
-    } catch (error) {
-      setProblem((error as Error).message);
-      setBusy(false);
-    }
-  }
-
-  return (
-    <section className="card issues" aria-label="Separate problems">
-      <div className="issues-head">
-        <h2>This recording shows {issues.length} separate problems</h2>
-        <p className="small muted">
-          One task each is easier to fix and to check. Each task keeps only its part of the recording, with your words.
-        </p>
-      </div>
-      <ol className="issue-list">
-        {issues.map((issue, i) => (
-          <li key={i}>
-            <div className="issue-title">
-              <strong>{issue.title}</strong>
-              {issue.fromSeconds !== null && issue.toSeconds !== null && (
-                <span className="small muted num">
-                  {seconds(issue.fromSeconds)}–{seconds(issue.toSeconds)}
-                </span>
-              )}
-            </div>
-            {issue.findings.length > 0 && (
-              <ul className="small muted">
-                {issue.findings.map((f, n) => (
-                  <li key={n}>{f}</li>
-                ))}
-              </ul>
-            )}
-          </li>
-        ))}
-      </ol>
-      <div className="note-actions">
-        <button type="button" className="btn btn-ghost btn-sm" onClick={() => setHidden(true)} disabled={busy}>
-          Keep as one task
-        </button>
-        <button type="button" className="btn btn-primary btn-sm" onClick={() => void split()} disabled={busy}>
-          {busy ? 'Making tasks…' : `Make ${issues.length} tasks`}
-        </button>
-      </div>
-      {problem && (
-        <p role="alert" className="small">
-          {problem}
-        </p>
-      )}
-    </section>
-  );
-}
-
-/**
- * Before filing: open VibeQ tasks that may be the same problem, so the person can add to one
- * instead of filing it twice. A small model judges VibeQ's title matches.
- */
-function Duplicates({ client, id }: { client: LensClient; id: number }) {
-  const [state, setState] = useState<{ kind: 'checking' } | { kind: 'done'; found: Duplicate[] } | { kind: 'off' }>({
-    kind: 'checking',
-  });
-  useEffect(() => {
-    let alive = true;
-    client
-      .request({ method: 'findDuplicates', params: { observation: id } })
-      .then((found) => alive && setState({ kind: 'done', found }))
-      // VibeQ not set up, or unreachable: filing shows its own problem, this stays quiet.
-      .catch(() => alive && setState({ kind: 'off' }));
-    return () => {
-      alive = false;
-    };
-  }, [client, id]);
-  if (state.kind === 'off') return null;
-  if (state.kind === 'checking') {
-    return (
-      <p className="small muted waiting" role="status" aria-label="Duplicates">
-        <span className="spinner" aria-hidden="true" />
-        Looking for the same problem in VibeQ…
-      </p>
-    );
-  }
-  if (state.found.length === 0) {
-    return (
-      <p className="small muted" role="status" aria-label="Duplicates">
-        <DoneIcon size={14} /> No open VibeQ task looks like this one.
-      </p>
-    );
-  }
-  const same = state.found.some((d) => d.verdict === 'same');
-  return (
-    <section className="card duplicates" aria-label="Duplicates" data-tone={same ? 'warning' : undefined}>
-      <h2>{same ? 'This may already be a task' : 'Similar tasks in VibeQ'}</h2>
-      <p className="small muted">
-        {same
-          ? 'Open it and add what you found there, or file this as a new task if it is different.'
-          : 'Their titles are close. Check them before you file.'}
-      </p>
-      <ul className="duplicate-list">
-        {state.found.map((d) => (
-          <li key={d.taskId}>
-            <span className="pill" data-tone={d.verdict === 'same' ? 'warning' : 'info'}>
-              {d.verdict === 'same' ? 'Same problem' : 'Similar title'}
-            </span>
-            <span className="duplicate-text">
-              <a href={originOf(d.url) ? d.url : undefined} target="_blank" rel="noreferrer">
-                {d.title}
-              </a>
-              <span className="small muted">
-                {d.status}
-                {d.reason && ` · ${d.reason}`}
-              </span>
-            </span>
-          </li>
-        ))}
-      </ul>
-    </section>
-  );
-}
-
-/** Work in progress, with a spinner and the time so far. */
-function Running({ text }: { text: string }) {
-  const elapsed = useSince(text);
-  return (
-    <span className="waiting">
-      <span className="spinner" aria-hidden="true" />
-      {text} {clock(elapsed)}
-    </span>
-  );
-}
-
-/** The site a page belongs to, for settings remembered per site. */
-function siteOf(url: string | undefined): string {
-  try {
-    return new URL(url ?? '').origin;
-  } catch {
-    return '';
-  }
-}
-
-/** The findings lines at the top of the notes, as the person reads them. */
-function findingsOf(notes: string): string[] {
-  return splitNotes(notes).findings ?? [];
-}
-
-/**
- * One recording with unrelated defects becomes two tasks: the chosen findings move to a new
- * observation that has copies of every capture and voice note, and each is trimmed and filed alone.
- */
-function Split({ client, id, onSplit }: { client: LensClient; id: number; onSplit: () => void }) {
-  const [open, setOpen] = useState<{ revision: number; findings: string[] } | null>(null);
-  const [chosen, setChosen] = useState<number[]>([]);
-  const [title, setTitle] = useState('');
-  const [message, setMessage] = useState<string | null>(null);
-  async function start() {
-    setMessage(null);
-    const found = await client.request({ method: 'getObservation', params: { id } });
-    const findings = findingsOf(found.notes);
-    if (findings.length < 2) {
-      setMessage('Split needs two or more findings at the top of the notes.');
-      return;
-    }
-    setOpen({ revision: found.revision, findings });
-    setChosen([]);
-    setTitle('');
-  }
-  async function split() {
-    if (!open) return;
-    try {
-      const copy = await client.request({
-        method: 'splitObservation',
-        params: { observation: id, revision: open.revision, findings: chosen, title },
-      });
-      setOpen(null);
-      setMessage(`Moved to “${copy.title}”. It opened in a new tab; trim each recording to its own defect.`);
-      onSplit();
-      void browser.tabs.create({ url: browser.runtime.getURL(`/review.html?observation=${copy.id}`) });
-    } catch (error) {
-      setMessage((error as Error).message);
-    }
-  }
-  if (!open) {
-    return (
-      <div className="split">
-        <button type="button" className="btn btn-ghost btn-sm" onClick={() => void start().catch((e: Error) => setMessage(e.message))}>
-          Split into two tasks
-        </button>
-        {message && (
-          <span className="small muted" role="status" aria-label="Split">
-            {message}
-          </span>
-        )}
-      </div>
-    );
-  }
-  return (
-    <fieldset className="split card">
-      <legend className="label">Move these findings to a new task</legend>
-      {open.findings.map((f, i) => (
-        <label key={i} className="check">
-          <input
-            type="checkbox"
-            checked={chosen.includes(i)}
-            onChange={(e) => {
-              const next = e.target.checked ? [...chosen, i] : chosen.filter((c) => c !== i);
-              setChosen(next);
-              if (!title.trim() || open.findings.some((g) => g.slice(0, 80) === title)) setTitle(open.findings[next[0] ?? -1]?.slice(0, 80) ?? '');
-            }}
-          />
-          <span>{f}</span>
-        </label>
-      ))}
-      <label className="field">
-        <span className="label">Title of the new task</span>
-        <input className="input" value={title} maxLength={200} onChange={(e) => setTitle(e.target.value)} />
-      </label>
-      <div className="note-actions">
-        <button type="button" className="btn btn-ghost btn-sm" onClick={() => setOpen(null)}>
-          Cancel
-        </button>
-        <button
-          type="button"
-          className="btn btn-primary btn-sm"
-          disabled={chosen.length === 0 || chosen.length === open.findings.length || !title.trim()}
-          onClick={() => void split()}
-        >
-          Move {chosen.length || ''} to a new task
-        </button>
-      </div>
-      {message && (
-        <span role="alert" className="small">
-          {message}
-        </span>
-      )}
-    </fieldset>
-  );
-}
-
-function BlobImage({ client, blob, alt }: { client: LensClient; blob: BlobRef; alt: string }) {
-  const [src, setSrc] = useState<string | null>(null);
-  useEffect(() => {
-    let url: string | null = null;
-    void client.readBlob(blob).then((data) => setSrc((url = URL.createObjectURL(data))));
-    return () => {
-      if (url) URL.revokeObjectURL(url);
-    };
-  }, [client, blob]);
-  return src ? <img className="review-shot" src={src} alt={alt} /> : <span className="review-shot skeleton" />;
 }

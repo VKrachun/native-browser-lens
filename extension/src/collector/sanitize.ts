@@ -5,7 +5,60 @@ export const SENSITIVE = /authorization|cookie|password|passwd|secret|token|api.
 /** Names of fields that hold payment, identity or one-time codes. Their values never leave. */
 export const PRIVATE_WORDS =
   /card|cc-?num|cvv|cvc|csc|iban|ssn|social.?security|passport|\bpin\b|account.?num|routing|one.?time|otp|2fa|mfa/i;
-const privateKey = (key: string) => SENSITIVE.test(key) || PRIVATE_WORDS.test(key);
+const privateKey = (key: string) => SENSITIVE.test(key) || PRIVATE_WORDS.test(key) || custom.names.has(key.toLowerCase());
+
+/** The person's own rules, on top of the built-in ones (Settings, `PrivacySettings`). */
+export interface PrivacySettings {
+  maskSelectors: string[];
+  sensitiveHeaders: string[];
+  sensitivePatterns: string[];
+}
+/** Where the background keeps the rules (from the app) for the recorder in each page. */
+export const PRIVACY_KEY = 'lens_privacy_settings';
+const MAX_RULES = 50;
+const MAX_PATTERN = 200;
+let custom = { names: new Set<string>(), patterns: [] as RegExp[] };
+
+/** Strings only, trimmed, without empties, at most MAX_RULES. Anything else reads as no rules. */
+export function privacySettings(raw: unknown): PrivacySettings {
+  const list = (value: unknown) =>
+    (Array.isArray(value) ? value : [])
+      .filter((v): v is string => typeof v === 'string')
+      .map((v) => v.trim())
+      .filter(Boolean)
+      .slice(0, MAX_RULES);
+  const found = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  return { maskSelectors: list(found.maskSelectors), sensitiveHeaders: list(found.sensitiveHeaders), sensitivePatterns: list(found.sensitivePatterns) };
+}
+
+/**
+ * Sets the person's rules for this page or worker: header (and field) names whose values go, and
+ * patterns whose matches go. Returns the patterns that did not compile or were too long.
+ */
+export function setCustomRedaction(settings: Partial<Pick<PrivacySettings, 'sensitiveHeaders' | 'sensitivePatterns'>>): string[] {
+  const { sensitiveHeaders, sensitivePatterns } = privacySettings(settings);
+  const rejected: string[] = [];
+  const patterns: RegExp[] = [];
+  for (const source of sensitivePatterns) {
+    try {
+      // ponytail: the length cap limits but cannot rule out a backtracking pattern; a worker with a timeout would.
+      if (source.length > MAX_PATTERN) throw new Error('too long');
+      const pattern = new RegExp(source, 'gi');
+      // A pattern that matches the empty string would put the marker between every character.
+      if (pattern.test('')) throw new Error('matches nothing');
+      patterns.push(pattern);
+    } catch {
+      rejected.push(source);
+    }
+  }
+  custom = { names: new Set(sensitiveHeaders.map((name) => name.toLowerCase())), patterns };
+  return rejected;
+}
+
+/** How many values a pass replaced in this evidence: for a summary of what was left out. */
+export function countRedactions(value: unknown): number {
+  return (typeof value === 'string' ? value : JSON.stringify(value) ?? '').split(REDACTED).length - 1;
+}
 /** Query keys that carry credentials in signed or OAuth URLs, beyond the general list. */
 const SENSITIVE_QUERY = /^(code|code_verifier|state|sig|signature|key|auth|jwt|otp|refresh_token|client_secret)$|^x-(amz|goog)-/i;
 export const REDACTED = '[REDACTED]';
@@ -38,6 +91,10 @@ export function sanitizeText(text: string): string {
  * run of word characters cannot make it backtrack quadratically.
  */
 export function redactContent(text: string): string {
+  return custom.patterns.reduce((out, pattern) => out.replace(pattern, REDACTED), builtIn(text));
+}
+
+function builtIn(text: string): string {
   return text
     .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/-]+=*/gi, `$1 ${REDACTED}`)
     // A cookie header holds every cookie to the end of its line, not only the first pair.

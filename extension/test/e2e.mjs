@@ -246,7 +246,7 @@ try {
   const onboarding = panel.getByRole('region', { name: 'Default destination' });
   const firstChoice = onboarding.getByLabel('Destination', { exact: true });
   await firstChoice.waitFor();
-  if (await firstChoice.inputValue() || await firstChoice.locator('option[value=vibeq]').count()) {
+  if (await firstChoice.inputValue() || !(await firstChoice.locator('option[value=vibeq]').count())) {
     throw new Error('Unexpected initial default');
   }
   await firstChoice.selectOption('linear');
@@ -564,7 +564,6 @@ try {
   // File to VibeQ: the first reply is lost; filing again finishes without a second task.
   // Sign in through VibeQ: nobody is signed in yet, so Lens opens VibeQ and waits for the session.
   const vibeqOrigin = `http://127.0.0.1:${fakeVibeq.address().port}`;
-  await settings.getByText('Other integrations', { exact: true }).click();
   await settings.getByLabel('VibeQ address').fill(vibeqOrigin);
   if (process.env.E2E_GALLERY) {
     mkdirSync(process.env.E2E_GALLERY, { recursive: true });
@@ -683,7 +682,7 @@ try {
     await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'e2e', version: '1' } });
     mcp.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
     const tools = (await rpc('tools/list', {})).tools.map((t) => t.name).sort().join(',');
-    if (tools !== 'get_review,list_reviews,playwright_test,read_review_file,recent_evidence,search_reviews,verify_fix') {
+    if (tools !== 'get_review,list_reviews,playwright_test,query_review_evidence,read_review_file,recent_evidence,search_reviews,verify_fix') {
       throw new Error(`MCP tools: ${tools}`);
     }
     const listing = (await rpc('tools/call', { name: 'list_reviews', arguments: {} })).content;
@@ -704,6 +703,16 @@ try {
       throw new Error(`MCP voice: ${JSON.stringify(detail.voiceNotesByThePerson)}`);
     }
     if (detail.captures[0].untrustedPageContent.marks[0]?.kind !== 'rectangle') throw new Error(`MCP marks: ${JSON.stringify(detail.captures[0].untrustedPageContent.marks)}`);
+    // The focused query: only what failed, without the whole timeline.
+    const queried = (await rpc('tools/call', { name: 'query_review_evidence', arguments: { review: latest.id, kind: 'failures' } })).content;
+    if (!queried[0].text.includes('UNTRUSTED DATA')) throw new Error('MCP: queried evidence is not marked untrusted');
+    const failures = JSON.parse(queried[1].text).entries;
+    if (
+      !failures.some((e) => e.kind === 'response' && e.data.status === 500) ||
+      !failures.some((e) => e.kind === 'console' && e.data.text?.includes('total is NaN'))
+    ) {
+      throw new Error(`MCP query_review_evidence: ${JSON.stringify(failures).slice(0, 400)}`);
+    }
     const served = (await rpc('tools/call', { name: 'read_review_file', arguments: { review: latest.id, file: 'capture-1.spec.ts' } })).content;
     if (!served[1].text.includes('getByRole("button", { name: "Pay", exact: true }).click()')) throw new Error(`MCP spec: ${served[1].text.slice(0, 300)}`);
     const record = JSON.parse((await rpc('tools/call', { name: 'read_review_file', arguments: { review: latest.id, file: 'capture-1.lens.json' } })).content[1].text);

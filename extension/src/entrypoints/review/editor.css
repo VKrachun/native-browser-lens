@@ -226,6 +226,42 @@
   background: var(--warning, #f5a524);
   transform: rotate(45deg);
 }
+/* A marker the person set while recording: a pin through the marks lane. */
+.timeline .mark[data-kind='marker'] {
+  top: 20px;
+  width: 3px;
+  height: 26px;
+  margin-left: -1.5px;
+  border-radius: 2px;
+  background: var(--primary);
+  z-index: 1;
+}
+.timeline-nav .speed {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.timeline-nav .select {
+  width: auto;
+}
+.video-preview {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+}
+.video-preview summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.video-preview video {
+  width: 100%;
+  max-height: 60vh;
+  border-radius: var(--radius);
+  background: #000;
+}
+.video-preview .btn {
+  justify-self: start;
+}
 .timeline .selection {
   top: 20px;
   bottom: 0;
@@ -532,14 +568,25 @@
   width: 12px;
   height: 12px;
 }
-.mask-scrim {
+/* A modal <dialog> that is the scrim itself: the browser's own box and backdrop are off. */
+.mask-scrim[open] {
   position: fixed;
   inset: 0;
   z-index: 50;
   display: grid;
   place-items: center;
+  width: auto;
+  height: auto;
+  max-width: none;
+  max-height: none;
+  margin: 0;
   padding: 24px;
+  border: 0;
   background: oklch(0 0 0 / 55%);
+  color: inherit;
+}
+.mask-scrim::backdrop {
+  background: none;
 }
 .mask-dialog {
   display: grid;

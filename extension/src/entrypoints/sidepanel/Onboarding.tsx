@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { LensClient } from '@/lens-client';
+import { LensError, type LensClient } from '@/lens-client';
 import type { SetupStatus } from '@/protocol/SetupStatus';
 import { CopyIcon, DoneIcon } from '@/ui/icons';
 
@@ -21,7 +21,7 @@ export const hostNotFound = (reason: string) => /native messaging host not found
  * Shown while the extension cannot reach the Lens app: the installer for this computer, and a wait
  * that ends by itself when the app answers.
  */
-export function InstallApp({ reason }: { reason: string }) {
+export function InstallApp({ reason, quit = false }: { reason: string; quit?: boolean }) {
   const [os, setOs] = useState('linux');
   const [copied, setCopied] = useState(false);
   useEffect(() => {
@@ -29,6 +29,19 @@ export function InstallApp({ reason }: { reason: string }) {
   }, []);
   const missing = hostNotFound(reason);
   const { system, file, shell, command } = installerFor(os);
+  // The app is installed: the person quit it, so there is nothing to download.
+  if (quit) {
+    return (
+      <section className="card onboarding" aria-label="Lens app">
+        <h2>You quit the Lens app</h2>
+        <p className="muted">Open Sirv Lens from your applications. This panel continues by itself.</p>
+        <p className="waiting small muted" role="status" aria-label="Waiting for the app">
+          <span className="spinner" aria-hidden="true" />
+          Waiting for the app
+        </p>
+      </section>
+    );
+  }
   return (
     <section className="card onboarding" aria-label="Install the Lens app">
       <h2>{missing ? 'The browser could not find the Lens app' : 'The browser lost its connection to Lens'}</h2>
@@ -70,27 +83,35 @@ export function InstallApp({ reason }: { reason: string }) {
   );
 }
 
+const loginStep = (status: SetupStatus) => status.steps.find((s) => s.name === 'Starts at login');
+
 export function SetupCard({ client, refresh }: { client: LensClient; refresh: number }) {
   const [status, setStatus] = useState<SetupStatus | null>(null);
   const [turningOn, setTurningOn] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
+    // A new connection (the app restarted) asks again from the start.
+    setTurningOn(false);
     const load = () =>
       client
         .request({ method: 'setupStatus' })
-        .then((s) => alive && setStatus(s))
+        .then((s) => {
+          if (!alive) return;
+          setStatus(s);
+          // Once it starts at login, there is nothing left to watch.
+          if (loginStep(s)?.mark !== 'todo') clearInterval(timer);
+        })
         .catch(() => {});
-    void load();
     const timer = setInterval(load, 4000);
+    void load();
     return () => {
       alive = false;
       clearInterval(timer);
     };
   }, [client, refresh]);
   if (!status) return null;
-  const login = status.steps.find((s) => s.name === 'Starts at login');
-  if (login?.mark !== 'todo') return null;
+  if (loginStep(status)?.mark !== 'todo') return null;
 
   async function turnOn() {
     setTurningOn(true);
@@ -99,6 +120,8 @@ export function SetupCard({ client, refresh }: { client: LensClient; refresh: nu
       // The app restarts under the service manager; this panel reconnects by itself.
       await client.request({ method: 'installService' });
     } catch (error) {
+      // The restart ends the connection: that is the service starting, not a failure.
+      if (error instanceof LensError && error.code === 'disconnected') return;
       setProblem(`Lens did not turn it on: ${(error as Error).message}. Run lens service install in a terminal.`);
       setTurningOn(false);
     }

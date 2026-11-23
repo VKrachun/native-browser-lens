@@ -74,6 +74,9 @@ export function Notes({
   /** A tag typed but not added yet: unsaved until Enter, a comma or leaving the field. */
   const [typingTag, setTypingTag] = useState(false);
   const saving = useRef(false);
+  /** The text on screen now: a save compares against it, as the person can type while it runs. */
+  const onScreen = useRef({ title, notes, tags });
+  onScreen.current = { title, notes, tags };
   const tagList = tags.split(',').map((t) => t.trim()).filter(Boolean);
   const dirty =
     record !== null && (title !== record.title || notes !== record.notes || tagList.join(',') !== record.tags.join(','));
@@ -109,10 +112,11 @@ export function Notes({
         params: { id, revision: record.revision, title, notes, tags: tagList },
       });
       setRecord(saved);
-      // The daemon cleans tags ("AI Tools" becomes ai-tools): show what it kept.
-      if (saved.tags.join(',') !== tagList.join(',')) setTags(saved.tags.join(', '));
+      const now = onScreen.current;
+      // The daemon cleans tags ("AI Tools" becomes ai-tools): show what it kept, unless they changed meanwhile.
+      if (now.tags === tags && saved.tags.join(',') !== tagList.join(',')) setTags(saved.tags.join(', '));
       // Typing during the save leaves a newer draft: the effect below saves it next.
-      const same = saved.title === title && saved.notes === notes;
+      const same = now.title === title && now.notes === notes && now.tags === tags;
       setState(same ? { kind: 'saved' } : { kind: 'editing' });
       onSaved();
       return same;
@@ -124,20 +128,22 @@ export function Notes({
         const latest = await client.request({ method: 'getObservation', params: { id } }).catch(() => null);
         const prepended = latest && latest.notes.endsWith(record.notes);
         if (latest && prepended) {
-          const merged = {
-            title: title === record.title ? latest.title : title,
-            notes: latest.notes.slice(0, latest.notes.length - record.notes.length) + notes,
-          };
+          const prefix = latest.notes.slice(0, latest.notes.length - record.notes.length);
+          const merge = (t: string, n: string) => ({ title: t === record.title ? latest.title : t, notes: prefix + n });
           try {
-            const merging = { ...merged, tags: tagList.length || record.tags.length ? tagList : latest.tags };
+            const merging = { ...merge(title, notes), tags: tagList.length || record.tags.length ? tagList : latest.tags };
             const saved = await client.request({ method: 'updateObservation', params: { id, revision: latest.revision, ...merging } });
             setRecord(saved);
-            setTitle(saved.title);
-            setNotes(saved.notes);
-            setTags(saved.tags.join(', '));
-            setState({ kind: 'saved' });
+            // Typed during the merge: the newer text stays, with the same findings in front of it.
+            const now = onScreen.current;
+            const same = now.title === title && now.notes === notes && now.tags === tags;
+            const newer = merge(now.title, now.notes);
+            setTitle(same ? saved.title : newer.title);
+            setNotes(same ? saved.notes : newer.notes);
+            setTags(same ? saved.tags.join(', ') : now.tags);
+            setState(same ? { kind: 'saved' } : { kind: 'editing' });
             onSaved();
-            return true;
+            return same;
           } catch {
             // Fall through: show the conflict.
           }
@@ -196,7 +202,7 @@ export function Notes({
   // The notes stay one text; the page shows the model's findings as lines and the rest as the
   // person's own words.
   const parts = splitNotes(notes);
-  const setParts = (findings: string[] | null, rest: string) => (setNotes(joinNotes(findings, rest)), setState(editing));
+  const setParts = (findings: string[] | null, rest: string) => (setNotes(joinNotes(findings, rest, parts.header)), setState(editing));
   const setTagList = (list: string[]) => (setTags(list.join(', ')), setState(editing));
   return (
     <div className="notes">

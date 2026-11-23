@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { openBasecamp } from '@/basecamp-handoff';
 import { basecampNotes, draftDescription, draftTarget, trackerNames, type DraftTracker } from '@/tracker-drafts';
 import type { Review } from '@/protocol/Review';
@@ -10,7 +10,21 @@ const buttons: Record<DraftTracker, string> = {
   clipboard: 'Copy summary',
 };
 
-export function TrackerDraft({ tracker, address, review, includeVoice }: { tracker: DraftTracker; address: string; review: Review; includeVoice: boolean }) {
+export function TrackerDraft({ tracker, address, review, includeVoice, autoOpen = false }: {
+  tracker: DraftTracker;
+  address: string;
+  review: Review;
+  includeVoice: boolean;
+  /** Open the draft once on mount: the one-click path from the review page. */
+  autoOpen?: boolean;
+}) {
+  const opened = useRef(false);
+  useEffect(() => {
+    // A ref, not state: StrictMode runs the effect twice, and the draft must open once.
+    if (!autoOpen || opened.current) return;
+    opened.current = true;
+    void open();
+  }, [autoOpen]);
   const [error, setError] = useState('');
   const [status, setStatus] = useState('');
   const [manual, setManual] = useState<{ text: string; url: string | null; label: string } | null>(null);
@@ -73,7 +87,7 @@ export function TrackerDraft({ tracker, address, review, includeVoice }: { track
           <label><input type="checkbox" checked={video} onChange={e => setVideo(e.target.checked)} /> Replay MP4 {includeVoice ? '(with recorded voice)' : '(muted)'}</label>}
       </fieldset>}
       <button className="btn btn-primary" type="button" disabled={busy} onClick={open}>
-        {buttons[tracker]}
+        {busy ? (tracker === 'clipboard' ? 'Copying…' : 'Opening…') : buttons[tracker]}
       </button>
       {error && <span role="alert" className="small">{error}</span>}
       {fallback && <details className="small">

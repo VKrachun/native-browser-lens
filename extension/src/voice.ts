@@ -33,22 +33,31 @@ export async function record(onData?: (parts: Blob[], type: string, startedAt: n
     chunks.push(event.data);
     if (startedAt) onData?.(chunks.slice(), recorder.mimeType, startedAt);
   };
-  // The clock starts with the first sample, not the call: speech then lines up with the replay.
-  await new Promise((started) => {
-    recorder.onstart = started;
-    recorder.start(1000);
-  });
-  startedAt = Date.now();
   const release = () => stream.getTracks().forEach((track) => track.stop());
+  // The clock starts with the first sample, not the call: speech then lines up with the replay.
+  try {
+    await new Promise((started, fail) => {
+      recorder.onstart = started;
+      recorder.onerror = (event) => fail((event as ErrorEvent).error ?? new Error('The microphone recorder failed'));
+      recorder.start(1000);
+    });
+  } catch (error) {
+    release();
+    throw error;
+  }
+  startedAt = Date.now();
   return {
     startedAt,
     cancel: () => (recorder.state !== 'inactive' && recorder.stop(), release()),
     stop: () =>
       new Promise<Blob>((done, fail) => {
-        recorder.onstop = () => {
+        const finish = () => {
           release();
           toWav(new Blob(chunks, { type: recorder.mimeType })).then(done, fail);
         };
+        // The recorder ended by itself (the microphone went away): what it wrote is all there is.
+        if (recorder.state === 'inactive') return finish();
+        recorder.onstop = finish;
         recorder.stop();
       }),
   };

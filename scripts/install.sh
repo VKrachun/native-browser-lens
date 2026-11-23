@@ -77,7 +77,12 @@ if curl -fsSL -o "$work/$extension_zip" "$base/$extension_zip" 2>/dev/null &&
 fi
 
 "$bin_dir/lens" register
-"$bin_dir/lens" service install
+# A Lens with its own data folder never starts at login (lens service install refuses it).
+if [ -n "${LENS_HOME:-}" ]; then
+  echo "LENS_HOME is set: the login service was not installed for this custom data folder."
+else
+  "$bin_dir/lens" service install
+fi
 
 echo
 echo "Lens $version is installed in $bin_dir/lens."

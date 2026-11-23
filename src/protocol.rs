@@ -301,6 +301,34 @@ pub enum Request {
     SpeechStatus,
     /// Downloads the speech models (once, about 575 MB), then transcribes waiting voice notes.
     InstallSpeech,
+    /// Stops a speech model download in progress.
+    CancelSpeechDownload,
+    GetSpeechSettings,
+    SetSpeechSettings(SpeechSettings),
+    /// Whether the replay tools (Node.js, ffmpeg, the rrweb player) for MP4s and pictures are here.
+    GetVideoTools,
+    /// Installs the replay tools in the background; GetVideoTools reports the progress.
+    InstallVideoTools,
+    /// How much disk the notebook takes, by kind, and the retention rule.
+    GetStorage,
+    /// Deletes observations not changed for `older_than_days` days (only filed ones with
+    /// `filed_only`), with their files unless another record shares them.
+    PruneStorage {
+        #[serde(rename = "olderThanDays")]
+        older_than_days: u32,
+        #[serde(rename = "filedOnly")]
+        filed_only: bool,
+    },
+    /// Prunes this way every hour from now on; null days turns it off.
+    SetRetention {
+        days: Option<u32>,
+        #[serde(rename = "filedOnly")]
+        filed_only: bool,
+    },
+    GetPrivacySettings,
+    SetPrivacySettings(PrivacySettings),
+    GetFindingsSettings,
+    SetFindingsSettings(FindingsSettings),
     /// Ends the daemon after the reply (updates, tests). The next connection starts a new one.
     Shutdown,
 }
@@ -484,7 +512,102 @@ pub enum Reply {
     Speech(SpeechStatus),
     Suggestion(crate::investigate::Suggestion),
     Summary(crate::investigate::Summary),
+    SpeechSettings(SpeechSettings),
+    VideoTools(VideoToolsStatus),
+    Storage(StorageUsage),
+    Pruned(PruneResult),
+    PrivacySettings(PrivacySettings),
+    FindingsSettings(FindingsSettings),
     Stopping,
+}
+
+/// How voice notes are transcribed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SpeechSettings {
+    /// `large-v3-turbo` or `small`.
+    pub model: String,
+    /// A language code such as `en`; null detects it.
+    pub language: Option<String>,
+    /// Words the model should expect: product names, people.
+    pub prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct VideoToolsStatus {
+    pub ready: bool,
+    pub installing: bool,
+    pub node: bool,
+    pub ffmpeg: bool,
+    /// Why they are not ready, or why the install failed.
+    pub detail: Option<String>,
+    /// What the install does now.
+    pub progress: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct StorageUsage {
+    #[ts(type = "number")]
+    pub recordings_bytes: u64,
+    #[ts(type = "number")]
+    pub audio_bytes: u64,
+    #[ts(type = "number")]
+    pub screenshots_bytes: u64,
+    #[ts(type = "number")]
+    pub models_bytes: u64,
+    /// Evidence, reviews, filings, the database and the replay tools.
+    #[ts(type = "number")]
+    pub other_bytes: u64,
+    #[ts(type = "number")]
+    pub total_bytes: u64,
+    #[ts(type = "number")]
+    pub observation_count: u64,
+    #[ts(type = "number")]
+    pub review_count: u64,
+    /// Observations older than this many days go every hour; null keeps everything.
+    pub retention_days: Option<u32>,
+    pub retention_filed_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PruneResult {
+    #[ts(type = "number")]
+    pub deleted_observations: u64,
+    /// The bytes of the files only the deleted observations named; the sweep removes them.
+    #[ts(type = "number")]
+    pub freed_bytes: u64,
+}
+
+/// The person's own redaction rules, on top of the built-in ones.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PrivacySettings {
+    /// CSS selectors whose elements are masked in screenshots and recordings.
+    pub mask_selectors: Vec<String>,
+    /// Header names whose values are redacted, such as `x-api-key`.
+    pub sensitive_headers: Vec<String>,
+    /// Regular expressions (JavaScript syntax) whose matches are redacted.
+    pub sensitive_patterns: Vec<String>,
+}
+
+/// The findings a model writes from a recording.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct FindingsSettings {
+    pub enabled: bool,
+    /// `claude` or `codex`; null picks one automatically.
+    pub provider: Option<String>,
+    /// A model name for that agent; null is its default.
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]
@@ -662,7 +785,7 @@ fn moment() -> CaptureKind {
 pub struct MarkTarget {
     /// The mark's position among the capture's marks, from 1.
     pub mark: u32,
-    /// `rectangle`, `arrow` or `pen`.
+    /// `rectangle`, `arrow`, `pen`, `text` or `badge`.
     pub kind: String,
     pub elements: Vec<Locator>,
 }
@@ -1168,7 +1291,30 @@ pub enum Shape {
         width: f64,
         height: f64,
     },
+    /// Pixelates what is under it in every export: a mask that keeps the layout readable.
+    Blur {
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+    },
+    /// A label whose top left corner is at `x`, `y`.
+    Text {
+        x: f64,
+        y: f64,
+        text: String,
+        color: String,
+    },
+    /// A numbered step, centred on `x`, `y`.
+    Badge {
+        x: f64,
+        y: f64,
+        number: u32,
+        color: String,
+    },
 }
+
+pub const MAX_TEXT_CHARS: usize = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -1181,6 +1327,11 @@ pub const MAX_SHAPES: usize = 500;
 pub const MAX_PEN_POINTS: usize = 5000;
 
 impl Shape {
+    /// Hides what is under it, so the marks under it, the replay and screen text must not leave.
+    pub fn hides(&self) -> bool {
+        matches!(self, Shape::Mask { .. } | Shape::Blur { .. })
+    }
+
     /// Finite coordinates, `#rrggbb` colors and bounded sizes, so a stored shape always renders.
     pub fn validate(&self) -> Result<(), String> {
         let color_ok = |c: &str| {
@@ -1200,7 +1351,30 @@ impl Shape {
                 y,
                 width,
                 height,
+            }
+            | Shape::Blur {
+                x,
+                y,
+                width,
+                height,
             } => (vec![*x, *y, *width, *height], None),
+            Shape::Text { x, y, text, color } => {
+                if text.trim().is_empty() || text.chars().count() > MAX_TEXT_CHARS {
+                    return Err(format!("a label needs 1 to {MAX_TEXT_CHARS} characters"));
+                }
+                (vec![*x, *y], Some(color))
+            }
+            Shape::Badge {
+                x,
+                y,
+                number,
+                color,
+            } => {
+                if !(1..=999).contains(number) {
+                    return Err("a step number is from 1 to 999".into());
+                }
+                (vec![*x, *y], Some(color))
+            }
             Shape::Arrow { from, to, color } => (vec![from.x, from.y, to.x, to.y], Some(color)),
             Shape::Pen { points, color } => {
                 if points.len() > MAX_PEN_POINTS {

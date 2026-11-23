@@ -17,6 +17,7 @@ export function AppStatus({ onBack }: { onBack?: () => void }) {
   /** The person quit the app (the host said so): the banner says that, not that it failed. */
   const [quit, setQuit] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  const [checking, setChecking] = useState(false);
   // When the app answers again after it was down, the page catches up: by default it loads again.
   const wasDown = useRef(false);
   const back = useRef(onBack ?? (() => location.reload()));
@@ -35,6 +36,7 @@ export function AppStatus({ onBack }: { onBack?: () => void }) {
     let failures = 0;
     const check = async () => {
       let late: ReturnType<typeof setTimeout> | undefined;
+      if (alive) setChecking(true);
       try {
         await Promise.race([
           lens.request({ method: 'hello' }),
@@ -54,6 +56,7 @@ export function AppStatus({ onBack }: { onBack?: () => void }) {
         }
       } finally {
         clearTimeout(late);
+        if (alive) setChecking(false);
       }
       // 10 s, then 20, 40 and 60 s while the app stays away.
       const wait = Math.min(AT_MOST_EVERY_MS, EVERY_MS * 2 ** Math.max(0, failures - 1));
@@ -75,8 +78,8 @@ export function AppStatus({ onBack }: { onBack?: () => void }) {
         {quit ? 'You quit the Lens app.' : `The Lens app is not running (${down}).`} Open Sirv Lens from your
         applications. This page continues when the app answers.
       </span>
-      <button type="button" className="btn btn-ghost btn-sm" onClick={() => setAttempt((n) => n + 1)}>
-        Try again
+      <button type="button" className="btn btn-ghost btn-sm" onClick={() => setAttempt((n) => n + 1)} disabled={checking}>
+        {checking ? 'Checking…' : 'Try again'}
       </button>
     </div>
   );

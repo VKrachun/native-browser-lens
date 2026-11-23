@@ -193,9 +193,7 @@ export function VoiceNotes({
     await load();
   }
 
-  async function install() {
-    setSpeech(await client.request({ method: 'installSpeech' }));
-  }
+  const install = () => client.request({ method: 'installSpeech' }).then(setSpeech);
 
   return (
     <section className="voice" aria-label="Voice notes">
@@ -219,7 +217,7 @@ export function VoiceNotes({
           join the steps in the timeline.
         </p>
       )}
-      {speech && !ready && (notes?.length || recording) ? <ModelNotice speech={speech} onInstall={() => void install()} /> : null}
+      {speech && !ready && (notes?.length || recording) ? <ModelNotice speech={speech} onInstall={install} /> : null}
       {notes && notes.length > 0 && (
         <ol className="voice-list" aria-label="Voice note list">
           {notes.map((note) => (
@@ -280,9 +278,31 @@ export function VoiceNotes({
 }
 
 /** The one-time speech model download, asked for when it is first needed. */
-export function ModelNotice({ speech, onInstall }: { speech: SpeechStatus; onInstall: () => void }) {
+export function ModelNotice({
+  speech,
+  onInstall,
+  onCancel,
+}: {
+  speech: SpeechStatus;
+  onInstall: () => Promise<unknown>;
+  /** Stops a download in progress; without it, the download has no Cancel. */
+  onCancel?: () => Promise<unknown>;
+}) {
   const mb = (bytes: number) => Math.round(bytes / 1e6);
   const model = speech.model;
+  const [starting, setStarting] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+  async function install() {
+    setStarting(true);
+    setProblem(null);
+    try {
+      await onInstall();
+    } catch (error) {
+      setProblem(`The download did not start: ${(error as Error).message}`);
+    } finally {
+      setStarting(false);
+    }
+  }
   if (model.state === 'downloading') {
     return (
       <div className="notice" data-tone="info" role="status" aria-label="Speech model">
@@ -292,6 +312,16 @@ export function ModelNotice({ speech, onInstall }: { speech: SpeechStatus; onIns
           <span className="meter" aria-hidden="true">
             <span style={{ width: `${(Number(model.received) / Math.max(1, Number(model.total))) * 100}%` }} />
           </span>
+          {onCancel && (
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={() => void onCancel().catch((error: Error) => setProblem(error.message))}
+            >
+              Cancel download
+            </button>
+          )}
+          {problem && <span className="danger-text">{problem}</span>}
         </span>
       </div>
     );
@@ -302,9 +332,10 @@ export function ModelNotice({ speech, onInstall }: { speech: SpeechStatus; onIns
         {model.state === 'failed'
           ? `The speech model did not download: ${model.reason}`
           : `Your voice needs the speech model, a one-time ${mb(Number(speech.downloadBytes))} MB download. It runs on this computer.`}{' '}
-        <button type="button" className="btn btn-secondary btn-sm" onClick={onInstall}>
-          {model.state === 'failed' ? 'Try again' : 'Download the speech model'}
+        <button type="button" className="btn btn-secondary btn-sm" onClick={() => void install()} disabled={starting}>
+          {starting ? 'Starting the download…' : model.state === 'failed' ? 'Try again' : 'Download the speech model'}
         </button>
+        {problem && <span className="danger-text"> {problem}</span>}
       </span>
     </div>
   );
@@ -313,25 +344,37 @@ export function ModelNotice({ speech, onInstall }: { speech: SpeechStatus; onIns
 function Player({ client, note }: { client: LensClient; note: VoiceNote }) {
   const audio = useRef<HTMLAudioElement | null>(null);
   const [playing, setPlaying] = useState(false);
-  useEffect(
-    () => () => {
+  /** One toggle at a time: a second click while the audio loads would load and play it twice. */
+  const busy = useRef(false);
+  const gone = useRef(false);
+  useEffect(() => {
+    gone.current = false;
+    return () => {
+      gone.current = true;
       audio.current?.pause();
       if (audio.current) URL.revokeObjectURL(audio.current.src);
-    },
-    [],
-  );
+    };
+  }, []);
   async function toggle() {
-    if (!audio.current) {
-      const element = new Audio(URL.createObjectURL(await client.readBlob(note.audio)));
-      element.onended = () => setPlaying(false);
-      audio.current = element;
-    }
-    if (playing) {
-      audio.current.pause();
-      setPlaying(false);
-    } else {
-      await audio.current.play();
-      setPlaying(true);
+    if (busy.current) return;
+    busy.current = true;
+    try {
+      if (!audio.current) {
+        const url = URL.createObjectURL(await client.readBlob(note.audio));
+        if (gone.current) return URL.revokeObjectURL(url);
+        const element = new Audio(url);
+        element.onended = () => setPlaying(false);
+        audio.current = element;
+      }
+      if (playing) {
+        audio.current.pause();
+        setPlaying(false);
+      } else {
+        await audio.current.play();
+        setPlaying(true);
+      }
+    } finally {
+      busy.current = false;
     }
   }
   return (

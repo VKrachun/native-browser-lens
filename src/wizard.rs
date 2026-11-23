@@ -2,7 +2,8 @@
 //! they open the app (and from the menu-bar icon). It shows each step with its live state, turns
 //! green as the person does them, and offers the actions Lens can take for them: open a
 //! browser's extensions page, show the extension folder, download the speech model, choose the
-//! AI model, connect the coding agents, open Lens Settings.
+//! AI model, connect the coding agents, open Lens Settings. `#settings` and `#reviews` (from the
+//! tray menu) bring the settings or the recent reviews into view.
 //!
 //! Access: the app opens a link that works once and for two minutes (a link in a command line or
 //! the browser history is useless after that). It sets an HttpOnly, SameSite=Strict session
@@ -106,6 +107,10 @@ enum Action {
     },
     OpenSettings {
         browser: String,
+    },
+    OpenReview {
+        browser: String,
+        observation: i64,
     },
     ShowFolder {
         firefox: bool,
@@ -212,6 +217,19 @@ fn answer(daemon: &Daemon, paths: &Paths, wizard: &Wizard, mut request: tiny_htt
         (tiny_http::Method::Get, "/status") => {
             let body = status(daemon, paths).to_string();
             send(request, 200, json_kind, body, &[])
+        }
+        (tiny_http::Method::Get, "/reviews") => {
+            let page = Request::ListReviewsPage {
+                before: None,
+                limit: 20,
+                observation: None,
+            };
+            let body = match ask(daemon, page) {
+                Ok(Reply::Reviews(reviews)) => json!({ "reviews": reviews }),
+                Ok(_) => json!({ "error": "unexpected reply" }),
+                Err(error) => json!({ "error": error }),
+            };
+            send(request, 200, json_kind, body.to_string(), &[])
         }
         (tiny_http::Method::Post, "/action") => {
             let same_origin = header(&request, "Origin") == Some(origin.as_str());
@@ -346,6 +364,20 @@ fn act(daemon: &Daemon, paths: &Paths, action: Action) -> Result<(), String> {
             }
             let id = connected_id(daemon).ok_or("add the extension first")?;
             open_in(&launch, &format!("chrome-extension://{id}/options.html"))
+        }
+        Action::OpenReview {
+            browser,
+            observation,
+        } => {
+            let launch = launcher(&browser).ok_or("Lens does not know that browser")?;
+            if launch.firefox {
+                return Err("in Firefox, open the Lens sidebar and choose the review".into());
+            }
+            let id = connected_id(daemon).ok_or("add the extension first")?;
+            open_in(
+                &launch,
+                &format!("chrome-extension://{id}/review.html?observation={observation}"),
+            )
         }
         Action::ShowFolder { firefox } => {
             let folder = paths.data.join(if firefox {
@@ -572,6 +604,10 @@ mod tests {
         let action: Action =
             serde_json::from_str(r#"{"action":"openStore","browser":"Brave"}"#).unwrap();
         assert!(matches!(action, Action::OpenStore { browser } if browser == "Brave"));
+        let action: Action =
+            serde_json::from_str(r#"{"action":"openReview","browser":"Brave","observation":7}"#)
+                .unwrap();
+        assert!(matches!(action, Action::OpenReview { observation: 7, .. }));
         assert!(serde_json::from_str::<Action>(r#"{"action":"shutdown"}"#).is_err());
     }
 }

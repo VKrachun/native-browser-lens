@@ -54,6 +54,9 @@ const USAGE: &str = "Usage: lens <command>
   register           Register Lens with every installed browser (per user)
   unregister         Remove those registrations
   reviews [--json]   List the reviews, newest first, with their VibeQ tasks
+  search <words> [--json]
+                     The reviews whose title, page, VibeQ task, notes or findings
+                     hold every word
   review <id>        Print one review as JSON (what the MCP tool get_review returns)
   export <id> [--to DIR]
                      Write a review to a folder: report, screenshots, evidence, a
@@ -69,6 +72,13 @@ const USAGE: &str = "Usage: lens <command>
   agents connect     Give the coding agents here the sirv-lens skill and MCP server
                      (Claude Code, Codex, Cursor, Gemini CLI)
   agents disconnect  Take them back
+  storage [--json]   Show the disk Lens uses, by kind, and the retention rule
+  prune --older-than <days> [--filed-only]
+                     Delete observations not changed for that many days (only
+                     those filed as a task with --filed-only)
+  video-tools [status|install]
+                     Check, or install, what MP4 export needs (Node.js, Playwright,
+                     Chromium; FFmpeg you install yourself)
   mcp                Serve reviewed defects to coding agents over MCP (stdio)
   tray               Show the Lens menu-bar / tray icon
   daemon             Run the Lens daemon in the foreground
@@ -78,7 +88,10 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         // Chromium passes the caller's origin; Firefox passes the path of the host manifest.
-        Some(a) if a.starts_with("chrome-extension://") || a.ends_with(".json") => {
+        Some(a)
+            if a.starts_with("chrome-extension://")
+                || a.to_ascii_lowercase().ends_with(".json") =>
+        {
             with_paths(shim::run)
         }
         Some("daemon") => {
@@ -119,6 +132,9 @@ fn main() -> ExitCode {
         Some("status") => with_paths(status),
         Some("setup") => with_paths(setup::setup),
         Some("open") => with_paths(setup::open),
+        // Older Ubuntu WebExtensions portals start the native host with no arguments and pipes.
+        #[cfg(unix)]
+        None if stdin_and_stdout_are_pipes() => with_paths(shim::run),
         // Started from the Applications folder, the Start menu or the app menu: no terminal.
         None if !std::io::IsTerminal::is_terminal(&std::io::stdout()) => with_paths(setup::open),
         Some("update") => with_paths(|p| {
@@ -170,6 +186,36 @@ fn main() -> ExitCode {
         Some("reviews") => {
             let json = args.iter().any(|a| a == "--json");
             with_paths(|p| cli::reviews(p, json))
+        }
+        Some("search") => {
+            let json = args.iter().any(|a| a == "--json");
+            let words: Vec<&str> = args[1..]
+                .iter()
+                .map(String::as_str)
+                .filter(|a| *a != "--json")
+                .collect();
+            if words.is_empty() {
+                Err(std::io::Error::other("lens search <words> [--json]"))
+            } else {
+                with_paths(|p| cli::search(p, &words.join(" "), json))
+            }
+        }
+        Some("storage") => {
+            let json = args.iter().any(|a| a == "--json");
+            with_paths(|p| cli::storage(p, json))
+        }
+        Some("prune") => {
+            let days = args
+                .iter()
+                .position(|a| a == "--older-than")
+                .and_then(|i| args.get(i + 1))
+                .map(String::as_str);
+            let filed_only = args.iter().any(|a| a == "--filed-only");
+            with_paths(|p| cli::prune(p, days, filed_only))
+        }
+        Some("video-tools") => {
+            let action = args.get(1).map(String::as_str);
+            with_paths(|p| cli::video_tools(p, action))
         }
         Some("review") => match args.get(1) {
             Some(id) => with_paths(|p| cli::show(p, id)),
@@ -318,11 +364,12 @@ pub fn stop_daemon(paths: &Paths) -> std::io::Result<bool> {
     if ask(paths, Request::Shutdown)?.is_none() {
         return Ok(false);
     }
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    // The daemon first lets slow work under way finish, for up to 10 seconds.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     while ipc::connect(paths).is_ok() {
         if std::time::Instant::now() > deadline {
             return Err(std::io::Error::other(
-                "the daemon did not stop within 10 seconds",
+                "the daemon did not stop within 20 seconds",
             ));
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -348,4 +395,20 @@ fn stop(paths: &Paths) -> std::io::Result<()> {
         }
     );
     Ok(())
+}
+
+#[cfg(unix)]
+fn is_fifo(fd: std::os::fd::RawFd) -> bool {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `fstat` initializes `stat` when it returns 0.
+    unsafe {
+        libc::fstat(fd, stat.as_mut_ptr()) == 0
+            && (stat.assume_init().st_mode & libc::S_IFMT) == libc::S_IFIFO
+    }
+}
+
+#[cfg(unix)]
+fn stdin_and_stdout_are_pipes() -> bool {
+    use std::os::fd::AsRawFd;
+    is_fifo(std::io::stdin().as_raw_fd()) && is_fifo(std::io::stdout().as_raw_fd())
 }

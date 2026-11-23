@@ -1,7 +1,8 @@
 .editor {
   display: grid;
   grid-template-rows: auto 1fr;
-  min-height: 100vh;
+  /* The well scrolls, so a zoomed screenshot pans inside it under the toolbar. */
+  height: 100vh;
 }
 .toolbar {
   position: sticky;
@@ -73,13 +74,65 @@
   white-space: nowrap;
   text-overflow: ellipsis;
 }
+.zoom {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.zoom .num {
+  min-width: 52px;
+}
+.mirror {
+  display: inline-flex;
+  transform: scaleX(-1);
+}
+.badge-glyph {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
 .well {
   display: grid;
-  place-items: start center;
+  place-items: start safe center;
+  min-height: 0;
+  overflow: auto;
   padding: 24px 32px 48px;
   background: var(--muted);
 }
-.well > div {
+.canvas {
+  position: relative;
   box-shadow: var(--app-shadow-lg);
   cursor: crosshair;
+}
+.well[data-tool='select'] .canvas {
+  cursor: default;
+}
+.well[data-tool='text'] .canvas {
+  cursor: text;
+}
+.well[data-pan='ready'] .canvas {
+  cursor: grab;
+}
+.well[data-pan='drag'] .canvas {
+  cursor: grabbing;
+}
+.callout {
+  position: absolute;
+  min-width: 8ch;
+  max-width: 48ch;
+  border: 0;
+  font-family: ui-monospace, monospace;
+  font-weight: 700;
+  line-height: 1;
+  box-sizing: content-box;
+}
+.callout::placeholder {
+  color: inherit;
+  opacity: 0.6;
 }

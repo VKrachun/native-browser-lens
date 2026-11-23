@@ -21,6 +21,16 @@ impl Client {
         })
     }
 
+    /// Connects for a coding agent: starts the daemon, unless the person quit Lens. Then it only
+    /// connects to a daemon that runs, as the browser does (see `shim::run`).
+    pub fn connect_unless_quit(paths: &Paths) -> io::Result<Self> {
+        if !paths.quit_marker().exists() {
+            return Self::connect(paths);
+        }
+        Self::attach(paths)
+            .map_err(|_| io::Error::other("Lens was quit; open Sirv Lens to start it"))
+    }
+
     /// Connects only to a daemon that already runs.
     pub fn attach(paths: &Paths) -> io::Result<Self> {
         Ok(Self {
@@ -39,6 +49,12 @@ impl Client {
             .map_err(|e| e.to_string())?
             .ok_or("the daemon closed the connection")?;
         let reply: ReplyFrame = serde_json::from_slice(&reply).map_err(|e| e.to_string())?;
+        if reply.id != id {
+            return Err(format!(
+                "the daemon answered request {} instead of {id}",
+                reply.id
+            ));
+        }
         match reply.outcome {
             Outcome::Ok { result } => Ok(*result),
             Outcome::Error {

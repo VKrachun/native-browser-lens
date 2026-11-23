@@ -148,11 +148,33 @@ export function cssPath(el: Element): string {
   return parts.join(' > ');
 }
 
+let blockSelector = '[data-lens-block]';
+
+/**
+ * The person's own selectors join [data-lens-block] for this page. Returns the valid ones: an
+ * invalid selector would make every closest() throw.
+ */
+export function setMaskSelectors(selectors: string[], probe: Pick<ParentNode, 'querySelector'> = document.createDocumentFragment()): string[] {
+  const valid = selectors.filter((selector) => {
+    try {
+      probe.querySelector(selector);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  blockSelector = ['[data-lens-block]', ...valid].join(', ');
+  return valid;
+}
+
+/** A part of the page marked private for the recording: its text stays out of steps and marks. */
+export const blocked = (el: Pick<Element, 'closest'>) => el.closest(blockSelector) !== null;
+
 export function locatorOf(el: Element): Locator {
   const testIdAttribute = TEST_IDS.find((a) => el.hasAttribute(a));
   const testId = testIdAttribute ? cleanName(el.getAttribute(testIdAttribute)) : null;
   const role = roleOf(el);
-  const name = role ? nameOf(el, role) : null;
+  const name = role && !blocked(el) ? nameOf(el, role) : null;
   let nth: number | null = null;
   if (role && name && !testId) {
     const equal = [...el.ownerDocument.querySelectorAll(roleSelector(role))]
@@ -160,7 +182,7 @@ export function locatorOf(el: Element): Locator {
       .filter((c) => rendered(c) && roleOf(c) === role && nameOf(c, role) === name);
     if (equal.length > 1 && equal.includes(el)) nth = equal.indexOf(el);
   }
-  const text = !role && !editable(el) ? cleanName((el as HTMLElement).innerText) : null;
+  const text = !role && !editable(el) && !blocked(el) ? cleanName((el as HTMLElement).innerText) : null;
   return {
     testId: testIdAttribute === 'data-testid' ? testId : null,
     role: name ? role : null,
@@ -178,7 +200,7 @@ export function elementMap(doc: Document, limit: number): PageElement[] {
   const found: PageElement[] = [];
   for (const el of doc.querySelectorAll(selector)) {
     if (found.length >= limit) break;
-    if (editable(el)) continue;
+    if (editable(el) || blocked(el)) continue;
     const r = el.getBoundingClientRect();
     if (r.width < 2 || r.height < 2 || r.bottom < 0 || r.right < 0 || r.top > innerHeight || r.left > innerWidth) continue;
     const locator = locatorOf(el);
@@ -266,7 +288,7 @@ export class ActionRecorder {
     if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
       const value = target.value;
       // A part of the page marked private for the recording keeps its typed values out too.
-      const masked = target.closest('[data-lens-block]') !== null || privateValue(facts(target), value);
+      const masked = blocked(target) || privateValue(facts(target), value);
       this.record('fill', target, masked ? null : value, masked);
     } else {
       // Editable text is never recorded, as in the DOM recording.
@@ -280,12 +302,12 @@ export class ActionRecorder {
       this.flushAll();
       this.record(el.checked ? 'check' : 'uncheck', el);
     } else if (el instanceof HTMLInputElement && el.type === 'file') {
-      const kinds = [...new Set([...(el.files ?? [])].map((f) => f.name.split('.').pop()?.toLowerCase() ?? '?'))];
+      const kinds = [...new Set([...(el.files ?? [])].map((f) => fileType(f.name)))];
       this.record('upload', el, `${el.files?.length ?? 0} file(s): .${kinds.join(', .')}`);
     } else if (el instanceof HTMLSelectElement) {
       this.flushAll();
       const label = [...el.selectedOptions].map((o) => o.label).join(', ');
-      const masked = privateValue(facts(el), label);
+      const masked = blocked(el) || privateValue(facts(el), label);
       this.record('select', el, masked ? null : label, masked);
     } else if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
       this.flush(el);
@@ -314,6 +336,12 @@ export class ActionRecorder {
       this.record('scroll', null, String(Math.round(scrollY)));
     }, 600);
   }
+}
+
+/** A file's extension, lower case; '?' for a name without one (id_rsa, .bashrc), which is no type. */
+export function fileType(name: string): string {
+  const dot = name.lastIndexOf('.');
+  return dot > 0 && dot < name.length - 1 ? name.slice(dot + 1).toLowerCase() : '?';
 }
 
 /** The text of the elements aria-labelledby names, as a screen reader hears the field. */

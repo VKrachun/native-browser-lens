@@ -17,8 +17,24 @@ const STEP_WINDOW_MS: i64 = 2000;
 /// A shot this soon after a step shows its result.
 const SHOT_WINDOW_MS: i64 = 2500;
 const MAX_BODY: usize = 8 * 1024;
-/// The findings block a model wrote; must equal FINDINGS_HEADER in daemon.rs.
-const FINDINGS_HEADER: &str = "Findings (written by Claude Haiku from the recording; check them):";
+/// The first line of a findings block a model wrote, naming the model: "Claude Haiku", say.
+pub fn findings_header(label: &str) -> String {
+    format!("Findings (written by {label} from the recording; check them):")
+}
+
+/// A findings block a model wrote, whichever model: a block from before a model change still
+/// reads as the model's.
+pub fn is_findings_header(line: &str) -> bool {
+    line.trim()
+        .strip_prefix("Findings (written by ")
+        .and_then(|rest| rest.strip_suffix(" from the recording; check them):"))
+        .is_some_and(|model| !model.trim().is_empty())
+}
+
+/// A GraphQL answer with errors: HTTP 200, but a failure all the same.
+fn graphql_errors(body: &Value) -> bool {
+    body["errors"].as_array().is_some_and(|e| !e.is_empty())
+}
 /// The page's own static files: their success says nothing about a defect.
 const STATIC: [&str; 12] = [
     "Script",
@@ -56,7 +72,9 @@ pub fn build(
             .flatten()
             .enumerate()
             .filter(|(_, e)| {
-                e["status"].as_u64().is_some_and(|s| s < 400) && e.get("failure").is_none()
+                e["status"].as_u64().is_some_and(|s| s < 400)
+                    && e.get("failure").is_none()
+                    && e.get("graphqlError").is_none()
             })
             .flat_map(|(i, e)| {
                 ["requestBody", "responseBody"]
@@ -161,6 +179,8 @@ struct Net {
     failure: Option<String>,
     request_body: Option<String>,
     response_body: Option<String>,
+    graphql_operation: Option<String>,
+    graphql_error: bool,
 }
 
 fn assemble(review: &Review, item: &ReviewItem, n: usize, evidence: &Evidence) -> Value {
@@ -184,8 +204,21 @@ fn assemble(review: &Review, item: &ReviewItem, n: usize, evidence: &Evidence) -
     for event in &evidence.events {
         let d = &event.data;
         let id = d["requestId"].as_str().unwrap_or("").to_string();
+        // The collector may name the operation and the error itself, on any event of a request.
+        if let Some(entry) = index.get(&id).map(|&i| &mut net[i]) {
+            if let Some(operation) = d["graphqlOperation"].as_str() {
+                entry.graphql_operation = Some(operation.into());
+            }
+            entry.graphql_error |= d["graphqlError"] == true;
+        }
         match event.kind.as_str() {
             "request" => {
+                let request_body = d["postData"].as_str().map(String::from);
+                let operation = d["graphqlOperation"].as_str().map(String::from).or_else(|| {
+                    serde_json::from_str::<Value>(request_body.as_deref()?).ok()?["operationName"]
+                        .as_str()
+                        .map(String::from)
+                });
                 index.insert(id.clone(), net.len());
                 net.push(Net {
                     request_id: id,
@@ -196,8 +229,10 @@ fn assemble(review: &Review, item: &ReviewItem, n: usize, evidence: &Evidence) -
                     status: None,
                     ended: None,
                     failure: None,
-                    request_body: d["postData"].as_str().map(String::from),
+                    request_body,
                     response_body: None,
+                    graphql_operation: operation,
+                    graphql_error: d["graphqlError"] == true,
                 });
             }
             "response" => {
@@ -218,8 +253,14 @@ fn assemble(review: &Review, item: &ReviewItem, n: usize, evidence: &Evidence) -
             "responseBody" => {
                 if let Some(entry) = index.get(&id).map(|&i| &mut net[i]) {
                     entry.response_body = match d["format"].as_str() {
-                        Some("json") => Some(d["body"].to_string()),
-                        Some("text") => d["body"].as_str().map(String::from),
+                        Some("json") => {
+                            entry.graphql_error |= graphql_errors(&d["body"]);
+                            Some(d["body"].to_string())
+                        }
+                        Some("text") => d["body"].as_str().map(String::from).inspect(|b| {
+                            entry.graphql_error |=
+                                serde_json::from_str::<Value>(b).is_ok_and(|v| graphql_errors(&v));
+                        }),
                         _ => None,
                     };
                 }
@@ -227,7 +268,8 @@ fn assemble(review: &Review, item: &ReviewItem, n: usize, evidence: &Evidence) -
             _ => {}
         }
     }
-    let failed = |e: &Net| e.failure.is_some() || e.status.is_some_and(|s| s >= 400);
+    let failed =
+        |e: &Net| e.failure.is_some() || e.graphql_error || e.status.is_some_and(|s| s >= 400);
     net.retain(|e| {
         let reason = if e.method == "OPTIONS" && !failed(e) {
             Some("preflight")
@@ -462,6 +504,12 @@ fn assemble(review: &Review, item: &ReviewItem, n: usize, evidence: &Evidence) -
             if let Some(failure) = &e.failure {
                 entry["failure"] = json!(failure);
             }
+            if let Some(operation) = &e.graphql_operation {
+                entry["graphqlOperation"] = json!(operation);
+            }
+            if e.graphql_error {
+                entry["graphqlError"] = json!(true);
+            }
             // Bodies of failures, and of the page's own calls a step started.
             let wanted = failed(e) || linked.get(&e.request_id).copied().unwrap_or(false);
             let json_like = |b: &str| {
@@ -597,7 +645,7 @@ fn annotation(a: &Annotation, at: i64, shots: &[Value], start: i64) -> Value {
 fn findings(review: &Review, item: &ReviewItem) -> (Value, String) {
     let mut lines = review.notes.lines().peekable();
     let mut items = Vec::new();
-    let model = lines.peek().is_some_and(|l| l.trim() == FINDINGS_HEADER);
+    let model = lines.peek().is_some_and(|l| is_findings_header(l));
     if model {
         lines.next();
         while let Some(line) = lines.peek().and_then(|l| l.trim_start().strip_prefix("- ")) {
@@ -844,7 +892,8 @@ mod tests {
             created_at: 3001,
             title: "Checkout: total shows NaN".into(),
             notes: format!(
-                "{FINDINGS_HEADER}\n- The total shows NaN \\(after Pay\\)\n- Works well: the 3D view\n\nI was on staging."
+                "{}\n- The total shows NaN \\(after Pay\\)\n- Works well: the 3D view\n\nI was on staging.",
+                findings_header("Claude Haiku")
             ),
             tags: vec![],
             items: vec![],
@@ -969,6 +1018,108 @@ mod tests {
             .find(|e| e["status"] == 500)
             .unwrap();
         assert_eq!(failure["responseBody"], "{\"error\":\"boom\"}");
+    }
+
+    #[test]
+    fn graphql_errors_in_a_200_keep_their_body_and_name() {
+        let (review, item, mut evidence) = sample();
+        let ev = |t: i64, kind: &str, data: Value| EvidenceEvent {
+            timestamp: t,
+            kind: kind.into(),
+            data,
+        };
+        // Enough successful bodies to force trimming.
+        let body = json!({ "data": { "rows": "y".repeat(7000) } });
+        for i in 0..20 {
+            let id = format!("ok{i}");
+            evidence.events.push(ev(2001, "request", json!({ "requestId": id, "url": "https://s.test/graphql", "method": "POST", "resourceType": "Fetch" })));
+            evidence.events.push(ev(
+                2002,
+                "response",
+                json!({ "requestId": id, "status": 200 }),
+            ));
+            evidence.events.push(ev(
+                2003,
+                "responseBody",
+                json!({ "requestId": id, "format": "json", "body": body }),
+            ));
+        }
+        // Found from the body: errors, and the operation from the request.
+        evidence.events.push(ev(2004, "request", json!({ "requestId": "gq", "url": "https://s.test/graphql", "method": "POST", "resourceType": "Fetch", "postData": "{\"operationName\":\"SaveCart\",\"query\":\"mutation\"}" })));
+        evidence.events.push(ev(
+            2005,
+            "response",
+            json!({ "requestId": "gq", "status": 200 }),
+        ));
+        evidence.events.push(ev(2006, "responseBody", json!({ "requestId": "gq", "format": "text", "body": "{\"errors\":[{\"message\":\"cart locked\"}]}" })));
+        // Named by the collector, outside a step: kept as a failure all the same.
+        evidence.events.push(ev(5000, "request", json!({ "requestId": "gc", "url": "https://s.test/graphql", "method": "POST", "resourceType": "Fetch", "graphqlOperation": "Prices" })));
+        evidence.events.push(ev(
+            5001,
+            "response",
+            json!({ "requestId": "gc", "status": 200, "graphqlError": true }),
+        ));
+        evidence.events.push(ev(
+            5002,
+            "responseBody",
+            json!({ "requestId": "gc", "format": "json", "body": { "data": null } }),
+        ));
+        let record: Value =
+            serde_json::from_slice(&build(&review, &item, 1, &evidence).unwrap()).unwrap();
+        assert!(record["dropped"]["truncated"]["bodies"].as_u64().unwrap() > 0);
+        let entry = |op: &str| {
+            record["network"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["graphqlOperation"] == op)
+                .cloned()
+                .unwrap()
+        };
+        let save = entry("SaveCart");
+        assert_eq!(save["graphqlError"], true);
+        assert_eq!(save["status"], 200);
+        assert_eq!(
+            save["responseBody"],
+            "{\"errors\":[{\"message\":\"cart locked\"}]}"
+        );
+        let prices = entry("Prices");
+        assert_eq!(prices["graphqlError"], true);
+        assert_eq!(prices["responseBody"], "{\"data\":null}");
+        assert!(
+            record["network"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|e| e["url"] == "https://s.test/graphql" && e.get("graphqlError").is_none())
+                .any(|e| e.get("responseBody").is_none()),
+            "successful answers lose their bodies first"
+        );
+    }
+
+    #[test]
+    fn findings_headers_name_any_model() {
+        for header in [
+            "Findings (written by Claude Haiku from the recording; check them):",
+            "  Findings (written by Claude Sonnet from the recording; check them):",
+            &findings_header("Codex"),
+        ] {
+            assert!(is_findings_header(header), "{header}");
+        }
+        for other in [
+            "Findings:",
+            "Findings (written by  from the recording; check them):",
+            "Findings (written by me) and more",
+        ] {
+            assert!(!is_findings_header(other), "{other}");
+        }
+        let (mut review, item, evidence) = sample();
+        review.notes = format!("{}\n- It breaks\n\nmine", findings_header("Claude Sonnet"));
+        let record: Value =
+            serde_json::from_slice(&build(&review, &item, 1, &evidence).unwrap()).unwrap();
+        assert_eq!(record["findings"]["writtenBy"], "model");
+        assert_eq!(record["findings"]["items"][0]["text"], "It breaks");
+        assert_eq!(record["notes"], "mine");
     }
 
     #[test]

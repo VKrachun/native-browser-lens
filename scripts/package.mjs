@@ -8,7 +8,7 @@
 // macOS signing: set APPLE_SIGNING_IDENTITY. Notarization (app and DMG): also set APPLE_API_KEY
 // (key ID), APPLE_API_ISSUER and APPLE_API_KEY_PATH (the App Store Connect .p8).
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 
@@ -18,25 +18,38 @@ const { values } = parseArgs({
 if (!values.formats) throw new Error('--formats is required, for example appimage,deb,pacman');
 const root = resolve(import.meta.dirname, '..');
 const windows = process.platform === 'win32';
+const linux = process.platform === 'linux';
 const exe = windows ? '.exe' : '';
-const run = (command, args, cwd = root) => execFileSync(command, args, { cwd, stdio: 'inherit', shell: windows });
+const run = (command, args, cwd = root, env = process.env) => execFileSync(command, args, { cwd, stdio: 'inherit', shell: windows, env });
 const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--format-version', '1', '--no-deps'], { cwd: root, shell: windows }));
 const version = metadata.packages.find((p) => p.name === 'lens').version;
-const targetArgs = values.target ? ['--target', values.target] : [];
-const release = join(metadata.target_directory, ...(values.target ? [values.target] : []), 'release');
+const arch = { x64: 'x64', arm64: 'arm64' }[process.arch] ?? process.arch;
+const linuxArch = { x64: 'x86_64', arm64: 'aarch64' }[process.arch] ?? process.arch;
+// Linux: Lens is the static musl build (it needs no glibc at all), and the speech programs come from
+// Ubuntu 22.04 in Docker (scripts/speech-linux.sh), so the packages start on glibc 2.34 and newer.
+const target = values.target ?? (linux ? `${linuxArch}-unknown-linux-musl` : undefined);
+const targetArgs = target ? ['--target', target] : [];
+const release = join(metadata.target_directory, ...(target ? [target] : []), 'release');
 
 if (!values['skip-build']) {
   const extension = join(root, 'extension');
   run('pnpm', ['build'], extension);
   run('pnpm', ['build:firefox'], extension);
   run('cargo', ['build', '--release', '--locked', ...targetArgs]);
-  run('cargo', ['build', '--release', '--locked', '-p', 'lens-speech', ...targetArgs]);
-  if (values.gpu) {
+  if (linux) {
+    run('docker', ['run', '--rm', '-v', `${root}:/src`, '-w', '/src', 'ubuntu:22.04', 'sh', 'scripts/speech-linux.sh', 'target/jammy/bin', ...(values.gpu ? [values.gpu] : [])]);
+    for (const name of ['lens-speech', ...(values.gpu ? ['lens-speech-gpu'] : [])]) {
+      copyFileSync(join(root, 'target', 'jammy', 'bin', name), join(release, name));
+    }
+  } else {
+    run('cargo', ['build', '--release', '--locked', '-p', 'lens-speech', ...targetArgs]);
+  }
+  if (values.gpu && !linux) {
     // Its own target folder: the GPU build of lens-speech must not overwrite the CPU one.
     const gpuDir = join(metadata.target_directory, 'gpu');
     run('cargo', ['build', '--release', '--locked', '-p', 'lens-speech', '--features', values.gpu, '--target-dir', gpuDir, ...targetArgs]);
     copyFileSync(
-      join(gpuDir, ...(values.target ? [values.target] : []), 'release', `lens-speech${exe}`),
+      join(gpuDir, ...(target ? [target] : []), 'release', `lens-speech${exe}`),
       join(release, `lens-speech-gpu${exe}`),
     );
   }
@@ -107,44 +120,81 @@ const config = {
   // Not just "lens": other software uses that package name.
   deb: { 'package-name': 'sirv-lens', depends: ['libc6'] },
   pacman: { depends: ['glibc'] },
+  // The Vulkan loader belongs to the system, beside its GPU drivers; a bundled one would also need
+  // the build computer's newer glibc. Without one, Lens uses the CPU speech program.
+  appimage: { 'excluded-libraries': ['libvulkan.so*'] },
   macos: {
     'info-plist-path': join(root, 'assets', 'macos', 'Info.plist'),
     ...(process.env.APPLE_SIGNING_IDENTITY ? { 'signing-identity': process.env.APPLE_SIGNING_IDENTITY } : {}),
   },
 };
-mkdirSync(join(root, 'dist'), { recursive: true });
-const configPath = join(root, 'dist', 'packager.json');
+const out = join(root, 'dist');
+mkdirSync(out, { recursive: true });
+const configPath = join(out, 'packager.json');
 writeFileSync(configPath, JSON.stringify(config, null, 2));
+
+// macOS: the packager makes and signs the app; the DMG is made here with hdiutil, since the
+// packager's create-dmg drives Finder over AppleScript, which fails on headless runners. With the
+// App Store Connect API key (APPLE_API_KEY = key ID, APPLE_API_ISSUER, APPLE_API_KEY_PATH = the .p8)
+// both the app and the DMG are notarized and stapled here, so a downloaded DMG opens without a
+// Gatekeeper warning. The packager would notarize the app itself on seeing the key: not given it.
+const darwin = process.platform === 'darwin';
+const formats = values.formats.split(',');
+const dmg = darwin && formats.includes('dmg');
+const { APPLE_API_KEY, APPLE_API_ISSUER, APPLE_API_KEY_PATH, APPLE_SIGNING_IDENTITY } = process.env;
+const notarize = darwin && APPLE_API_KEY && APPLE_API_ISSUER && APPLE_API_KEY_PATH;
 // linuxdeploy's own strip is older than current distributions' libraries (.relr.dyn) and fails
 // on them; the binaries are release builds already.
-process.env.NO_STRIP = '1';
-run('cargo', ['packager', '--release', '--formats', values.formats, '--config', configPath]);
+const packagerEnv = { ...process.env, NO_STRIP: '1' };
+if (darwin) for (const name of ['APPLE_API_KEY', 'APPLE_API_ISSUER', 'APPLE_API_KEY_PATH']) delete packagerEnv[name];
+const packagerFormats = dmg ? [...new Set([...formats.filter((f) => f !== 'dmg'), 'app'])] : formats;
+run('cargo', ['packager', '--release', '--formats', packagerFormats.join(','), '--config', configPath], root, packagerEnv);
 
-// macOS: cargo-packager notarizes and staples the app when the App Store Connect API key is set
-// (APPLE_API_KEY = key ID, APPLE_API_ISSUER, APPLE_API_KEY_PATH = the .p8). The DMG around it
-// needs its own ticket, so a downloaded DMG opens without a Gatekeeper warning.
-const { APPLE_API_KEY, APPLE_API_ISSUER, APPLE_API_KEY_PATH } = process.env;
-if (process.platform === 'darwin' && APPLE_API_KEY && APPLE_API_ISSUER && APPLE_API_KEY_PATH) {
-  for (const dmg of readdirSync(join(root, 'dist')).filter((f) => f.endsWith('.dmg'))) {
-    const file = join(root, 'dist', dmg);
-    run('xcrun', ['notarytool', 'submit', file, '--key', APPLE_API_KEY_PATH, '--key-id', APPLE_API_KEY, '--issuer', APPLE_API_ISSUER, '--wait']);
-    // The connection to Apple's ticket service sometimes drops, and a new ticket can take a moment
-    // to arrive: try again before failing the release.
+if (dmg) {
+  // Apple's service sometimes drops the connection, a new ticket can take a moment to arrive, and
+  // hdiutil sometimes finds its disk busy: each step tries again before failing the release.
+  const retry = (step) => {
     for (let attempt = 1; ; attempt++) {
       try {
-        run('xcrun', ['stapler', 'staple', file]);
-        break;
+        return step();
       } catch (error) {
         if (attempt === 5) throw error;
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, attempt * 15_000);
       }
     }
+  };
+  const notarizeAndStaple = (file, upload = file) => {
+    const output = retry(() =>
+      execFileSync('xcrun', ['notarytool', 'submit', upload, '--key', APPLE_API_KEY_PATH, '--key-id', APPLE_API_KEY, '--issuer', APPLE_API_ISSUER, '--wait', '--output-format', 'json'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'inherit'],
+      }),
+    );
+    const { status, id } = JSON.parse(output);
+    if (status !== 'Accepted') throw new Error(`notarization of ${file}: ${status} (see xcrun notarytool log ${id})`);
+    retry(() => run('xcrun', ['stapler', 'staple', file]));
+  };
+  const app = join(out, `${config['product-name']}.app`);
+  if (notarize) {
+    const zip = join(out, 'notarize-app.zip');
+    run('ditto', ['-c', '-k', '--keepParent', '--sequesterRsrc', app, zip]);
+    notarizeAndStaple(app, zip);
+    rmSync(zip);
   }
+  // The DMG holds the app and a link to /Applications to drag it to.
+  const stage = join(out, 'dmg-stage');
+  rmSync(stage, { recursive: true, force: true });
+  mkdirSync(stage);
+  run('ditto', [app, join(stage, `${config['product-name']}.app`)]);
+  symlinkSync('/Applications', join(stage, 'Applications'));
+  const file = join(out, `Sirv-Lens-${version}-macos-${arch}.dmg`);
+  retry(() => run('hdiutil', ['create', '-volname', config['product-name'], '-srcfolder', stage, '-ov', '-format', 'UDZO', file]));
+  rmSync(stage, { recursive: true });
+  if (APPLE_SIGNING_IDENTITY) run('codesign', ['--force', '--timestamp', '--sign', APPLE_SIGNING_IDENTITY, file]);
+  if (notarize) notarizeAndStaple(file);
 }
 
 // Names people recognise on a download page, instead of the packager's lens_VERSION_ARCH.
-const arch = { x64: 'x64', arm64: 'arm64' }[process.arch] ?? process.arch;
-const linuxArch = { x64: 'x86_64', arm64: 'aarch64' }[process.arch] ?? process.arch;
 const names = [
   [/\.dmg$/, `Sirv-Lens-${version}-macos-${arch}.dmg`],
   [/-setup\.exe$/, `Sirv-Lens-${version}-windows-${arch}-setup.exe`],
@@ -152,7 +202,6 @@ const names = [
   [/\.deb$/, `sirv-lens_${version}_${arch === 'x64' ? 'amd64' : arch}.deb`],
   [/\.tar\.gz$/, `sirv-lens-${version}-linux-${linuxArch}-pacman.tar.gz`],
 ];
-const out = join(root, 'dist');
 for (const file of readdirSync(out)) {
   const found = names.find(([pattern]) => pattern.test(file));
   // cargo-packager names them lens_… (Linux) or "Sirv Lens_…" (macOS, Windows).

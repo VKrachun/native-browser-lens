@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import type { LensClient } from '@/lens-client';
+import { LensError, type LensClient } from '@/lens-client';
 import type { DestinationSettings } from '@/protocol/DestinationSettings';
 import type { Tracker } from '@/protocol/Tracker';
 import { trackerNames } from '@/tracker-drafts';
@@ -32,7 +32,8 @@ export function useDestination(client: LensClient) {
   const [error, setError] = useState('');
   const sequence = useRef(0);
   const checkedBrowserChoice = useRef(false);
-  const refresh = useCallback(async () => {
+  /** True when the app answered. */
+  const refresh = useCallback(async (): Promise<boolean> => {
     const request = ++sequence.current;
     try {
       let hint = '';
@@ -54,16 +55,22 @@ export function useDestination(client: LensClient) {
           previous.choice?.address === next.choice?.address ? previous : next);
         setError(hint);
       }
+      return true;
     } catch (e) {
-      if (request === sequence.current) setError((e as Error).message);
+      // A quit app is the page banner's to say (AppStatus); the last settings stay.
+      const quit = e instanceof LensError && e.code === 'quit';
+      if (request === sequence.current && !quit) setError((e as Error).message);
+      return false;
     }
   }, [client]);
   useEffect(() => {
     let active = true;
     let timer: ReturnType<typeof setTimeout>;
+    // Each request can start the app's shim: while the app stays away, ask less often, up to once a minute.
+    let failures = 0;
     const poll = async () => {
-      if (!document.hidden) await refresh();
-      if (active) timer = setTimeout(poll, 3000);
+      if (!document.hidden) failures = (await refresh()) ? 0 : failures + 1;
+      if (active) timer = setTimeout(poll, Math.min(60_000, 3000 * 2 ** failures));
     };
     void poll();
     const visible = () => { if (!document.hidden) void refresh(); };
@@ -92,6 +99,7 @@ export function DestinationForm({ client, onboarding = false }: { client: LensCl
   if (onboarding && (!settings || settings.choice)) return null;
   const selected = tracker ?? settings?.choice?.tracker ?? '';
   const field = selected ? addressFields[selected] : undefined;
+  const needsVibeQSignIn = selected === 'vibeq' && !settings?.vibeqConnected;
   const value = address ?? (selected === settings?.choice?.tracker ? settings?.choice?.address : '') ?? '';
 
   async function save(event: FormEvent) {
@@ -128,7 +136,7 @@ export function DestinationForm({ client, onboarding = false }: { client: LensCl
             setProblem('');
           }}>
             <option value="" disabled>Choose a destination</option>
-            {Object.entries(trackerNames).filter(([key]) => key !== 'vibeq' || settings.vibeqConnected).map(([key, name]) =>
+            {Object.entries(trackerNames).map(([key, name]) =>
               <option key={key} value={key}>{name}</option>
             )}
           </select>
@@ -137,7 +145,32 @@ export function DestinationForm({ client, onboarding = false }: { client: LensCl
           <input className="input" type="url" required placeholder={field[1]} value={value}
             onChange={(e) => { setAddress(e.target.value); setMessage(''); setProblem(''); }} />
         </label>}
-        <button type="submit" className="btn btn-secondary" disabled={busy || !selected || (!!field && !value.trim())}>Save default</button>
+        {needsVibeQSignIn && (
+          <p className="small muted">
+            {onboarding
+              ? 'Sign in to VibeQ in Settings to use it as your default destination.'
+              : 'Sign in to VibeQ below to use it as your default destination.'}
+          </p>
+        )}
+        {needsVibeQSignIn && onboarding ? (
+          <button type="button" className="btn btn-secondary" onClick={() => void browser.runtime.openOptionsPage()}>
+            Open Settings
+          </button>
+        ) : needsVibeQSignIn ? (
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => {
+              const section = document.querySelector('section[aria-label="VibeQ"]');
+              section?.scrollIntoView({ behavior: 'smooth' });
+              section?.querySelector<HTMLInputElement>('#endpoint')?.focus();
+            }}
+          >
+            Go to VibeQ sign-in
+          </button>
+        ) : (
+          <button type="submit" className="btn btn-secondary" disabled={busy || !selected || (!!field && !value.trim())}>Save default</button>
+        )}
       </form>}
       {(problem || error) && <p role="alert" className="small">{problem || error}</p>}
       {message && <p role="status" className="small">{message}</p>}

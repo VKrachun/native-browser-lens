@@ -53,7 +53,8 @@ pub struct LiveDigest {
 #[derive(Default)]
 struct State {
     next: u64,
-    open: Option<Ask>,
+    /// The questions agents wait on, oldest first: two agents can ask at once.
+    open: Vec<Ask>,
     answers: HashMap<u64, Vec<LiveTab>>,
 }
 
@@ -73,7 +74,7 @@ impl Asks {
         let deadline = Instant::now() + POLL;
         let mut state = self.lock();
         loop {
-            if let Some(ask) = state.open.as_ref().filter(|a| a.id > after) {
+            if let Some(ask) = state.open.iter().find(|a| a.id > after) {
                 return Some(ask.clone());
             }
             let left = deadline.checked_duration_since(Instant::now())?;
@@ -88,7 +89,7 @@ impl Asks {
     /// A browser's answer. Late answers, after the agent stopped waiting, are dropped.
     pub fn answer(&self, ask: u64, tabs: Vec<LiveTab>) {
         let mut state = self.lock();
-        if state.open.as_ref().is_some_and(|a| a.id == ask) {
+        if state.open.iter().any(|a| a.id == ask) {
             state.answers.entry(ask).or_default().extend(tabs);
             self.changed.notify_all();
         }
@@ -99,7 +100,7 @@ impl Asks {
         let mut state = self.lock();
         state.next += 1;
         let id = state.next;
-        state.open = Some(Ask { id, site });
+        state.open.push(Ask { id, site });
         self.changed.notify_all();
         let deadline = Instant::now() + ANSWER;
         let mut answered_by: Option<Instant> = None;
@@ -117,9 +118,7 @@ impl Asks {
                 .unwrap_or_else(|p| p.into_inner())
                 .0;
         }
-        if state.open.as_ref().is_some_and(|a| a.id == id) {
-            state.open = None;
-        }
+        state.open.retain(|a| a.id != id);
         state.answers.remove(&id)
     }
 }
@@ -181,6 +180,36 @@ mod tests {
         // The question is closed: a late answer is dropped, and nobody gets it again.
         asks.answer(id, vec![]);
         assert!(asks.lock().answers.is_empty());
-        assert!(asks.lock().open.is_none());
+        assert!(asks.lock().open.is_empty());
+    }
+
+    #[test]
+    fn two_agents_asking_at_once_both_get_an_answer() {
+        let asks = Arc::new(Asks::default());
+        let agents: Vec<_> = ["a.example.com", "b.example.com"]
+            .into_iter()
+            .map(|site| {
+                let asks = asks.clone();
+                std::thread::spawn(move || asks.ask(Some(site.into())))
+            })
+            .collect();
+        // The browser answers each question in turn, as it polls after the last one it saw.
+        let mut after = 0;
+        for _ in 0..2 {
+            let ask = asks.wait_for_ask(after).expect("a question");
+            asks.answer(
+                ask.id,
+                vec![LiveTab {
+                    url: format!("https://{}/", ask.site.clone().unwrap()),
+                    title: String::new(),
+                    evidence: serde_json::json!({}),
+                }],
+            );
+            after = ask.id;
+        }
+        for agent in agents {
+            assert_eq!(agent.join().unwrap().expect("an answer").len(), 1);
+        }
+        assert!(asks.lock().open.is_empty());
     }
 }

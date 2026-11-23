@@ -41,15 +41,16 @@ pub struct ReviewArgument {
 
 #[derive(Deserialize, JsonSchema, Default)]
 pub struct SearchArguments {
-    /// Words to find in the title, the page URL, or the VibeQ task id or URL.
+    /// Words to find in the title, the page URL, the VibeQ task id or URL, the person's notes or
+    /// what failed in a capture.
     #[serde(default)]
-    text: Option<String>,
+    pub text: Option<String>,
     /// Only reviews of pages on this site, such as app.example.com.
     #[serde(default)]
-    site: Option<String>,
+    pub site: Option<String>,
     /// Only reviews made in the last this many days.
     #[serde(default)]
-    days: Option<u32>,
+    pub days: Option<u32>,
 }
 
 /// Every review, newest first, a page at a time: the whole list in one reply can outgrow the
@@ -91,8 +92,14 @@ fn listing(mut reviews: Vec<ReviewSummary>) -> (String, Option<String>) {
     (text, note)
 }
 
-/// The reviews that match every given field, newest first.
-fn search(reviews: Vec<ReviewSummary>, query: &SearchArguments, now_ms: i64) -> Vec<ReviewSummary> {
+/// The reviews that match every given field, newest first. A word the summary does not hold can
+/// be in the notes or the findings: `review` loads the whole review for those, only then.
+pub fn search(
+    reviews: Vec<ReviewSummary>,
+    query: &SearchArguments,
+    now_ms: i64,
+    mut review: impl FnMut(i64) -> Option<Review>,
+) -> Vec<ReviewSummary> {
     let lower = |s: &str| s.to_lowercase();
     let words: Vec<String> = query
         .text
@@ -122,7 +129,24 @@ fn search(reviews: Vec<ReviewSummary>, query: &SearchArguments, now_ms: i64) -> 
             let recent = query
                 .days
                 .is_none_or(|days| now_ms - r.created_at <= i64::from(days) * 86_400_000);
-            words.iter().all(|w| haystack.contains(w)) && site_ok && recent
+            if !site_ok || !recent {
+                return false;
+            }
+            let missing: Vec<&String> = words.iter().filter(|w| !haystack.contains(*w)).collect();
+            missing.is_empty()
+                || review(r.id).is_some_and(|full| {
+                    let more = lower(&format!(
+                        "{} {}",
+                        full.notes,
+                        full.items
+                            .iter()
+                            .flat_map(|i| &i.findings)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    ));
+                    missing.iter().all(|w| more.contains(*w))
+                })
         })
         .collect()
 }
@@ -202,6 +226,164 @@ pub struct FileArgument {
     offset: Option<usize>,
 }
 
+#[derive(Deserialize, JsonSchema)]
+pub struct EvidenceQuery {
+    /// The review ID from list_reviews.
+    review: i64,
+    /// The capture, from 1; the first when left out.
+    #[serde(default)]
+    capture: Option<usize>,
+    /// failures (failed requests, GraphQL errors, exceptions, console errors, WebSocket errors),
+    /// graphql, console, websocket, markers, or all (the steps too). failures when left out.
+    #[serde(default)]
+    kind: Option<String>,
+    /// Only entries at or after this many milliseconds from the capture's first step or event.
+    #[serde(default)]
+    from_ms: Option<i64>,
+    /// Only entries at or before this many milliseconds from the capture's first step or event.
+    #[serde(default)]
+    to_ms: Option<i64>,
+    /// Only entries whose text holds this, in any case: a URL part, a status, an error word.
+    #[serde(default)]
+    query: Option<String>,
+}
+
+/// Most entries one query returns, and most characters of one entry's data.
+const MAX_ENTRIES: usize = 100;
+const MAX_ENTRY_CHARS: usize = 2000;
+
+/// The entries of a capture's evidence (the JSON of capture-N-evidence.json) that `kind`, the
+/// time range and `query` select, oldest first, each with its time from the first entry.
+fn query_evidence(
+    evidence: &serde_json::Value,
+    kind: &str,
+    from_ms: Option<i64>,
+    to_ms: Option<i64>,
+    query: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    use serde_json::{Value, json};
+    let none = Vec::new();
+    let events = evidence["events"].as_array().unwrap_or(&none);
+    let actions = evidence["actions"].as_array().unwrap_or(&none);
+    let at = |v: &Value, key: &str| v[key].as_i64().unwrap_or(0);
+    let start = events
+        .iter()
+        .map(|e| at(e, "timestamp"))
+        .chain(actions.iter().map(|a| at(a, "timestamp")))
+        .min()
+        .unwrap_or(0);
+    // A response body names only its request: the URL comes from the request.
+    let mut urls: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for e in events {
+        if let (Some(id), Some(url)) = (e["data"]["requestId"].as_str(), e["data"]["url"].as_str())
+        {
+            urls.entry(id).or_insert(url);
+        }
+    }
+    let url_of = |e: &Value| -> String {
+        e["data"]["url"]
+            .as_str()
+            .or_else(|| {
+                e["data"]["requestId"]
+                    .as_str()
+                    .and_then(|id| urls.get(id).copied())
+            })
+            .unwrap_or("")
+            .to_string()
+    };
+    let graphql_errors = |e: &Value| {
+        e["kind"] == "responseBody"
+            && e["data"]["body"]["errors"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty())
+    };
+    let is_graphql = |e: &Value| {
+        matches!(
+            e["kind"].as_str(),
+            Some("request" | "response" | "responseBody")
+        ) && (url_of(e).to_ascii_lowercase().contains("graphql") || graphql_errors(e))
+    };
+    let selected = |e: &Value| -> bool {
+        let data = &e["data"];
+        let event = e["kind"].as_str().unwrap_or("");
+        match kind {
+            "all" => true,
+            "failures" => match event {
+                "response" => data["status"].as_u64().unwrap_or(0) >= 400,
+                "networkFailure" | "exception" | "webSocketError" => true,
+                "console" => matches!(data["level"].as_str(), Some("error" | "assert")),
+                "log" => data["level"] == "error",
+                "responseBody" => graphql_errors(e),
+                _ => false,
+            },
+            "graphql" => is_graphql(e),
+            "console" => matches!(event, "console" | "exception" | "log"),
+            "websocket" => event.starts_with("webSocket"),
+            "markers" => event == "marker",
+            _ => false,
+        }
+    };
+    if !matches!(
+        kind,
+        "failures" | "graphql" | "console" | "websocket" | "markers" | "all"
+    ) {
+        return Err(format!(
+            "{kind:?} is not a kind: use failures, graphql, console, websocket, markers or all"
+        ));
+    }
+    let query = query
+        .map(str::to_lowercase)
+        .filter(|q| !q.trim().is_empty());
+    let mut entries: Vec<(i64, Value)> = Vec::new();
+    let mut take = |timestamp: i64, kind: &str, data: &Value| {
+        let offset = timestamp - start;
+        if from_ms.is_some_and(|f| offset < f) || to_ms.is_some_and(|t| offset > t) {
+            return;
+        }
+        let mut text = data.to_string();
+        if query
+            .as_ref()
+            .is_some_and(|q| !format!("{kind} {}", text.to_lowercase()).contains(q))
+        {
+            return;
+        }
+        let data = if text.chars().count() > MAX_ENTRY_CHARS {
+            text = text.chars().take(MAX_ENTRY_CHARS).collect();
+            json!({ "cut": format!("{text}…") })
+        } else {
+            data.clone()
+        };
+        entries.push((
+            offset,
+            json!({ "offsetMs": offset, "at": timestamp, "kind": kind, "data": data }),
+        ));
+    };
+    for e in events.iter().filter(|e| selected(e)) {
+        let mut data = e["data"].clone();
+        // A body's own data lacks its URL: the agent needs it to know which request failed.
+        if e["kind"] == "responseBody"
+            && let Some(object) = data.as_object_mut()
+        {
+            object.insert("url".into(), url_of(e).into());
+        }
+        take(at(e, "timestamp"), e["kind"].as_str().unwrap_or(""), &data);
+    }
+    if kind == "all" {
+        for a in actions {
+            take(at(a, "timestamp"), "step", a);
+        }
+    }
+    entries.sort_by_key(|(offset, _)| *offset);
+    let matched = entries.len();
+    entries.truncate(MAX_ENTRIES);
+    Ok(json!({
+        "matched": matched,
+        "returned": entries.len(),
+        "more": (matched > MAX_ENTRIES).then_some("Narrow the query with from_ms, to_ms or query to see the rest."),
+        "entries": entries.into_iter().map(|(_, e)| e).collect::<Vec<_>>(),
+    }))
+}
+
 fn failure(message: impl Into<String>) -> ErrorData {
     ErrorData::invalid_params(message.into(), None)
 }
@@ -216,19 +398,27 @@ impl LensMcp {
         }
     }
 
-    fn call(&self, request: Request) -> Result<Reply, ErrorData> {
+    /// Runs `work` on the daemon connection, connecting first when there is none.
+    fn with_client<T>(
+        &self,
+        work: impl FnOnce(&mut Client) -> Result<T, String>,
+    ) -> Result<T, ErrorData> {
         let mut slot = self.client.lock().unwrap_or_else(|p| p.into_inner());
         if slot.is_none() {
             *slot = Some(
-                Client::connect(&self.paths)
+                Client::connect_unless_quit(&self.paths)
                     .map_err(|e| failure(format!("Lens is not running: {e}")))?,
             );
         }
-        let result = slot.as_mut().expect("connected above").call(request);
+        let result = work(slot.as_mut().expect("connected above"));
         if result.is_err() {
             *slot = None; // reconnect next time; the daemon may have restarted
         }
         result.map_err(failure)
+    }
+
+    fn call(&self, request: Request) -> Result<Reply, ErrorData> {
+        self.with_client(|client| client.call(request))
     }
 
     fn review(&self, id: i64) -> Result<Review, ErrorData> {
@@ -243,13 +433,17 @@ impl LensMcp {
             .map_err(failure)
     }
 
-    /// Reviews whose title, page or VibeQ task matches, newest first. Every field is optional.
+    /// Reviews whose title, page, VibeQ task, notes or findings match, newest first. Every field
+    /// is optional.
     #[tool(annotations(read_only_hint = true))]
     async fn search_reviews(
         &self,
         Parameters(query): Parameters<SearchArguments>,
     ) -> Result<CallToolResult, ErrorData> {
-        let (text, more) = listing(search(self.summaries()?, &query, crate::daemon::now_ms()));
+        let found = search(self.summaries()?, &query, crate::daemon::now_ms(), |id| {
+            self.review(id).ok()
+        });
+        let (text, more) = listing(found);
         let mut content = vec![
             ContentBlock::text(format!("Each title and pageUrl is {UNTRUSTED}")),
             ContentBlock::text(text),
@@ -259,12 +453,7 @@ impl LensMcp {
     }
 
     fn bytes(&self, blob: &crate::protocol::BlobRef) -> Result<Vec<u8>, ErrorData> {
-        let mut slot = self.client.lock().unwrap_or_else(|p| p.into_inner());
-        let client = match slot.as_mut() {
-            Some(client) => client,
-            None => slot.insert(Client::connect(&self.paths).map_err(|e| failure(e.to_string()))?),
-        };
-        client.blob(&blob.sha256, blob.size).map_err(failure)
+        self.with_client(|client| client.blob(&blob.sha256, blob.size))
     }
 
     /// A capture's Playwright test, ready to save in the project (as the name it gives, for example
@@ -373,6 +562,46 @@ impl LensMcp {
         ]))
     }
 
+    /// The entries of one capture's evidence that matter now, without its whole timeline: failed
+    /// requests and errors (kind failures, the default), GraphQL traffic, console output,
+    /// WebSocket traffic, the person's markers, or all of it with the steps. from_ms and to_ms
+    /// are milliseconds from the capture's first step or event; each entry gives its offsetMs.
+    #[tool(annotations(read_only_hint = true))]
+    async fn query_review_evidence(
+        &self,
+        Parameters(EvidenceQuery {
+            review,
+            capture,
+            kind,
+            from_ms,
+            to_ms,
+            query,
+        }): Parameters<EvidenceQuery>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let found = self.review(review)?;
+        let n = capture.unwrap_or(1);
+        let item = found
+            .items
+            .get(n.wrapping_sub(1))
+            .ok_or_else(|| failure(format!("review {review} has no capture {n}")))?;
+        let evidence: serde_json::Value = serde_json::from_slice(&self.bytes(&item.evidence)?)
+            .map_err(|e| failure(format!("the capture's evidence is not readable: {e}")))?;
+        let kind = kind
+            .as_deref()
+            .unwrap_or("failures")
+            .trim()
+            .to_ascii_lowercase();
+        let mut result =
+            query_evidence(&evidence, &kind, from_ms, to_ms, query.as_deref()).map_err(failure)?;
+        result["review"] = review.into();
+        result["capture"] = n.into();
+        result["kind"] = kind.into();
+        Ok(CallToolResult::success(vec![
+            ContentBlock::text(format!("Every entry below is {UNTRUSTED}")),
+            ContentBlock::text(serde_json::to_string(&result).expect("JSON serializes")),
+        ]))
+    }
+
     /// Reviews a person approved, newest first: what an agent may read.
     #[tool(annotations(read_only_hint = true))]
     async fn list_reviews(&self) -> Result<CallToolResult, ErrorData> {
@@ -459,16 +688,7 @@ impl LensMcp {
                 .as_ref()
                 .ok_or_else(|| failure("this capture's recording was not included"))?,
         };
-        let bytes = {
-            let mut slot = self.client.lock().unwrap_or_else(|p| p.into_inner());
-            let client = match slot.as_mut() {
-                Some(client) => client,
-                None => {
-                    slot.insert(Client::connect(&self.paths).map_err(|e| failure(e.to_string()))?)
-                }
-            };
-            client.blob(&blob.sha256, blob.size).map_err(failure)?
-        };
+        let bytes = self.bytes(blob)?;
         if kind == "png" || shot.is_some() {
             let data = base64::engine::general_purpose::STANDARD.encode(bytes);
             return Ok(CallToolResult::success(vec![
@@ -900,6 +1120,92 @@ mod tests {
         .unwrap();
         assert_eq!((found.len(), asked), (250, 4));
         assert_eq!((found[0].id, found[249].id), (250, 1));
+    }
+
+    #[test]
+    fn a_search_reads_the_notes_only_when_the_summary_misses_a_word() {
+        let summary = ReviewSummary {
+            id: 4,
+            observation: 1,
+            revision: 1,
+            created_at: 0,
+            page_url: Some("https://shop.test/cart".into()),
+            title: "Cart total".into(),
+            captures: 1,
+            vibeq_task_id: None,
+            vibeq_task_url: None,
+        };
+        let full = Review {
+            id: 4,
+            observation: 1,
+            revision: 1,
+            created_at: 0,
+            title: "Cart total".into(),
+            notes: "The coupon makes it NaN".into(),
+            tags: vec![],
+            items: vec![],
+            voice: vec![],
+        };
+        let find = |text: &str, loaded: &mut usize| {
+            let query = SearchArguments {
+                text: Some(text.into()),
+                ..Default::default()
+            };
+            search(vec![summary.clone()], &query, 0, |_| {
+                *loaded += 1;
+                Some(full.clone())
+            })
+            .len()
+        };
+        let mut loaded = 0;
+        assert_eq!(find("cart", &mut loaded), 1);
+        assert_eq!(loaded, 0, "the summary held the word");
+        assert_eq!(find("cart coupon", &mut loaded), 1);
+        assert_eq!(find("refund", &mut loaded), 0);
+        assert_eq!(loaded, 2);
+    }
+
+    #[test]
+    fn evidence_queries_pick_kinds_times_and_words() {
+        let evidence = serde_json::json!({
+            "actions": [{ "timestamp": 1000, "kind": "click" }],
+            "events": [
+                { "timestamp": 1100, "kind": "request", "data": { "requestId": "1", "url": "https://a.test/graphql" } },
+                { "timestamp": 1200, "kind": "response", "data": { "requestId": "1", "url": "https://a.test/graphql", "status": 200 } },
+                { "timestamp": 1201, "kind": "responseBody", "data": { "requestId": "1", "body": { "errors": [{ "message": "no price" }] } } },
+                { "timestamp": 1500, "kind": "response", "data": { "requestId": "2", "url": "https://a.test/cart", "status": 500 } },
+                { "timestamp": 1600, "kind": "console", "data": { "level": "log", "text": "hello" } },
+                { "timestamp": 1700, "kind": "marker", "data": { "label": "here" } },
+                { "timestamp": 1800, "kind": "webSocketError", "data": { "requestId": "3", "errorText": "reset" } },
+            ],
+        });
+        let kinds = |kind: &str, from, to, query| {
+            let found = query_evidence(&evidence, kind, from, to, query).unwrap();
+            found["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| e["kind"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            kinds("failures", None, None, None),
+            ["responseBody", "response", "webSocketError"]
+        );
+        assert_eq!(
+            kinds("graphql", None, None, None),
+            ["request", "response", "responseBody"]
+        );
+        assert_eq!(kinds("markers", None, None, None), ["marker"]);
+        assert_eq!(kinds("websocket", None, None, None), ["webSocketError"]);
+        assert_eq!(kinds("console", None, None, None), ["console"]);
+        assert_eq!(kinds("all", None, None, None).len(), 8);
+        assert_eq!(kinds("all", Some(0), Some(150), None), ["step", "request"]);
+        assert_eq!(kinds("failures", None, None, Some("CART")), ["response"]);
+        let body = query_evidence(&evidence, "failures", None, None, Some("no price")).unwrap();
+        assert_eq!(body["entries"][0]["data"]["url"], "https://a.test/graphql");
+        assert_eq!(body["entries"][0]["offsetMs"], 201);
+        assert!(query_evidence(&evidence, "everything", None, None, None).is_err());
     }
 
     #[test]

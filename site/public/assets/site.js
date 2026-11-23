@@ -42,12 +42,24 @@ fetch('/download/manifest.json')
       link.title = `SHA-256 ${file.sha256}`;
       box.append(link);
     }
-    const mine = files.filter((f) => f.os === os);
+    // One obvious file per system: the DMG on a Mac, the AppImage on Linux. ARM Linux gets an ARM
+    // file or none; a browser cannot tell an Intel Mac, so a link under the button offers its DMG.
+    const arm = /aarch64|arm/.test(platform);
+    const mine = files.filter((f) => f.os === os && (os !== 'linux' || /aarch64|arm64/.test(f.name) === arm));
     const hero = document.querySelector('[data-download]');
     if (hero && mine.length) {
       hero.textContent = `Download for ${names[os]}`;
-      // One obvious file per system: the DMG on a Mac, the AppImage on Linux.
       hero.href = `/download/${mine[0].name}`;
+      const intel = os === 'mac' && mine.find((f) => f.name.includes('macos-x64'));
+      if (intel && intel !== mine[0]) {
+        const note = document.createElement('p');
+        note.className = 'fine';
+        const a = document.createElement('a');
+        a.href = `/download/${intel.name}`;
+        a.textContent = 'Download the Intel DMG';
+        note.append('Intel Mac? ', a, '.');
+        hero.parentElement.after(note);
+      }
     }
     fillEmpty('Coming soon.');
   })
