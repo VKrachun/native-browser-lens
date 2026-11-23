@@ -132,6 +132,7 @@ const env = {
   ...process.env,
   PATH: `${fakeBin}:/usr/bin:/bin`,
   LENS_HOME: join(work, 'lens'),
+  LENS_VIBEQ_TOKEN: 'demo-token',
   HOME: join(work, 'home'),
   XDG_CONFIG_HOME: join(work, 'config'),
   XDG_DATA_HOME: join(work, 'data'),

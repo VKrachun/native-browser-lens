@@ -63,10 +63,14 @@ jobs:
           node-version: 24
           cache: pnpm
           cache-dependency-path: extension/pnpm-lock.yaml
-      - name: Extension
+      - name: Extension dependencies and Chromium
         working-directory: extension
         run: |
           pnpm install --frozen-lockfile
+          pnpm exec playwright-core install chromium
+      - name: Extension
+        working-directory: extension
+        run: |
           pnpm compile
           pnpm test
           pnpm build
@@ -76,9 +80,6 @@ jobs:
         if: runner.os == 'Linux'
         working-directory: extension
         run: pnpm dlx web-ext@10.8.0 lint --source-dir .output/firefox-mv3 --no-input
-      - name: Chromium for the end-to-end test
-        working-directory: extension
-        run: pnpm exec playwright-core install chromium
       - name: End to end (Chromium, extension, shim, daemon, fixture site)
         working-directory: extension
         env:

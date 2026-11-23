@@ -6,7 +6,7 @@ use crate::paths::Paths;
 use crate::protocol::{ModelState, SpeechStatus, VoiceSegment};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -176,10 +176,12 @@ fn fetch(
 ) -> Result<(), String> {
     let partial = dir.join(format!("{}.part", model.file));
     let io = |e: std::io::Error| format!("{}: {e}", partial.display());
+    // `.write(true)` rather than `.append(true)`: Windows refuses `set_len(0)` on an append-only handle.
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .read(true)
-        .append(true)
+        .write(true)
+        .truncate(false)
         .open(&partial)
         .map_err(io)?;
     let mut hasher = Sha256::new();
@@ -187,6 +189,7 @@ fn fetch(
     let mut have = file.metadata().map_err(io)?.len();
     if have > model.size {
         file.set_len(0).map_err(io)?;
+        file.seek(SeekFrom::Start(0)).map_err(io)?;
         have = 0;
     }
     // The bytes from an earlier try count toward the hash.
@@ -204,11 +207,14 @@ fn fetch(
         let (status, reader) =
             get(model.url, have).map_err(|e| format!("cannot download {}: {e}", model.file))?;
         match status {
-            206 if have > 0 => {}
+            206 if have > 0 => {
+                file.seek(SeekFrom::Start(have)).map_err(io)?;
+            }
             // The whole file: the server ignored the range, or none was asked for.
             200 => {
                 if have > 0 {
                     file.set_len(0).map_err(io)?;
+                    file.seek(SeekFrom::Start(0)).map_err(io)?;
                     hasher = Sha256::new();
                     have = 0;
                     progress(0);

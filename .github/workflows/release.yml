@@ -342,6 +342,7 @@ jobs:
         working-directory: extension
         run: |
           pnpm install --frozen-lockfile
+          pnpm exec playwright-core install chromium
           pnpm compile
           pnpm test
           pnpm zip
