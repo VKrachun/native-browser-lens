@@ -5,3 +5,6 @@ WHISPER_DONT_GENERATE_BINDINGS = "1"
 # whisper.cpp builds for the CPU it compiles on by default: a release runner with AVX-512 made
 # speech crash (illegal instruction) on every CPU without it. Off, it builds for AVX2.
 GGML_NATIVE = "OFF"
+# macOS: whisper.cpp unconditionally enables Accelerate NEWLAPACK/ILP64 (macOS 13.3+ only).
+# This hook undefines those macros on Apple so speech keeps Accelerate via classic cblas_sgemm.
+CMAKE_PROJECT_INCLUDE = { value = "assets/macos/cmake-compat.cmake", relative = true }

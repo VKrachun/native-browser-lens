@@ -27,6 +27,16 @@ jobs:
       - name: Rust toolchain (from rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ runner.os == 'macOS' && 'macos-11.0' || matrix.os }}
+          workspaces: |
+            . -> target
+            . -> target-gpu
+      - name: macOS deployment target
+        if: runner.os == 'macOS'
+        run: |
+          echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
+          echo "CMAKE_OSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
       - name: libclang for bindgen (Windows)
         # .cargo/config.toml makes whisper-rs-sys use its bundled bindings, made on Linux, so
         # building needs no libclang. Their struct sizes are wrong on Windows (long is 32 bits
@@ -54,6 +64,12 @@ jobs:
         run: git diff --exit-code -- extension/src/protocol
       - name: Build the binary for the end-to-end test
         run: cargo build --locked
+      - name: macOS compatibility floor
+        if: runner.os == 'macOS'
+        run: |
+          cargo build --locked -p lens-speech
+          cargo build --locked -p lens-speech --features metal --target-dir target-gpu
+          sh scripts/macos-floor.sh 11.0 target/debug/lens target/debug/lens-speech target-gpu/debug/lens-speech
 
       - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:

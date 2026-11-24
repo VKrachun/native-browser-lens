@@ -48,12 +48,12 @@ jobs:
           # programs are C++ (whisper.cpp) and link glibc: built on Ubuntu 22.04 in Docker, they
           # need glibc 2.34 at most; without them Lens still runs, only voice notes wait.
           # gpu: the backend of lens-speech-gpu, none where it does not pay.
-          - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl, speech: x86_64-unknown-linux-gnu, gpu: vulkan }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, speech: aarch64-unknown-linux-gnu, gpu: vulkan }
-          - { os: macos-15, target: aarch64-apple-darwin, speech: aarch64-apple-darwin, gpu: metal }
-          - { os: macos-15-intel, target: x86_64-apple-darwin, speech: x86_64-apple-darwin, gpu: "" }
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-musl, speech: x86_64-unknown-linux-gnu, gpu: vulkan, macos_min: "" }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, speech: aarch64-unknown-linux-gnu, gpu: vulkan, macos_min: "" }
+          - { os: macos-15, target: aarch64-apple-darwin, speech: aarch64-apple-darwin, gpu: metal, macos_min: "11.0" }
+          - { os: macos-15-intel, target: x86_64-apple-darwin, speech: x86_64-apple-darwin, gpu: "", macos_min: "10.15" }
           # whisper.cpp's Vulkan backend does not configure with the runner's Visual Studio yet: CPU speech.
-          - { os: windows-2025, target: x86_64-pc-windows-msvc, speech: x86_64-pc-windows-msvc, gpu: "" }
+          - { os: windows-2025, target: x86_64-pc-windows-msvc, speech: x86_64-pc-windows-msvc, gpu: "", macos_min: "" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -65,10 +65,17 @@ jobs:
       # target-gpu holds the GPU build of lens-speech (Speech programs).
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          key: ${{ matrix.target }}
+          key: ${{ matrix.macos_min != '' && format('{0}-macos-{1}', matrix.target, matrix.macos_min) || matrix.target }}
           workspaces: |
             . -> target
             . -> target-gpu
+      - name: macOS deployment target
+        # Keep Clang, CMake (whisper.cpp) and rustc on the same minimum macOS so Metal 15+ APIs
+        # stay weak-imported behind @available guards instead of hard-binding to macOS 15.
+        if: runner.os == 'macOS'
+        run: |
+          echo "MACOSX_DEPLOYMENT_TARGET=${{ matrix.macos_min }}" >> "$GITHUB_ENV"
+          echo "CMAKE_OSX_DEPLOYMENT_TARGET=${{ matrix.macos_min }}" >> "$GITHUB_ENV"
       - name: libclang for bindgen (Windows)
         # .cargo/config.toml makes whisper-rs-sys use its bundled bindings, made on Linux, so
         # building needs no libclang. Their struct sizes are wrong on Windows (long is 32 bits
@@ -132,6 +139,8 @@ jobs:
           if [[ "$RUNNER_OS" == "Linux" ]]; then
             # Static: no dynamic section means no glibc or library dependency.
             ! readelf -d "$bin" | grep -q NEEDED
+          elif [[ "$RUNNER_OS" == "macOS" ]]; then
+            sh scripts/macos-floor.sh "${{ matrix.macos_min }}" "$bin" speech-bin
           fi
 
       # Signing runs only where the publisher's secrets exist; nothing pretends otherwise.
@@ -204,11 +213,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-15, formats: "app,dmg", target: aarch64-apple-darwin }
-          - { os: macos-15-intel, formats: "app,dmg", target: x86_64-apple-darwin }
-          - { os: windows-2025, formats: nsis, target: x86_64-pc-windows-msvc }
+          - { os: macos-15, formats: "app,dmg", target: aarch64-apple-darwin, macos_min: "11.0" }
+          - { os: macos-15-intel, formats: "app,dmg", target: x86_64-apple-darwin, macos_min: "10.15" }
+          - { os: windows-2025, formats: nsis, target: x86_64-pc-windows-msvc, macos_min: "" }
           # Linux packages carry the static musl Lens.
-          - { os: ubuntu-24.04, formats: "appimage,deb,pacman", target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-24.04, formats: "appimage,deb,pacman", target: x86_64-unknown-linux-musl, macos_min: "" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -312,6 +321,9 @@ jobs:
             done
             # Ubuntu 22.04, Debian 12 and RHEL 9 run every program in the packages.
             sh scripts/glibc-floor.sh 2.34 dist/*.deb dist/*.AppImage dist/*-pacman.tar.gz
+          elif [[ "$RUNNER_OS" == "macOS" ]]; then
+            # macOS 11+ (Apple Silicon) and 10.15+ (Intel): HFS+ DMG, Info.plist floor, and Mach-O symbols.
+            sh scripts/macos-floor.sh "${{ matrix.macos_min }}" dist/*.dmg
           fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

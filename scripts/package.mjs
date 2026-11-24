@@ -19,6 +19,7 @@ if (!values.formats) throw new Error('--formats is required, for example appimag
 const root = resolve(import.meta.dirname, '..');
 const windows = process.platform === 'win32';
 const linux = process.platform === 'linux';
+const darwin = process.platform === 'darwin';
 const exe = windows ? '.exe' : '';
 const run = (command, args, cwd = root, env = process.env) => execFileSync(command, args, { cwd, stdio: 'inherit', shell: windows, env });
 const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--format-version', '1', '--no-deps'], { cwd: root, shell: windows }));
@@ -30,24 +31,32 @@ const linuxArch = { x64: 'x86_64', arm64: 'aarch64' }[process.arch] ?? process.a
 const target = values.target ?? (linux ? `${linuxArch}-unknown-linux-musl` : undefined);
 const targetArgs = target ? ['--target', target] : [];
 const release = join(metadata.target_directory, ...(target ? [target] : []), 'release');
+const macosMin = (target?.startsWith('x86_64-') || (!target && arch === 'x64')) ? '10.15' : '11.0';
+const buildEnv = darwin
+  ? {
+      ...process.env,
+      MACOSX_DEPLOYMENT_TARGET: process.env.MACOSX_DEPLOYMENT_TARGET ?? macosMin,
+      CMAKE_OSX_DEPLOYMENT_TARGET: process.env.CMAKE_OSX_DEPLOYMENT_TARGET ?? macosMin,
+    }
+  : process.env;
 
 if (!values['skip-build']) {
   const extension = join(root, 'extension');
   run('pnpm', ['build'], extension);
   run('pnpm', ['build:firefox'], extension);
-  run('cargo', ['build', '--release', '--locked', ...targetArgs]);
+  run('cargo', ['build', '--release', '--locked', ...targetArgs], root, buildEnv);
   if (linux) {
     run('docker', ['run', '--rm', '-v', `${root}:/src`, '-w', '/src', 'ubuntu:22.04', 'sh', 'scripts/speech-linux.sh', 'target/jammy/bin', ...(values.gpu ? [values.gpu] : [])]);
     for (const name of ['lens-speech', ...(values.gpu ? ['lens-speech-gpu'] : [])]) {
       copyFileSync(join(root, 'target', 'jammy', 'bin', name), join(release, name));
     }
   } else {
-    run('cargo', ['build', '--release', '--locked', '-p', 'lens-speech', ...targetArgs]);
+    run('cargo', ['build', '--release', '--locked', '-p', 'lens-speech', ...targetArgs], root, buildEnv);
   }
   if (values.gpu && !linux) {
     // Its own target folder: the GPU build of lens-speech must not overwrite the CPU one.
     const gpuDir = join(metadata.target_directory, 'gpu');
-    run('cargo', ['build', '--release', '--locked', '-p', 'lens-speech', '--features', values.gpu, '--target-dir', gpuDir, ...targetArgs]);
+    run('cargo', ['build', '--release', '--locked', '-p', 'lens-speech', '--features', values.gpu, '--target-dir', gpuDir, ...targetArgs], root, buildEnv);
     copyFileSync(
       join(gpuDir, ...(target ? [target] : []), 'release', `lens-speech${exe}`),
       join(release, `lens-speech-gpu${exe}`),
@@ -125,6 +134,7 @@ const config = {
   appimage: { 'excluded-libraries': ['libvulkan.so*'] },
   macos: {
     'info-plist-path': join(root, 'assets', 'macos', 'Info.plist'),
+    'minimum-system-version': macosMin,
     ...(process.env.APPLE_SIGNING_IDENTITY ? { 'signing-identity': process.env.APPLE_SIGNING_IDENTITY } : {}),
   },
 };
@@ -138,7 +148,6 @@ writeFileSync(configPath, JSON.stringify(config, null, 2));
 // App Store Connect API key (APPLE_API_KEY = key ID, APPLE_API_ISSUER, APPLE_API_KEY_PATH = the .p8)
 // both the app and the DMG are notarized and stapled here, so a downloaded DMG opens without a
 // Gatekeeper warning. The packager would notarize the app itself on seeing the key: not given it.
-const darwin = process.platform === 'darwin';
 const formats = values.formats.split(',');
 const dmg = darwin && formats.includes('dmg');
 const { APPLE_API_KEY, APPLE_API_ISSUER, APPLE_API_KEY_PATH, APPLE_SIGNING_IDENTITY } = process.env;
@@ -188,7 +197,7 @@ if (dmg) {
   run('ditto', [app, join(stage, `${config['product-name']}.app`)]);
   symlinkSync('/Applications', join(stage, 'Applications'));
   const file = join(out, `Sirv-Lens-${version}-macos-${arch}.dmg`);
-  retry(() => run('hdiutil', ['create', '-volname', config['product-name'], '-srcfolder', stage, '-ov', '-format', 'UDZO', file]));
+  retry(() => run('hdiutil', ['create', '-volname', config['product-name'], '-srcfolder', stage, '-ov', '-fs', 'HFS+', '-format', 'UDZO', file]));
   rmSync(stage, { recursive: true });
   if (APPLE_SIGNING_IDENTITY) run('codesign', ['--force', '--timestamp', '--sign', APPLE_SIGNING_IDENTITY, file]);
   if (notarize) notarizeAndStaple(file);
