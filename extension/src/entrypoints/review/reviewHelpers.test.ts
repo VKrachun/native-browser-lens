@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Capture } from '@/protocol/Capture';
-import { autoTrimBounds, correctSegment, jumpTarget, markersOf, privacyCounts, videoOf } from './reviewHelpers';
+import { autoTrimBounds, correctSegment, jumpTarget, markersOf, privacyCounts, rememberedFolder, videoOf } from './reviewHelpers';
 
 const blob = (sha256: string) => ({ sha256, size: 1, mediaType: 'application/octet-stream' });
 
@@ -122,5 +122,22 @@ describe('privacyCounts', () => {
   });
   it('leaves out the shots when they stay on this computer', () => {
     expect(privacyCounts([session], [''], null, false)).toEqual({ redacted: 0, masks: 1, rules: 0, unmasked: 0 });
+  });
+});
+
+describe('rememberedFolder', () => {
+  const folders = { 'https://app.test': '/proj/app', 'http://localhost:3000': '/proj/local' };
+  it('prefers the folder remembered for the current site', () => {
+    expect(rememberedFolder('https://app.test', folders, '/proj/other')).toBe('/proj/app');
+  });
+  it('falls back to the last used folder on a new site or before the site loads', () => {
+    expect(rememberedFolder('https://staging.test', folders, '/proj/other')).toBe('/proj/other');
+    expect(rememberedFolder('', folders, '/proj/other')).toBe('/proj/other');
+  });
+  it('falls back to any previously saved site folder when lastFolder is empty', () => {
+    expect(rememberedFolder('https://staging.test', folders, '')).toBe('/proj/local');
+  });
+  it('returns empty string when nothing has been remembered yet', () => {
+    expect(rememberedFolder('https://staging.test', {}, '')).toBe('');
   });
 });

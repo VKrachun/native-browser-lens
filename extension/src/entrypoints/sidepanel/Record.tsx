@@ -7,8 +7,6 @@ import { purge, spool, spooled, unspool } from '@/voice-spool';
 import type { SpeechStatus } from '@/protocol/SpeechStatus';
 import { ModelNotice } from './Voice';
 
-export type PanelMode = 'record' | 'capture';
-
 type Kept = { wav: Blob; startedAt: number; tab: number; session: number };
 
 /** The voice a closed panel left for this recording, as a WAV; null when none. */
@@ -78,14 +76,27 @@ export function ScreenNotice() {
   );
 }
 
-/** A setting kept in the browser profile; it never matters enough to fail over. */
+/** A setting kept in the browser profile; stays in sync across already-open extension tabs. */
 export function useStored<T>(key: string, initial: T): [T, (value: T) => void] {
   const [value, setValue] = useState(initial);
+  const initialRef = useRef(initial);
+  initialRef.current = initial;
   useEffect(() => {
+    let alive = true;
     void browser.storage.local
       .get(key)
-      .then((found) => found[key] !== undefined && setValue(found[key] as T))
+      .then((found) => alive && found[key] !== undefined && setValue(found[key] as T))
       .catch(() => {});
+    const onChanged = (changes: Record<string, { newValue?: unknown }>, area: string) => {
+      if (area !== 'local' || !(key in changes)) return;
+      const next = changes[key]?.newValue;
+      setValue(next === undefined ? initialRef.current : (next as T));
+    };
+    browser.storage.onChanged?.addListener(onChanged);
+    return () => {
+      alive = false;
+      browser.storage.onChanged?.removeListener(onChanged);
+    };
   }, [key]);
   return [value, (next: T) => (setValue(next), void browser.storage.local.set({ [key]: next }).catch(() => {}))];
 }

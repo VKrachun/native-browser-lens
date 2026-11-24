@@ -524,8 +524,8 @@ export default defineBackground(() => {
   }
 
   /**
-   * Saves what the tab recorded from `session` on (Record mode), or the last ten minutes
-   * (Capture mode): the replay, the steps, network and console, and a screenshot of now.
+   * Saves what the tab recorded during a session: the replay, the steps, network and console,
+   * and a screenshot of now.
    */
   async function capture(
     tabId: number,
@@ -1036,11 +1036,9 @@ export default defineBackground(() => {
       return true;
     }
     // Broadcasts of other pages (a review's 'annotated') are not for this script.
-    if (!['capture', 'discardSession', 'tabStatus', 'lensReachable', 'projectsChanged', 'dropMarker'].includes(message.kind)) return;
+    if (!['discardSession', 'tabStatus', 'lensReachable', 'projectsChanged', 'dropMarker'].includes(message.kind)) return;
     const work = ready.then((): Promise<unknown> =>
-      message.kind === 'capture'
-        ? capture(message.tabId, message.observation)
-        : message.kind === 'dropMarker'
+      message.kind === 'dropMarker'
           ? Promise.resolve(dropMarker(message.tabId, message.label))
         : message.kind === 'discardSession'
           ? discardSession(message.tabId)
@@ -1142,26 +1140,19 @@ export default defineBackground(() => {
   browser.permissions.onAdded.addListener(() => void loadProjects());
   browser.permissions.onRemoved.addListener(() => void loadProjects());
 
-  // The toolbar button opens the notebook beside the page; the shortcut also captures at once.
+  // The toolbar button opens the notebook beside the page.
   if (import.meta.env.FIREFOX) {
     const { sidebarAction } = browser as unknown as { sidebarAction: { toggle(): Promise<void>; open(): Promise<void> } };
     browser.action.onClicked.addListener(() => sidebarAction.toggle());
     browser.commands.onCommand.addListener((command, tab) => {
       if (tab?.id === undefined) return;
-      if (command !== 'capture') return shortcut(command, tab.id);
-      void sidebarAction.open();
-      const tabId = tab.id;
-      void ready.then(() => capture(tabId, null));
+      shortcut(command, tab.id);
     });
   } else {
     void browser.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
     browser.commands.onCommand.addListener((command, tab) => {
       if (tab?.id === undefined) return;
-      if (command !== 'capture') return shortcut(command, tab.id);
-      // In the gesture, before any wait: the browser opens the panel only then.
-      void browser.sidePanel.open({ tabId: tab.id });
-      const tabId = tab.id;
-      void ready.then(() => capture(tabId, null));
+      shortcut(command, tab.id);
     });
   }
 

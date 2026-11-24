@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { LensClient } from '@/lens-client';
 import type { HandoffApp } from '@/protocol/HandoffApp';
 import { AlertIcon, DoneIcon } from '@/ui/icons';
 import { useStored } from '../sidepanel/Record';
+import { rememberedFolder } from './reviewHelpers';
 
 const NAMES: Record<HandoffApp, string> = {
   claudeCode: 'Claude Code',
@@ -21,16 +22,18 @@ const NEXT: Record<HandoffApp, string> = {
 
 /**
  * The hand-off state: the apps installed here, the chosen one, and the project folder, remembered
- * for each site so the next recording of the same site goes to the same project. The review page
+ * per site with a fallback to the last used folder so the next review starts ready. The review page
  * also uses it to hand off right after filing.
  */
 export function useHandoff(client: LensClient, site: string) {
   const [apps, setApps] = useState<HandoffApp[]>([]);
   const [chosen, setChosen] = useStored<HandoffApp | ''>('lens.handoff.app', '');
   const [folders, setFolders] = useStored<Record<string, string>>('lens.handoff.folders', {});
+  const [lastFolder, setLastFolder] = useStored('lens.handoff.lastFolder', '');
   /** Hand off as soon as the review is filed to VibeQ; remembered for the next review. */
-  const [afterFiling, setAfterFiling] = useStored('lens.handoff.afterFiling', false);
-  const [folder, setFolder] = useState('');
+  const [afterFiling, setAfterFilingStored] = useStored('lens.handoff.afterFiling', false);
+  const [folder, setFolderState] = useState('');
+  const edited = useRef(false);
   const [busy, setBusy] = useState(false);
   /** The last hand-off, with its review: a new review on the page has not been handed off. */
   const [done, setDone] = useState<{ review: number; app: HandoffApp; report: string } | null>(null);
@@ -42,23 +45,50 @@ export function useHandoff(client: LensClient, site: string) {
       .then(setApps)
       .catch(() => setApps([]));
   }, [client]);
+
   useEffect(() => {
-    const saved = folders[site];
-    if (saved) setFolder((typed) => typed || saved);
-  }, [folders, site]);
+    if (edited.current) return;
+    const saved = rememberedFolder(site, folders, lastFolder);
+    if (saved) setFolderState(saved);
+  }, [folders, lastFolder, site]);
+
+  function remember(raw = folder) {
+    const path = raw.trim();
+    if (!path) return;
+    if (lastFolder !== path) setLastFolder(path);
+    if (site && folders[site] !== path) setFolders({ ...folders, [site]: path });
+  }
+
+  useEffect(() => {
+    if (!edited.current) return;
+    const path = folder.trim();
+    if (!path) return;
+    const timer = setTimeout(() => remember(path), 300);
+    return () => clearTimeout(timer);
+  }, [folder, site, folders, lastFolder]);
+
+  function setFolder(next: string) {
+    edited.current = true;
+    setFolderState(next);
+  }
+
+  function setAfterFiling(next: boolean) {
+    if (next) remember();
+    setAfterFilingStored(next);
+  }
 
   const first = apps[0];
   const app = chosen && apps.includes(chosen) ? chosen : first;
 
   async function handOff(review: number) {
     if (!app) return;
+    const path = folder.trim();
+    remember(path);
+    setChosen(app);
     setBusy(true);
     setProblem(null);
     try {
-      const path = folder.trim();
       const handed = await client.request({ method: 'handOff', params: { review, app, folder: path } });
-      setFolders({ ...folders, [site]: path });
-      setChosen(app);
       setDone({ review, app, report: handed.folder });
     } catch (error) {
       setProblem((error as Error).message);
@@ -73,7 +103,8 @@ export function useHandoff(client: LensClient, site: string) {
     choose: setChosen,
     folder,
     setFolder,
-    recent: [...new Set(Object.values(folders))],
+    remember,
+    recent: [...new Set([lastFolder, ...Object.values(folders)].filter(Boolean))],
     /** An app and a folder are there: a hand-off can start. */
     ready: Boolean(app && folder.trim()),
     afterFiling,
@@ -116,6 +147,7 @@ export function Handoff({ state, review }: { state: HandoffState; review: number
           list="handoff-folders"
           value={folder}
           onChange={(e) => state.setFolder(e.target.value)}
+          onBlur={() => state.remember()}
           spellCheck={false}
         />
         <datalist id="handoff-folders">

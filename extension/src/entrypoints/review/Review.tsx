@@ -24,7 +24,6 @@ import type { SirvantRun } from '@/protocol/SirvantRun';
 import { BlobImage, ReviewedNotes, Running, SharedEvidence, Steps } from './Evidence';
 import { Issues, Split } from './Issues';
 import { Duplicates } from './Duplicates';
-import { PrivacySummary, usePrivacySummary } from './PrivacySummary';
 import { VoiceTranscriptEditor } from './VoiceTranscriptEditor';
 import { siteOf } from './reviewHelpers';
 
@@ -72,9 +71,6 @@ export function Review({ observation: id }: { observation: number }) {
   /** The task of an earlier filing of this observation, when the page opens again. */
   const [filedTask, setFiledTask] = useState<string | null>(null);
   const handoff = useHandoff(client, siteOf(review?.items[0]?.pageUrl ?? captures[0]?.pageUrl));
-  const privacy = usePrivacySummary(client, captures, typedValues);
-  /** The person looked at the screenshots that have no mask. */
-  const [screenshotsChecked, setScreenshotsChecked] = useState(false);
   /** The review whose tracker draft opens by itself: it came from the one-click button. */
   const [autoDraft, setAutoDraft] = useState<number | null>(null);
   // The review and filing on the page now. A reply that comes back after the person made a new
@@ -269,12 +265,11 @@ export function Review({ observation: id }: { observation: number }) {
     }
   }
 
-  /** One click: the review, then the filing or the tracker draft right after it. */
+  /** One click: the review, then the tracker draft or clipboard copy right after it. */
   async function freezeAndSend() {
     const frozen = await freeze();
     if (!frozen) return;
-    if (destination === 'vibeq') await file(frozen);
-    else setAutoDraft(frozen.id);
+    setAutoDraft(frozen.id);
   }
 
   // The review comes as an argument from the one-click path: the state has not caught up yet.
@@ -321,9 +316,9 @@ export function Review({ observation: id }: { observation: number }) {
   }, [client, review]);
 
   useEffect(() => {
-    if (!review || destination !== 'vibeq') return;
+    if (destination !== 'vibeq') return;
     client.request({ method: 'listMembers' }).then(setMembers).catch(() => setMembers([]));
-  }, [client, review, destination]);
+  }, [client, destination]);
 
   async function draft(agent: Agent) {
     if (!review) return;
@@ -389,16 +384,15 @@ export function Review({ observation: id }: { observation: number }) {
   }
   const readyAgents = agents.filter((a) => a.state === 'ready');
   const name = (agent: Agent) => (agent === 'codex' ? 'Codex' : 'Claude');
-  // The one-click label never holds "Create review": that button stays, and its tests find it by name.
+  // VibeQ never auto-files on review creation so the person can assign, check duplicates and hand off first.
   const quickLabel =
     destination === 'vibeq'
-      ? 'Create the review and file'
+      ? null
       : destination === 'clipboard'
         ? 'Create the review and copy summary'
         : destination && defaultChoice
           ? 'Create the review and open draft'
           : null;
-  const privacyClear = Boolean(privacy && (privacy.unmasked === 0 || screenshotsChecked));
   return (
     <main className="page review">
       <header className="page-head">
@@ -652,7 +646,6 @@ export function Review({ observation: id }: { observation: number }) {
                 </span>
               </span>
             </label>
-            <PrivacySummary counts={privacy} checked={screenshotsChecked} onChecked={setScreenshotsChecked} />
           </section>
           {problem && (
             <div role="alert" className="notice">
@@ -674,8 +667,7 @@ export function Review({ observation: id }: { observation: number }) {
                 type="button"
                 className="btn btn-primary"
                 onClick={() => void freezeAndSend()}
-                disabled={captures.length === 0 || freezing || !privacyClear}
-                title={privacyClear ? undefined : 'Check the screenshots without a mask first, under Choose what to share.'}
+                disabled={captures.length === 0 || freezing}
               >
                 <FileIcon />
                 {quickLabel}

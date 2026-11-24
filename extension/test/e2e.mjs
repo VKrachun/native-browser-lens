@@ -260,21 +260,34 @@ try {
   await panel.getByRole('button', { name: 'Collect evidence on this site' }).click();
   await panel.getByText('Collecting network, console and errors').waitFor({ timeout: 15_000 });
 
-  // The defect happens, then the person captures it.
+  // Capture mode is gone: the panel only records sessions.
+  if (await panel.getByRole('tab', { name: 'Capture' }).count()) throw new Error('Capture mode tab still exists');
+  await panel.getByLabel('Record my voice').uncheck();
+  await panel.getByRole('button', { name: 'Record', exact: true }).click();
+  await panel.getByRole('status', { name: 'Recording' }).waitFor({ timeout: 15_000 });
+
+  // The defect happens during the recording, then the person stops it.
+  await shop.bringToFront();
   await shop.getByLabel('Coupon').fill('SAVE10');
   await shop.getByLabel('Card number').fill('4111111111111111');
   await Promise.all([
     shop.waitForResponse(`${site}/api/price`),
     shop.getByRole('button', { name: 'Pay' }).click(),
   ]);
-  await panel.waitForTimeout(500);
-  // Record is the default mode; this part uses Capture, which saves the last ten minutes.
-  await panel.getByRole('tab', { name: 'Capture' }).click();
-  await panel.getByRole('button', { name: 'Capture to a new observation' }).click();
+  await shop.waitForTimeout(800);
+  await panel.bringToFront();
+  const [autoReview] = await Promise.all([
+    context.waitForEvent('page'),
+    panel.getByRole('button', { name: /^Stop/ }).click(),
+  ]);
+  await autoReview.close();
 
-  // A capture opens its observation: its picture leads the detail view.
+  // Stopping opens the observation in the panel: its picture leads the detail view.
   const capture = panel.getByRole('region', { name: 'Observation' });
-  const hero = capture.getByRole('button', { name: /^Open the recording, Capture/ });
+  if (!(await capture.isVisible())) {
+    await panel.getByRole('list', { name: 'Observations' }).getByRole('button', { name: /^Checkout/ }).first().click();
+  }
+  const hero = capture.getByRole('button', { name: /^Open the recording, Recording/ });
   await hero.or(panel.getByRole('alert')).first().waitFor({ timeout: 15_000 });
   if (await panel.getByRole('alert').isVisible()) throw new Error(await panel.getByRole('alert').textContent());
   await hero.getByRole('img').waitFor();
@@ -302,30 +315,7 @@ try {
   }
   if (!evidence.elements.some((e) => e.locator.testId === 'total')) throw new Error('the element map lacks the total');
 
-  // Annotate: a rectangle, a mask drawn twice with an undo between, then save.
-  const [editor] = await Promise.all([
-    context.waitForEvent('page'),
-    capture.getByRole('button', { name: /Annotate capture/ }).click(),
-  ]);
-  const canvas = editor.locator('canvas').first();
-  await canvas.waitFor({ timeout: 15_000 });
-  const area = await canvas.boundingBox();
-  const drag = async (x1, y1, x2, y2) => {
-    await editor.mouse.move(area.x + x1, area.y + y1);
-    await editor.mouse.down();
-    await editor.mouse.move(area.x + x2, area.y + y2, { steps: 5 });
-    await editor.mouse.up();
-  };
-  await drag(20, 20, 160, 90);
-  await editor.getByRole('button', { name: 'Mask' }).click();
-  await drag(200, 20, 300, 60);
-  await editor.getByRole('button', { name: 'Undo' }).click();
-  await drag(200, 20, 320, 70);
-  await editor.getByRole('button', { name: 'Save' }).click();
-  await editor.getByRole('status').filter({ hasText: 'Saved · 2 marks' }).waitFor({ timeout: 15_000 });
-  await capture.getByText('Mark up · 2').waitFor({ timeout: 15_000 });
-
-  // The capture's recording opens in the editor, the same one Record mode uses.
+  // The recording opens in the editor.
   const logoBefore = logoRequests;
   const [replay] = await Promise.all([
     context.waitForEvent('page'),
@@ -357,10 +347,10 @@ try {
   // Voice: a spoken note becomes a transcript when the speech model and program are present
   // (LENS_SPEECH_MODELS, LENS_SPEECH_DIR); without them it waits and the panel offers the model.
   const speech = Boolean(process.env.LENS_SPEECH_MODELS && process.env.LENS_SPEECH_DIR);
-  await panel.getByRole('button', { name: 'Record', exact: true }).click();
-  await panel.getByRole('status', { name: 'Recording' }).waitFor({ timeout: 15_000 });
+  await capture.getByRole('button', { name: 'Record', exact: true }).click();
+  await capture.getByRole('status', { name: 'Recording' }).waitFor({ timeout: 15_000 });
   await panel.waitForTimeout(11_500);
-  await panel.getByRole('button', { name: /^Stop/ }).click();
+  await capture.getByRole('button', { name: /^Stop/ }).click();
   const transcript = panel.getByRole('list', { name: 'Voice note list' }).getByLabel('Transcript').first();
   if (speech) {
     await transcript.filter({ hasText: /fellow Americans/i }).waitFor({ timeout: 180_000 });
@@ -377,6 +367,7 @@ try {
   ]);
   const freeze = review.getByRole('button', { name: 'Create review' });
   await freeze.waitFor({ timeout: 15_000 });
+  if (await review.getByRole('region', { name: 'Privacy summary' }).count()) throw new Error('Privacy summary masking nag still exists');
   // The page title is not a title: a small model writes one, and the findings, before the review.
   await review
     .getByRole('status', { name: 'Summary' })
@@ -407,7 +398,7 @@ try {
     if (!moved.includes('The coupon field accepts expired codes') || moved.some((f) => f.includes('The total shows NaN'))) {
       throw new Error(`the new task's findings: ${JSON.stringify(moved)}`);
     }
-    await split.getByRole('img', { name: /before review/ }).first().waitFor({ timeout: 15_000 });
+    await split.getByRole('link', { name: /^Open replay and transcript/ }).waitFor({ timeout: 15_000 });
     await split.close();
     await review.getByRole('status', { name: 'Split' }).waitFor();
     const left = (await findingsOn(review)).join('\n');
@@ -415,7 +406,7 @@ try {
   }
   await freeze.click();
   await review.getByText(/^View shared evidence/).click();
-  await review.getByRole('list', { name: 'Reviewed captures' }).getByRole('img').first().waitFor({ timeout: 15_000 });
+  await review.getByRole('list', { name: 'Reviewed captures' }).getByRole('listitem').first().waitFor({ timeout: 15_000 });
   // Intercept the draft before it leaves the test browser. Opening a draft cannot file a task.
   if (await review.getByLabel('Destination', { exact: true }).count()) throw new Error('Review asks for the tracker again');
   await context.route('https://linear.app/new?**', (route) => route.fulfill({ body: 'Draft' }));
@@ -459,9 +450,7 @@ try {
     }
     await review.bringToFront();
     if (key !== 'basecamp') await context.route(target, route => route.fulfill({ body: 'Draft' }));
-    // The capture has a mask, so its replay stays out of the review: no MP4 to attach.
-    if (key === 'basecamp' && await review.getByRole('checkbox', { name: /Replay MP4/ }).count())
-      throw new Error('A masked capture offers its replay as an MP4');
+    // Replay MP4 is unchecked by default on Basecamp so only the evidence ZIP attaches unless chosen.
     const [tab] = await Promise.all([context.waitForEvent('page'), review.getByRole('button', { name: button }).click()]);
     await tab.waitForURL(target);
     if (key === 'github' && !new URL(tab.url()).searchParams.get('body')?.includes('HTTP 500')) throw new Error('Missing issue body');
@@ -481,9 +470,9 @@ try {
           !Buffer.from(evidence.bytes).includes('capture-1-evidence.json') || basecamp.submitted)
         throw new Error('The unsubmitted Basecamp draft did not receive the reviewed ZIP');
       if (await tab.evaluate(() => window.received.some(f => f.type === 'video/mp4')))
-        throw new Error('Basecamp received a replay of a masked capture');
-      if (Buffer.from(evidence.bytes).includes('capture-1.rrweb.json'))
-        throw new Error('The evidence ZIP has the replay of a masked capture');
+        throw new Error('Basecamp received an MP4 when Replay MP4 was unchecked');
+      if (!Buffer.from(evidence.bytes).includes('capture-1.rrweb.json'))
+        throw new Error('The evidence ZIP is missing the replay');
       basecamp.editor = 'lexxy';
       await review.bringToFront();
       const [second] = await Promise.all([context.waitForEvent('page'), review.getByRole('button', { name: button }).click()]);
@@ -514,14 +503,13 @@ try {
   await review.getByRole('list', { name: /Findings of capture/ }).getByText(/HTTP 500 from/).waitFor();
   const folder = (await exportStatus.textContent()).replace(/^Exported to /, '');
   const report = readFileSync(join(folder, 'report.md'), 'utf8');
-  for (const expected of ['HTTP 500 from', '` Console error: total is NaN `', notes, '![Capture 1](capture-1.png)']) {
+  for (const expected of ['HTTP 500 from', '` Console error: total is NaN `', notes, '## Recording 1: Checkout']) {
     if (!report.includes(expected)) throw new Error(`report.md lacks ${expected}:\n${report}`);
   }
-  for (const file of ['capture-1.lens.json', 'capture-1.png', 'capture-1-evidence.json', 'review.json', 'capture-1-timeline.txt', 'capture-1.spec.ts', 'capture-1.har']) {
+  for (const file of ['capture-1.lens.json', 'capture-1-shot-1.webp', 'capture-1-evidence.json', 'review.json', 'capture-1-timeline.txt', 'capture-1.spec.ts', 'capture-1.har']) {
     if (!existsSync(join(folder, file))) throw new Error(`the export lacks ${file}`);
   }
-  // The capture is masked: its replay, which would show what the mask hides, stays home.
-  if (existsSync(join(folder, 'capture-1.rrweb.json'))) throw new Error('the export has the replay of a masked capture');
+  if (!existsSync(join(folder, 'capture-1.rrweb.json'))) throw new Error('the export lacks capture-1.rrweb.json');
   if (speech) {
     const said = readFileSync(join(folder, 'voice-1.txt'), 'utf8');
     if (!/fellow Americans/i.test(said) || !/^\[00:0\d\] /.test(said)) throw new Error(`voice-1.txt: ${said}`);
@@ -588,7 +576,7 @@ try {
   await review.reload();
   await review.getByRole('button', { name: 'Create review' }).click();
   await review.getByText(/^View shared evidence/).click();
-  await review.getByRole('list', { name: 'Reviewed captures' }).getByRole('img').first().waitFor({ timeout: 15_000 });
+  await review.getByRole('list', { name: 'Reviewed captures' }).getByRole('listitem').first().waitFor({ timeout: 15_000 });
   // Explicit tracker choices survive sign-in and reload. Connected teams can still select VibeQ.
   if (await destinations.inputValue() !== 'github') throw new Error('Lost preferred tracker');
   await settings.bringToFront();
@@ -607,6 +595,12 @@ try {
   await review.getByLabel('Assign to').selectOption({ label: 'Ana' });
   await review.getByLabel('Then put Sirvant to work').check();
   const handoff = review.getByRole('region', { name: 'Hand off' });
+  // Open a sibling review tab BEFORE setting the folder (like "Make N tasks" opening tabs at once).
+  const siblingReview = summaries ? await context.newPage() : null;
+  if (siblingReview) {
+    await siblingReview.goto(review.url());
+    await siblingReview.getByRole('button', { name: 'Create review' }).waitFor({ timeout: 15_000 });
+  }
   if (summaries) {
     // File, then hand off to T3 Code at once: the agent's prompt links the new VibeQ task.
     await handoff.getByLabel('App').selectOption({ label: 'T3 Code' });
@@ -647,12 +641,11 @@ try {
   if (vibeq.staged !== submitted.body.evidenceManifest.length) {
     throw new Error(`${vibeq.staged} uploads for ${submitted.body.evidenceManifest.length} files`);
   }
-  // VibeQ gets lens-capture.v1: the record, the shots and the end screenshot. The capture is
-  // masked, so its recording stays home.
+  // VibeQ gets lens-capture.v1: the record, the replay, the shots and the end screenshot.
   const filed = submitted.body.evidenceManifest.map((a) => `${a.filename} ${a.contentType}`);
   if (
     !filed.includes('capture-1.lens.json application/vnd.sirv.lens-capture+json') ||
-    filed.some((f) => f.startsWith('capture-1.rrweb.json')) ||
+    !filed.some((f) => f.startsWith('capture-1.rrweb.json ')) ||
     filed.some((f) => !/^capture-1(\.lens\.json|\.rrweb\.json|\.png|-shot-\d+\.webp) /.test(f))
   ) {
     throw new Error(`filed files: ${filed.join(', ')}`);
@@ -705,7 +698,6 @@ try {
     if (speech && !/fellow Americans/i.test(detail.voiceNotesByThePerson[0]?.transcript ?? '')) {
       throw new Error(`MCP voice: ${JSON.stringify(detail.voiceNotesByThePerson)}`);
     }
-    if (detail.captures[0].untrustedPageContent.marks[0]?.kind !== 'rectangle') throw new Error(`MCP marks: ${JSON.stringify(detail.captures[0].untrustedPageContent.marks)}`);
     // The focused query: only what failed, without the whole timeline.
     const queried = (await rpc('tools/call', { name: 'query_review_evidence', arguments: { review: latest.id, kind: 'failures' } })).content;
     if (!queried[0].text.includes('UNTRUSTED DATA')) throw new Error('MCP: queried evidence is not marked untrusted');
@@ -767,20 +759,29 @@ try {
     const foreign = await fetch(`${wizard}/action`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json', Origin: 'https://evil.test' }, body: '{"action":"connectAgents"}' });
     if (foreign.status !== 403) throw new Error(`wizard accepted a foreign post: ${foreign.status}`);
     // A label marks the image as untrusted page content, then the image follows.
-    const [label, image] = (await rpc('tools/call', { name: 'read_review_file', arguments: { review: latest.id, file: 'capture-1.png' } })).content;
+    const [label, image] = (await rpc('tools/call', { name: 'read_review_file', arguments: { review: latest.id, file: 'capture-1-shot-1.webp' } })).content;
     if (label?.type !== 'text' || !label.text.includes('UNTRUSTED')) throw new Error(`MCP image label: ${JSON.stringify(label).slice(0, 200)}`);
-    if (image?.type !== 'image' || image.mimeType !== 'image/png' || !image.data.startsWith('iVBORw0KGgo')) {
+    if (image?.type !== 'image' || image.mimeType !== 'image/webp' || !image.data.startsWith('UklGR')) {
       throw new Error(`MCP image: ${JSON.stringify(image).slice(0, 200)}`);
     }
   } finally {
     mcp.kill();
+  }
+  if (siblingReview) {
+    // The already-open sibling review tab must have picked up the saved folder live via storage.onChanged.
+    await siblingReview.bringToFront();
+    await siblingReview.getByRole('button', { name: 'Create review' }).click();
+    const siblingFolder = await siblingReview.getByRole('region', { name: 'Hand off' }).getByLabel('Project folder').inputValue();
+    if (siblingFolder !== handoffProject) {
+      throw new Error(`Already-open review tab did not sync project folder: got "${siblingFolder}", expected "${handoffProject}"`);
+    }
+    await siblingReview.close();
   }
 
   // Record mode: a session with the voice, then the editor: a drawing on Pay with a note, a cut,
   // and a review whose timeline and test carry the note and leave out the cut part.
   await panel.goto(`chrome-extension://${extensionId}/sidepanel.html?tab=${tabId}`);
   await status.filter({ hasText: /^Connected/ }).waitFor({ timeout: 15_000 });
-  await panel.getByRole('tab', { name: 'Record' }).click();
   await panel.getByLabel('Record my voice').check();
   await panel.getByRole('button', { name: 'Record', exact: true }).click();
   await panel.getByRole('status', { name: 'Recording' }).waitFor({ timeout: 15_000 });
@@ -891,7 +892,21 @@ try {
   if (removedOne) await strip.getByRole('button', { name: /^Remove the shot/ }).first().click();
   await studio.getByRole('status', { name: 'Edits' }).filter({ hasText: /2 notes · Saved/ }).waitFor({ timeout: 15_000 });
   await sessionReview.getByRole('status', { name: 'Summary' }).filter({ hasText: summaries ? /wrote the title/ : /No title was written/ }).waitFor({ timeout: 30_000 });
+  // On VibeQ, Create review never auto-files: no one-click file button, no masking checkbox.
+  if (await sessionReview.getByRole('button', { name: /Create the review and file/ }).count()) {
+    throw new Error('VibeQ still shows the auto-filing button');
+  }
+  if (await sessionReview.getByRole('region', { name: 'Privacy summary' }).count()) {
+    throw new Error('Privacy summary masking nag still exists on session review');
+  }
   await sessionReview.getByRole('button', { name: 'Create review' }).click();
+  // Still unfiled so the person can assign and configure handoff before clicking File to VibeQ.
+  await sessionReview.getByRole('button', { name: 'File to VibeQ' }).waitFor({ timeout: 15_000 });
+  if (await sessionReview.getByLabel('Assign to').isDisabled()) throw new Error('Assign to is disabled before filing');
+  if (summaries) {
+    const remembered = await sessionReview.getByRole('region', { name: 'Hand off' }).getByLabel('Project folder').inputValue();
+    if (remembered !== handoffProject) throw new Error(`Handoff did not remember project folder: got "${remembered}", expected "${handoffProject}"`);
+  }
   await sessionReview.getByRole('button', { name: 'Export to Downloads' }).click();
   const recorded = sessionReview.getByRole('status', { name: 'Export' });
   await recorded.waitFor({ timeout: 15_000 });

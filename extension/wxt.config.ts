@@ -40,10 +40,6 @@ export default defineConfig({
       ...(firefox ? {} : { incognito: 'split' as const }),
       action: { default_title: 'Open Lens' },
       commands: {
-        capture: {
-          suggested_key: { default: 'Alt+Shift+L' },
-          description: 'Capture the page with its evidence',
-        },
         'toggle-recording': {
           suggested_key: { default: 'Alt+Shift+R' },
           description: 'Start or stop recording the current tab',

@@ -88,17 +88,6 @@
   white-space: nowrap;
   text-overflow: ellipsis;
 }
-.capture {
-  justify-content: flex-start;
-  gap: 8px;
-}
-.capture > span:nth-of-type(1) {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-align: left;
-  text-overflow: ellipsis;
-}
 .keys {
   display: inline-flex;
   gap: 3px;
@@ -501,11 +490,7 @@
   display: block;
 }
 
-/* ---------- Modes ---------- */
-.mode-switch {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-}
+/* ---------- Record ---------- */
 .mode-hint {
   margin: -2px 0 2px;
 }

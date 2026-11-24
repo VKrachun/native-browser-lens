@@ -3,7 +3,6 @@ import type { CaptureMode } from './protocol/CaptureMode';
 
 /** Side panel → background. */
 export type BackgroundRequest =
-  | { kind: 'capture'; tabId: number; observation: number | null }
   /** Record mode: everything from now until stopSession becomes one recording. */
   /** `voice`: Chrome records the microphone in the background's offscreen page. */
   /**

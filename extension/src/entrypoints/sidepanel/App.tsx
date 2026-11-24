@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { LensClient, PROTOCOL_VERSION, type LensError } from '@/lens-client';
-import { NO_ANSWER, originOf, send, sitePattern, type Broadcast, type CaptureResult, type TabStatus } from '@/messages';
+import { originOf, send, sitePattern, type Broadcast, type TabStatus } from '@/messages';
 import type { Capture } from '@/protocol/Capture';
 import type { Hello } from '@/protocol/Hello';
 import type { ObservationSummary } from '@/protocol/ObservationSummary';
@@ -9,7 +9,7 @@ import { readable } from '@/findings';
 import type { BlobRef } from '@/protocol/BlobRef';
 import { Notes } from './Notes';
 import { VoiceNotes } from './Voice';
-import { Keys, RecordControls, ScreenNotice, shortcutText, useStored, type PanelMode } from './Record';
+import { RecordControls, ScreenNotice, useStored } from './Record';
 import { DestinationForm } from '@/ui/Destination';
 import { InstallApp, SetupCard, hostNotFound } from './Onboarding';
 
@@ -68,7 +68,6 @@ export function App() {
   const [selected, setSelected] = useState<number | null>(null);
   const [tabId, setTabId] = useState<number | null>(null);
   const [site, setSite] = useState<TabStatus | null>(null);
-  const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   const wasReady = useRef(false);
@@ -78,7 +77,6 @@ export function App() {
   const [quit, setQuit] = useState(false);
   const session = useRef(false);
   session.current = site?.session != null;
-  const [panelMode, setPanelMode] = useStored<PanelMode>('lens.mode', 'record');
   const lastWebTab = useRef<number | null>(null);
 
   /**
@@ -193,15 +191,6 @@ export function App() {
     }
   }
 
-  async function capture() {
-    if (tabId === null) return;
-    setBusy(true);
-    const result = (await send<CaptureResult>({ kind: 'capture', tabId, observation: selected })) ?? NO_ANSWER;
-    setBusy(false);
-    if (!result.ok) return setProblem(`Capture failed: ${result.error}`);
-    setProblem(null);
-  }
-
   const current = observations?.find((o) => o.id === selected) ?? null;
   const mode = site?.mode ? MODE[site.mode] : null;
 
@@ -259,26 +248,9 @@ export function App() {
           <SetupCard client={client} refresh={site?.mode ? 1 : 0} />
 
           <section className="card site" aria-label="This site">
-            <div className="segmented mode-switch" role="tablist" aria-label="Mode">
-              {(['record', 'capture'] as const).map((m) => (
-                <button
-                  key={m}
-                  type="button"
-                  role="tab"
-                  className="btn btn-sm"
-                  aria-selected={panelMode === m}
-                  onClick={() => setPanelMode(m)}
-                  disabled={site?.session != null}
-                >
-                  {m === 'record' ? 'Record' : 'Capture'}
-                </button>
-              ))}
-            </div>
             {!current && (
               <p className="small muted mode-hint">
-                {panelMode === 'record'
-                  ? 'Record a session with your voice, then review, cut and annotate it.'
-                  : 'Capture saves the last ten minutes of this tab.'}
+                Record a session with your voice, then review, cut and annotate it.
               </p>
             )}
             {site?.origin ? (
@@ -312,23 +284,9 @@ export function App() {
                 )}
               </>
             ) : (
-              <p className="small muted">Open a web page (http or https) to capture it.</p>
+              <p className="small muted">Open a web page (http or https) to record it.</p>
             )}
-            {panelMode === 'record' ? (
-              <RecordControls client={client} tabId={tabId} site={site} onProblem={setProblem} />
-            ) : (
-            <button
-              type="button"
-              className="btn btn-primary btn-lg btn-block capture"
-              onClick={capture}
-              disabled={busy || !site?.origin}
-              title={`Capture (${shortcutText('L')})`}
-            >
-              <CameraIcon size={18} />
-              <span>{busy ? 'Capturing…' : current ? `Capture to “${current.title}”` : 'Capture to a new observation'}</span>
-              <Keys letter="L" />
-            </button>
-            )}
+            <RecordControls client={client} tabId={tabId} site={site} onProblem={setProblem} />
             {problem && (
               <div role="alert" className="notice">
                 <AlertIcon />

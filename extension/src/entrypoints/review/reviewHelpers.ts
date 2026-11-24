@@ -62,6 +62,14 @@ export function siteOf(url: string | undefined): string {
   }
 }
 
+/** Remembered hand-off folder: the site's own first, then the last used folder on any site. */
+export function rememberedFolder(site: string, folders: Record<string, string>, lastFolder: string): string {
+  if (site && folders[site]?.trim()) return folders[site].trim();
+  if (lastFolder.trim()) return lastFolder.trim();
+  const any = Object.values(folders).filter((v) => v?.trim()).at(-1);
+  return any?.trim() ?? '';
+}
+
 /** The findings lines at the top of the notes, as the person reads them. */
 export function findingsOf(notes: string): string[] {
   return splitNotes(notes).findings ?? [];

@@ -301,19 +301,6 @@ fieldset.split legend {
   gap: 4px;
 }
 
-/* Privacy summary: what the review hides, before it leaves. */
-.privacy-summary {
-  display: grid;
-  gap: 10px;
-  margin-top: 12px;
-  padding: 12px 14px;
-}
-.privacy-pills {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
 /* A transcript line before the review: a click corrects it. */
 .transcript-line {
   padding: 0;
