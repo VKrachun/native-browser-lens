@@ -61,6 +61,7 @@ function Settings() {
           permission looks, and it goes away when the tab closes. To stop collection everywhere, use Pause collection
           in the Lens menu of your system tray.
         </p>
+        {!import.meta.env.FIREFOX && <IncognitoNote />}
       </section>
     </main>
   );
@@ -163,7 +164,12 @@ function VibeQ({ client }: { client: LensClient }) {
       return setProblem('Type the VibeQ address, for example https://work.sirv.studio');
     }
     // Chrome grants a permission only while the click is in progress, so Lens asks before anything else.
-    const granted = await browser.permissions.request({ origins: [sitePattern(origin)] });
+    let granted: boolean;
+    try {
+      granted = await browser.permissions.request({ origins: [sitePattern(origin)] });
+    } catch (error) {
+      return setProblem((error as Error).message);
+    }
     if (!granted) return setProblem('Lens needs access to VibeQ to sign in.');
     setBusy(true);
     setProblem(null);
@@ -648,6 +654,31 @@ function Updates({ client }: { client: LensClient }) {
       )}
       {(problem || state.lastError) && <Problem text={(problem ?? state.lastError)!} />}
     </section>
+  );
+}
+
+/** Chrome hides every extension in Incognito until the person turns on Allow in Incognito. */
+function IncognitoNote() {
+  const [allowed, setAllowed] = useState<boolean | null>(null);
+  const load = useCallback(() => {
+    void browser.extension?.isAllowedIncognitoAccess?.().then(setAllowed, () => {});
+  }, []);
+  useLoadOnFocus(load);
+  if (allowed !== false) return null;
+  return (
+    <div className="section-row">
+      <p className="small muted">
+        To use Lens in Chrome Incognito windows, turn on <strong>Allow in Incognito</strong> in Chrome&apos;s
+        extension details.
+      </p>
+      <button
+        type="button"
+        className="btn btn-secondary btn-sm"
+        onClick={() => void browser.tabs.create({ url: `chrome://extensions/?id=${browser.runtime.id}` })}
+      >
+        Extension details
+      </button>
+    </div>
   );
 }
 

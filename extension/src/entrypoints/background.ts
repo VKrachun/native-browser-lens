@@ -236,7 +236,10 @@ export default defineBackground(() => {
    * While a recording runs, an extension call every 20 s keeps the worker (Chrome 110 and later),
    * and an alarm wakes it when it stopped anyway.
    */
-  const SESSIONS_KEY = 'lens.sessions';
+  // In Chrome's split incognito mode, normal and incognito workers share storage.session: keep
+  // each context's running recordings under its own key so they never overwrite or vanish each other.
+  const INCOGNITO = Boolean((browser.extension as { inIncognitoContext?: boolean } | undefined)?.inIncognitoContext);
+  const SESSIONS_KEY = INCOGNITO ? 'lens.sessions.incognito' : 'lens.sessions';
   type Checkpoint = { sessions: [number, number][]; offProject: number[]; voiced: number[]; filmed?: number[] };
   let saved = '';
   let alive: ReturnType<typeof setInterval> | undefined;
@@ -385,12 +388,20 @@ export default defineBackground(() => {
     const key = JSON.stringify(matches);
     if (key === registered) return;
     try {
+      // In Chrome's split incognito mode, normal and incognito workers share the registered script
+      // list, so either worker can register or remove it between our check and our write.
       const found = await browser.scripting.getRegisteredContentScripts({ ids: [RECORDER] });
       if (!matches.length) {
-        if (found.length) await browser.scripting.unregisterContentScripts({ ids: [RECORDER] });
+        if (found.length) {
+          await browser.scripting.unregisterContentScripts({ ids: [RECORDER] }).catch(async (error) => {
+            if ((await browser.scripting.getRegisteredContentScripts({ ids: [RECORDER] })).length) throw error;
+          });
+        }
       } else {
         const script = { id: RECORDER, js: ['content-scripts/recorder.js'], matches, runAt: 'document_start' as const, persistAcrossSessions: false };
-        await (found.length ? browser.scripting.updateContentScripts([script]) : browser.scripting.registerContentScripts([script]));
+        await (found.length
+          ? browser.scripting.updateContentScripts([script]).catch(() => browser.scripting.registerContentScripts([script]))
+          : browser.scripting.registerContentScripts([script]).catch(() => browser.scripting.updateContentScripts([script])));
       }
       registered = key;
     } catch {
@@ -456,6 +467,17 @@ export default defineBackground(() => {
     if (JSON.stringify(settings) === privacyKnown) return;
     applyPrivacy(settings);
     await browser.storage.local.set({ [PRIVACY_KEY]: settings }).catch(() => {});
+  }
+
+  // Normal and incognito workers do not receive each other's runtime.sendMessage: mirror
+  // projectsChanged through shared storage.local so adding or toggling a site takes effect in both.
+  const PROJECTS_SYNC_KEY = 'lens.projectsSync';
+  let lastProjectsSync = '';
+  async function notifyProjectsChanged() {
+    await loadProjects();
+    const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    lastProjectsSync = token;
+    void browser.storage.local.set({ [PROJECTS_SYNC_KEY]: token }).catch(() => {});
   }
 
   async function loadProjects() {
@@ -701,6 +723,9 @@ export default defineBackground(() => {
   let badgeTimer: ReturnType<typeof setInterval> | undefined;
   let flash: { text: string; color: string; until: number } | null = null;
   let shownBadge = '';
+  // Action badge text is shared across normal and incognito windows in Chrome's split mode: an
+  // idle worker clears the badge only if it was the one that set it.
+  let badgeOwned = false;
   function badge() {
     const now = Date.now();
     if (flash && flash.until <= now) flash = null;
@@ -709,9 +734,11 @@ export default defineBackground(() => {
       seconds < 600 ? `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}` : seconds < 6000 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
     const text = flash?.text ?? (sessions.size ? time : '');
     const color = flash?.color ?? '#e11d48';
-    if (`${text} ${color}` !== shownBadge) {
-      shownBadge = `${text} ${color}`;
-      void browser.action.setBadgeBackgroundColor({ color }).catch(() => {});
+    const next = text ? `${text} ${color}` : '';
+    if (next !== shownBadge && (text !== '' || badgeOwned)) {
+      shownBadge = next;
+      badgeOwned = text !== '';
+      if (text) void browser.action.setBadgeBackgroundColor({ color }).catch(() => {});
       void browser.action.setBadgeText({ text }).catch(() => {});
     }
     const live = sessions.size > 0 || flash !== null;
@@ -1023,7 +1050,7 @@ export default defineBackground(() => {
             ? client()
                 .request({ method: 'hello' })
                 .then(() => true, () => false)
-            : loadProjects(),
+            : notifyProjectsChanged(),
     );
     work.then(reply, (error: Error) => reply({ ok: false, error: error.message }));
     return true;
@@ -1202,10 +1229,16 @@ export default defineBackground(() => {
     if (agentsLive) void serveAgents();
   });
   browser.storage.onChanged.addListener((changes, area) => {
-    if (area === 'local' && PRIVACY_KEY in changes) applyPrivacy(changes[PRIVACY_KEY]?.newValue);
-    if (area !== 'local' || !(LIVE_KEY in changes)) return;
-    agentsLive = changes[LIVE_KEY]?.newValue === true;
-    if (agentsLive) void serveAgents();
+    if (area !== 'local') return;
+    if (PRIVACY_KEY in changes) applyPrivacy(changes[PRIVACY_KEY]?.newValue);
+    if (PROJECTS_SYNC_KEY in changes && changes[PROJECTS_SYNC_KEY]?.newValue !== lastProjectsSync) {
+      lastProjectsSync = String(changes[PROJECTS_SYNC_KEY]?.newValue ?? '');
+      void ready.then(() => loadProjects()).then(() => broadcast({ kind: 'tabChanged', tabId: -1 }));
+    }
+    if (LIVE_KEY in changes) {
+      agentsLive = changes[LIVE_KEY]?.newValue === true;
+      if (agentsLive) void serveAgents();
+    }
   });
 
   // The recordings of an earlier worker first: the sync after it then resumes them.

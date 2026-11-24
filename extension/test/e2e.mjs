@@ -8,6 +8,7 @@
 // Windows reads hosts from HKCU, so there the test registers for the current user and unregisters
 // at the end; run it on CI or a disposable account.
 import { basecampFixture } from './basecamp.mjs';
+import { verifyIncognito } from './incognito.mjs';
 import { chromium } from 'playwright-core';
 import { execFileSync, spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
@@ -185,21 +186,23 @@ const site = `http://127.0.0.1:${fixture.address().port}`;
 const systemChromium = '/usr/bin/chromium';
 const executablePath = process.env.CHROMIUM_PATH ?? (existsSync(systemChromium) ? systemChromium : undefined);
 const basecamp = await basecampFixture();
-const context = await chromium.launchPersistentContext(profile, {
-  // The `chromium` channel is the full browser in new headless mode; the headless shell cannot load extensions.
-  ...(executablePath ? { executablePath } : { channel: 'chromium' }),
-  headless: true,
-  env,
-  args: [
-    ...basecamp.flags,
-    `--disable-extensions-except=${extension}`,
-    `--load-extension=${extension}`,
-    // A WAV file stands in for the microphone, and its prompt answers itself.
-    '--use-fake-ui-for-media-stream',
-    '--use-fake-device-for-media-stream',
-    `--use-file-for-fake-audio-capture=${join(import.meta.dirname, 'fixtures', 'speech.wav')}%noloop`,
-  ],
-});
+const launchBrowser = () =>
+  chromium.launchPersistentContext(profile, {
+    // The `chromium` channel is the full browser in new headless mode; the headless shell cannot load extensions.
+    ...(executablePath ? { executablePath } : { channel: 'chromium' }),
+    headless: true,
+    env,
+    args: [
+      ...basecamp.flags,
+      `--disable-extensions-except=${extension}`,
+      `--load-extension=${extension}`,
+      // A WAV file stands in for the microphone, and its prompt answers itself.
+      '--use-fake-ui-for-media-stream',
+      '--use-fake-device-for-media-stream',
+      `--use-file-for-fake-audio-capture=${join(import.meta.dirname, 'fixtures', 'speech.wav')}%noloop`,
+    ],
+  });
+let context = await launchBrowser();
 const consoleErrors = [];
 context.on('page', (page) => {
   page.on('console', (m) => m.type() === 'error' && consoleErrors.push(`${page.url().slice(0, 60)}: ${m.text()}`));
@@ -991,7 +994,9 @@ try {
     }
   }
 
-  console.log(`e2e: ok (${evidence.events.length} events, screenshot ${imageWidth}px wide, 2 marks, replay, notes kept, reviewed, exported and filed once despite a lost reply, served over MCP)`);
+  context = await verifyIncognito({ context, settings, extension, extensionId, site, relaunch: launchBrowser });
+
+  console.log(`e2e: ok (${evidence.events.length} events, screenshot ${imageWidth}px wide, 2 marks, replay, notes kept, reviewed, exported and filed once despite a lost reply, served over MCP, incognito split mode)`);
 } catch (error) {
   // Every open page as it was at the failure: the first thing to look at, locally and in CI.
   const shots = process.env.E2E_SHOTS ?? join(tmpdir(), 'lens-e2e-shots');
