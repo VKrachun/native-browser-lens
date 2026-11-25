@@ -87,7 +87,8 @@ const same = (a: string, b: string, part: 'origin' | 'host') => {
  */
 export class DeepCollector {
   private readonly attached = new Set<number>();
-  private readonly declined = new Set<number>();
+  /** The person clicked Cancel on Chrome's debugging bar: stay detached across all tabs until they explicitly reconnect or start a recording. */
+  private declinedAll = false;
   private readonly requests = new Map<string, Request>();
   /** Requests left out as noise: their answers are left out too. */
   private readonly ignored = new Set<string>();
@@ -97,6 +98,7 @@ export class DeepCollector {
   constructor(
     private readonly buffer: EvidenceBuffer,
     private readonly pageUrl: (tabId: number) => string | undefined,
+    private readonly onCanceled?: () => void,
   ) {
     browser.debugger.onEvent.addListener((source, method, params) => {
       if (source.tabId !== undefined && this.attached.has(source.tabId)) {
@@ -104,14 +106,24 @@ export class DeepCollector {
       }
     });
     browser.debugger.onDetach.addListener((source, reason) => {
+      if (reason === 'canceled_by_user') {
+        // Handle cancel even when this.attached is empty (a restarted MV3 service worker loses in-memory state).
+        const alreadyDeclined = this.declinedAll;
+        this.declinedAll = true;
+        const tabs = new Set(this.attached);
+        if (source.tabId !== undefined) tabs.add(source.tabId);
+        this.attached.clear();
+        this.requests.clear();
+        this.sockets.clear();
+        for (const tabId of tabs) {
+          this.buffer.gap(tabId, 'debugger', `Debugger detached: ${reason}`);
+          this.buffer.start(tabId, 'screenshotOnly');
+        }
+        if (!alreadyDeclined) this.onCanceled?.();
+        return;
+      }
       if (source.tabId === undefined || !this.attached.delete(source.tabId)) return;
       this.buffer.gap(source.tabId, 'debugger', `Debugger detached: ${reason}`);
-      // The person closed the browser's debugging bar: never attach again in this tab until it
-      // leaves the project, and collect without the debugger meanwhile.
-      if (reason === 'canceled_by_user') {
-        this.declined.add(source.tabId);
-        this.buffer.start(source.tabId, 'screenshotOnly');
-      }
     });
   }
 
@@ -123,15 +135,23 @@ export class DeepCollector {
     return this.attached.has(tabId);
   }
 
-  /** The person refused the debugger in this tab. */
-  isDeclined(tabId: number) {
-    return this.declined.has(tabId);
+  /** The person clicked Cancel on Chrome's debugging bar. */
+  isDeclined() {
+    return this.declinedAll;
+  }
+
+  setDeclined(value: boolean) {
+    this.declinedAll = value;
   }
 
   async attach(tabId: number) {
-    if (this.attached.has(tabId)) return;
+    if (this.declinedAll || this.attached.has(tabId)) return;
     const target = { tabId };
     await browser.debugger.attach(target, '1.3');
+    if (this.declinedAll) {
+      await browser.debugger.detach(target).catch(() => {});
+      return;
+    }
     this.attached.add(tabId);
     try {
       for (const domain of ['Network.enable', 'Runtime.enable', 'Log.enable']) {
@@ -176,7 +196,6 @@ export class DeepCollector {
   }
 
   async detach(tabId: number) {
-    this.declined.delete(tabId);
     if (!this.attached.delete(tabId)) return;
     for (const map of [this.requests, this.sockets]) for (const key of map.keys()) if (key.startsWith(`${tabId}:`)) map.delete(key);
     await browser.debugger.detach({ tabId }).catch(() => {});

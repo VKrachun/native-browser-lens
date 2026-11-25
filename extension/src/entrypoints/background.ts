@@ -145,8 +145,19 @@ export default defineBackground(() => {
   /** Recording tabs on a site outside the project: the recording waits, nothing is collected. */
   const offProject = new Set<number>();
   const collecting = (tabId: number) => buffer.mode(tabId) !== undefined && !offProject.has(tabId);
+  const INCOGNITO = Boolean((browser.extension as { inIncognitoContext?: boolean } | undefined)?.inIncognitoContext);
+  const DECLINED_KEY = INCOGNITO ? 'lens.debuggerDeclined.incognito' : 'lens.debuggerDeclined';
   const urls = new Map<number, string>();
-  const deep = DeepCollector.available() ? new DeepCollector(buffer, (tabId) => urls.get(tabId)) : undefined;
+  const deep = DeepCollector.available()
+    ? new DeepCollector(
+        buffer,
+        (tabId) => urls.get(tabId),
+        () => {
+          void browser.storage.session.set({ [DECLINED_KEY]: true }).catch(() => {});
+          void broadcast({ kind: 'tabChanged', tabId: -1 });
+        },
+      )
+    : undefined;
   if (!deep) new LimitedCollector(buffer, collecting).listen();
 
   let projects: Project[] = [];
@@ -213,7 +224,14 @@ export default defineBackground(() => {
       return;
     }
     offProject.delete(tabId);
-    if (buffer.mode(tabId) !== undefined && (!deep || deep.isAttached(tabId) || deep.isDeclined(tabId))) return;
+    if (deep?.isDeclined()) {
+      if (buffer.mode(tabId) !== 'screenshotOnly') {
+        void injectRecorder(tabId);
+        buffer.start(tabId, 'screenshotOnly');
+      }
+      return;
+    }
+    if (buffer.mode(tabId) !== undefined && (!deep || deep.isAttached(tabId))) return;
     void injectRecorder(tabId);
     if (!deep) return buffer.start(tabId, 'limited');
     buffer.start(tabId, 'deep');
@@ -222,6 +240,10 @@ export default defineBackground(() => {
     } catch (error) {
       buffer.start(tabId, 'screenshotOnly');
       buffer.gap(tabId, 'debugger', `The browser refused the debugger: ${(error as Error).message}`);
+    }
+    if (deep.isDeclined()) {
+      buffer.start(tabId, 'screenshotOnly');
+      return;
     }
     // The tab moved on during the attach: the same choice as above, so a recording that went to
     // another site (a redirect) waits there instead of ending.
@@ -238,7 +260,6 @@ export default defineBackground(() => {
    */
   // In Chrome's split incognito mode, normal and incognito workers share storage.session: keep
   // each context's running recordings under its own key so they never overwrite or vanish each other.
-  const INCOGNITO = Boolean((browser.extension as { inIncognitoContext?: boolean } | undefined)?.inIncognitoContext);
   const SESSIONS_KEY = INCOGNITO ? 'lens.sessions.incognito' : 'lens.sessions';
   type Checkpoint = { sessions: [number, number][]; offProject: number[]; voiced: number[]; filmed?: number[] };
   let saved = '';
@@ -274,7 +295,9 @@ export default defineBackground(() => {
    */
   const vanished = new Map<number, { startedAt: number; off: boolean; voiced: boolean; filmed: boolean }>();
   async function restore() {
-    const found = await browser.storage.session.get(SESSIONS_KEY).catch(() => ({}) as Record<string, unknown>);
+    const found = await browser.storage.session.get([SESSIONS_KEY, DECLINED_KEY]).catch(() => ({}) as Record<string, unknown>);
+    // Only set true, never false: onDetach('canceled_by_user') may have fired while this read was in flight.
+    if (found[DECLINED_KEY] === true) deep?.setDeclined(true);
     const earlier = found[SESSIONS_KEY] as Checkpoint | undefined;
     if (!earlier) return checkpoint(), void cleanSpool();
     const open = new Set((await browser.tabs.query({})).map((t) => t.id));
@@ -507,6 +530,7 @@ export default defineBackground(() => {
       projectId: project?.id ?? null,
       permitted: await permitted(origin),
       mode: buffer.mode(tabId) ?? null,
+      debuggerDeclined: deep?.isDeclined() || undefined,
       recorder: buffer.mode(tabId) === undefined ? null : await recorderRuns(tabId),
       hasHeavyMedia: collecting(tabId) ? await detectHeavyMedia(tabId) : undefined,
       videoMode: filmed.has(tabId),
@@ -812,7 +836,21 @@ export default defineBackground(() => {
     return start;
   }
 
+  async function resumeDebugger(tabId?: number) {
+    if (!deep) return;
+    deep.setDeclined(false);
+    await browser.storage.session.remove(DECLINED_KEY).catch(() => {});
+    if (tabId !== undefined) {
+      const tab = await browser.tabs.get(tabId).catch(() => null);
+      if (tab) await sync(tabId, tab.url);
+    } else {
+      await syncAll();
+    }
+    void broadcast({ kind: 'tabChanged', tabId: tabId ?? -1 });
+  }
+
   async function beginSession(tabId: number, voice: boolean, videoMode: boolean): Promise<SessionStart> {
+    if (deep?.isDeclined()) await resumeDebugger(tabId);
     if (buffer.mode(tabId) === undefined) return { ok: false, error: 'Lens does not collect on this site yet.' };
     if (voice && !voiced.has(tabId)) {
       if (voiced.size > 0 || micStarting) return { ok: false, error: 'The microphone already records a session in another tab.' };
@@ -1036,19 +1074,21 @@ export default defineBackground(() => {
       return true;
     }
     // Broadcasts of other pages (a review's 'annotated') are not for this script.
-    if (!['discardSession', 'tabStatus', 'lensReachable', 'projectsChanged', 'dropMarker'].includes(message.kind)) return;
+    if (!['discardSession', 'tabStatus', 'lensReachable', 'projectsChanged', 'dropMarker', 'resumeDebugger'].includes(message.kind)) return;
     const work = ready.then((): Promise<unknown> =>
       message.kind === 'dropMarker'
-          ? Promise.resolve(dropMarker(message.tabId, message.label))
+        ? Promise.resolve(dropMarker(message.tabId, message.label))
         : message.kind === 'discardSession'
           ? discardSession(message.tabId)
           : message.kind === 'tabStatus'
-          ? status(message.tabId)
-          : message.kind === 'lensReachable'
-            ? client()
-                .request({ method: 'hello' })
-                .then(() => true, () => false)
-            : notifyProjectsChanged(),
+            ? status(message.tabId)
+            : message.kind === 'resumeDebugger'
+              ? resumeDebugger(message.tabId)
+              : message.kind === 'lensReachable'
+                ? client()
+                    .request({ method: 'hello' })
+                    .then(() => true, () => false)
+                : notifyProjectsChanged(),
     );
     work.then(reply, (error: Error) => reply({ ok: false, error: error.message }));
     return true;

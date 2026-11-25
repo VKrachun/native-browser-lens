@@ -17,6 +17,8 @@ export type BackgroundRequest =
   | { kind: 'discardSession'; tabId: number }
   | { kind: 'tabStatus'; tabId: number }
   | { kind: 'projectsChanged' }
+  /** Re-enable Chrome's debugger after the person clicked Cancel on the debugging bar. */
+  | { kind: 'resumeDebugger'; tabId: number }
   /** Whether the background's own connection to the app answers: true or false. */
   | { kind: 'lensReachable' };
 
@@ -52,6 +54,8 @@ export interface TabStatus {
   permitted: boolean;
   /** Null when Lens is not collecting on this tab. */
   mode: CaptureMode | null;
+  /** The person clicked Cancel on Chrome's debugging bar. */
+  debuggerDeclined?: boolean;
   /** Collection is paused from the Lens menu. */
   paused: boolean;
   /** When a Record mode session started in this tab, if one runs. */

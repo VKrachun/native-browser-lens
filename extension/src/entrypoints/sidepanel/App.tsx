@@ -264,7 +264,9 @@ export function App() {
                     <span className="small muted">
                       {site.paused
                         ? 'Collection is paused from the Lens menu.'
-                        : (mode?.detail ?? 'Lens does not collect evidence here yet.')}
+                        : site.debuggerDeclined
+                          ? 'Debugging cancelled — network and console paused'
+                          : (mode?.detail ?? 'Lens does not collect evidence here yet.')}
                     </span>
                   </div>
                   {site.paused ? (
@@ -280,6 +282,15 @@ export function App() {
                 {!site.paused && !site.mode && (
                   <button type="button" className="btn btn-primary btn-block" onClick={track}>
                     Collect evidence on this site
+                  </button>
+                )}
+                {!site.paused && site.debuggerDeclined && tabId !== null && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-block"
+                    onClick={() => void send({ kind: 'resumeDebugger', tabId }).then(() => refreshSite())}
+                  >
+                    Reconnect debugger
                   </button>
                 )}
               </>

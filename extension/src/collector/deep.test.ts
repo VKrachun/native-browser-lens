@@ -45,15 +45,20 @@ describe('framePayload', () => {
 
 describe('DeepCollector', () => {
   let emit: (source: { tabId?: number }, method: string, params: unknown) => void;
+  let detachEvent: (source: { tabId?: number }, reason: string) => void;
+  let attachCalls: number[];
   const responses = new Map<string, unknown>();
   beforeEach(() => {
     fakeBrowser.reset();
     responses.clear();
+    attachCalls = [];
     Object.assign(fakeBrowser, {
       debugger: {
         onEvent: { addListener: (fn: typeof emit) => (emit = fn) },
-        onDetach: { addListener: () => {} },
-        attach: async () => {},
+        onDetach: { addListener: (fn: typeof detachEvent) => (detachEvent = fn) },
+        attach: async (target: { tabId: number }) => {
+          attachCalls.push(target.tabId);
+        },
         detach: async () => {},
         sendCommand: async (_target: unknown, method: string, params?: { requestId?: string }) =>
           method === 'Network.getResponseBody' ? responses.get(params!.requestId!) : undefined,
@@ -110,6 +115,48 @@ describe('DeepCollector', () => {
     expect(snapshot.events.length).toBeLessThanOrEqual(MAX_FRAMES_PER_MINUTE);
     expect(snapshot.dropped['websocket-frames-over-limit']).toBe(5);
     vi.useRealTimers();
+  });
+
+  it('stays detached across all tabs and after detach() once canceled_by_user fires', async () => {
+    const buffer = new EvidenceBuffer();
+    buffer.start(1, 'deep');
+    buffer.start(2, 'deep');
+    let canceled = 0;
+    const deep = new DeepCollector(buffer, () => 'https://app.test/', () => canceled++);
+    await deep.attach(1);
+    await deep.attach(2);
+    expect(attachCalls).toEqual([1, 2]);
+
+    detachEvent({ tabId: 1 }, 'canceled_by_user');
+    expect(deep.isDeclined()).toBe(true);
+    expect(canceled).toBe(1);
+    expect(deep.isAttached(1)).toBe(false);
+    expect(deep.isAttached(2)).toBe(false);
+    expect(buffer.mode(1)).toBe('screenshotOnly');
+    expect(buffer.mode(2)).toBe('screenshotOnly');
+
+    // Detaching (e.g. off-site navigation) or attaching new tabs must NOT re-attach.
+    await deep.detach(1);
+    await deep.attach(1);
+    await deep.attach(3);
+    expect(attachCalls).toEqual([1, 2]);
+
+    // Explicit reconnect clears declined and allows attaching again.
+    deep.setDeclined(false);
+    await deep.attach(3);
+    expect(attachCalls).toEqual([1, 2, 3]);
+  });
+
+  it('still records canceled_by_user when woken on a fresh worker with empty attached set', async () => {
+    const buffer = new EvidenceBuffer();
+    let canceled = 0;
+    const deep = new DeepCollector(buffer, () => 'https://app.test/', () => canceled++);
+    // Tab 7 was attached before the service worker restarted, so this.attached does not have it.
+    detachEvent({ tabId: 7 }, 'canceled_by_user');
+    expect(deep.isDeclined()).toBe(true);
+    expect(canceled).toBe(1);
+    await deep.attach(7);
+    expect(attachCalls).toEqual([]);
   });
 });
 
