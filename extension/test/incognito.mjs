@@ -98,7 +98,7 @@ export async function verifyIncognito({ context, settings, extension, extensionI
   // Seed normal SW's checkpoint and toolbar badge so we catch any clobbering when the incognito worker starts.
   await normSw.evaluate(async () => {
     await chrome.storage.session.set({
-      'lens.sessions': { sessions: [[999_999, 12_345]], offProject: [], voiced: [], filmed: [] },
+      'lens.sessions': { sessions: [[999_999, 12_345]], offProject: [], voiced: [] },
     });
     await chrome.action.setBadgeText({ text: '0:07' });
   });
@@ -183,7 +183,7 @@ export async function verifyIncognito({ context, settings, extension, extensionI
   }
   // Clear our seeded normal state before recording in Incognito.
   await normSw.evaluate(async () => {
-    await chrome.storage.session.set({ 'lens.sessions': { sessions: [], offProject: [], voiced: [], filmed: [] } });
+    await chrome.storage.session.set({ 'lens.sessions': { sessions: [], offProject: [], voiced: [] } });
     await chrome.action.setBadgeText({ text: '' });
   });
 

@@ -10,55 +10,6 @@ let stops = 0;
 /** Counts starts and cancels: a start that one of them overtook lets its microphone go. */
 let starts = 0;
 
-/** Video mode: the tab filmed as WebM, at most this many bytes; past it the video ends there. */
-const MAX_VIDEO_BYTES = 200 * 1024 * 1024;
-type Filming = { recorder: MediaRecorder; ended: Promise<unknown>; release(): void; chunks: Blob[]; bytes: number; startedAt: number; truncated: boolean };
-let filming: Filming | null = null;
-/** The WebM of the last video Stop, until the background has read all of its parts. */
-let film: { id: number; startedAt: number; webm: Uint8Array; truncated: boolean } | null = null;
-let films = 0;
-
-async function startFilming(streamId: string): Promise<Filming> {
-  // Chrome's own constraints for a tabCapture stream: no standard name exists for them.
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: false,
-    video: { mandatory: { chromeMediaSource: 'tab', chromeMediaSourceId: streamId, maxWidth: 1920, maxHeight: 1080, maxFrameRate: 15 } },
-  } as unknown as MediaStreamConstraints);
-  const mimeType = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'].find((type) => MediaRecorder.isTypeSupported(type));
-  const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 1_500_000 });
-  const release = () => stream.getTracks().forEach((track) => track.stop());
-  const filming: Filming = { recorder, release, ended: new Promise((done) => (recorder.onstop = done)), chunks: [], bytes: 0, startedAt: 0, truncated: false };
-  recorder.ondataavailable = (event) => {
-    if (!event.data.size) return;
-    filming.chunks.push(event.data);
-    filming.bytes += event.data.size;
-    if (filming.bytes > MAX_VIDEO_BYTES && recorder.state !== 'inactive') {
-      filming.truncated = true;
-      recorder.stop();
-    }
-  };
-  try {
-    await new Promise((started, fail) => {
-      recorder.onstart = started;
-      recorder.onerror = (event) => fail((event as ErrorEvent).error ?? new Error('The video recorder failed'));
-      recorder.start(1000);
-    });
-  } catch (error) {
-    release();
-    throw error;
-  }
-  filming.startedAt = Date.now();
-  return filming;
-}
-
-/** Ends the video; a recorder that ended by itself (the tab closed, the size limit) keeps what it wrote. */
-async function endFilming(filming: Filming): Promise<Blob> {
-  if (filming.recorder.state !== 'inactive') filming.recorder.stop();
-  await filming.ended;
-  filming.release();
-  return new Blob(filming.chunks, { type: 'video/webm' });
-}
-
 /** Bytes from `offset` on, in base64: extension messages carry JSON only, and at most 64 MiB. */
 function part(bytes: Uint8Array, offset: number): string {
   const slice = bytes.subarray(offset, offset + OFFSCREEN_PART_BYTES);
@@ -106,30 +57,6 @@ async function handle(message: OffscreenRequest): Promise<OffscreenReply> {
       if (message.offset + OFFSCREEN_PART_BYTES >= stopped.wav.length) stopped = null;
       return reply;
     }
-    case 'video-start': {
-      if (filming) void endFilming(filming);
-      filming = film = null;
-      filming = await startFilming(message.streamId);
-      return { ok: true, startedAt: filming.startedAt };
-    }
-    case 'video-stop': {
-      const ending = filming;
-      filming = null;
-      if (!ending) return { ok: false, error: 'No video runs.' };
-      const webm = new Uint8Array(await (await endFilming(ending)).arrayBuffer());
-      film = { id: ++films, startedAt: ending.startedAt, webm, truncated: ending.truncated };
-      return { ok: true, startedAt: film.startedAt, size: webm.length, id: film.id, truncated: film.truncated };
-    }
-    case 'video-part': {
-      if (!film || film.id !== message.id) return { ok: false, error: 'The video is no longer here.' };
-      const reply = { ok: true as const, startedAt: film.startedAt, wav: part(film.webm, message.offset) };
-      if (message.offset + OFFSCREEN_PART_BYTES >= film.webm.length) film = null;
-      return reply;
-    }
-    case 'video-cancel':
-      if (filming) void endFilming(filming);
-      filming = film = null;
-      return { ok: true, startedAt: 0 };
     case 'mic-cancel':
       starts++;
       current?.cancel();

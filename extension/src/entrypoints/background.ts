@@ -14,6 +14,7 @@ import {
   OFFSCREEN_PART_BYTES,
   type OffscreenReply,
   type OffscreenRequest,
+  type RecordedVideoRef,
   type SessionStart,
   type TabStatus,
 } from '@/messages';
@@ -261,14 +262,14 @@ export default defineBackground(() => {
   // In Chrome's split incognito mode, normal and incognito workers share storage.session: keep
   // each context's running recordings under its own key so they never overwrite or vanish each other.
   const SESSIONS_KEY = INCOGNITO ? 'lens.sessions.incognito' : 'lens.sessions';
-  type Checkpoint = { sessions: [number, number][]; offProject: number[]; voiced: number[]; filmed?: number[] };
+  type Checkpoint = { sessions: [number, number][]; offProject: number[]; voiced: number[] };
   let saved = '';
   let alive: ReturnType<typeof setInterval> | undefined;
   /** A new worker cannot know whether an earlier one left the alarm: it clears it once. */
   let alarmChecked = false;
   function checkpoint() {
     badge();
-    const now: Checkpoint = { sessions: [...sessions], offProject: [...offProject], voiced: [...voiced], filmed: [...filmed] };
+    const now: Checkpoint = { sessions: [...sessions], offProject: [...offProject], voiced: [...voiced] };
     const text = JSON.stringify(now);
     if (text !== saved) {
       saved = text;
@@ -293,7 +294,7 @@ export default defineBackground(() => {
    * Recordings of tabs that were gone at restore: a prerendered page swapped in while the worker
    * slept has a new tab id, and its onReplaced comes after the restore. Then the recording moves.
    */
-  const vanished = new Map<number, { startedAt: number; off: boolean; voiced: boolean; filmed: boolean }>();
+  const vanished = new Map<number, { startedAt: number; off: boolean; voiced: boolean }>();
   async function restore() {
     const found = await browser.storage.session.get([SESSIONS_KEY, DECLINED_KEY]).catch(() => ({}) as Record<string, unknown>);
     // Only set true, never false: onDetach('canceled_by_user') may have fired while this read was in flight.
@@ -306,16 +307,14 @@ export default defineBackground(() => {
     for (const [tabId, startedAt] of earlier.sessions) {
       const off = earlier.offProject.includes(tabId);
       const voice = microphoneOpen && earlier.voiced.includes(tabId);
-      const film = microphoneOpen && (earlier.filmed ?? []).includes(tabId);
       if (!open.has(tabId)) {
-        vanished.set(tabId, { startedAt, off, voiced: voice, filmed: film });
+        vanished.set(tabId, { startedAt, off, voiced: voice });
         continue;
       }
       sessions.set(tabId, startedAt);
       restored.add(tabId);
       if (off) offProject.add(tabId);
       if (voice) voiced.add(tabId);
-      if (film) filmed.add(tabId);
     }
     checkpoint();
     void cleanSpool();
@@ -382,8 +381,6 @@ export default defineBackground(() => {
     sessions.delete(tabId);
     offProject.delete(tabId);
     keptVoice.delete(tabId);
-    keptFilm.delete(tabId);
-    void endVideo(tabId, 'video-cancel');
     void endMicrophone(tabId, 'mic-cancel');
     checkpoint();
   }
@@ -533,7 +530,6 @@ export default defineBackground(() => {
       debuggerDeclined: deep?.isDeclined() || undefined,
       recorder: buffer.mode(tabId) === undefined ? null : await recorderRuns(tabId),
       hasHeavyMedia: collecting(tabId) ? await detectHeavyMedia(tabId) : undefined,
-      videoMode: filmed.has(tabId),
     };
   }
 
@@ -646,83 +642,32 @@ export default defineBackground(() => {
   let micClosing: Promise<void> = Promise.resolve();
   const closeMicrophonePage = () => (micClosing = browser.offscreen.closeDocument().catch(() => {}));
   async function offscreen(message: OffscreenRequest): Promise<OffscreenReply> {
-    const starts = message.kind === 'mic-start' || message.kind === 'video-start';
+    const starts = message.kind === 'mic-start';
     if (starts) await micClosing;
     if (starts && !(await browser.offscreen.hasDocument())) {
       await browser.offscreen.createDocument({
         url: browser.runtime.getURL('/offscreen.html'),
         reasons: ['USER_MEDIA'],
-        justification: 'Records the voice, and in video mode the tab, of a Record mode session while the side panel is closed.',
+        justification: 'Records the voice of a Record mode session while the side panel is closed.',
       });
     }
     return browser.runtime.sendMessage(message);
   }
   const microphone = (kind: 'mic-start' | 'mic-stop' | 'mic-cancel') => offscreen({ target: 'offscreen', kind });
   /** Nothing records in the offscreen page any more: it may close. */
-  const offscreenIdle = () => voiced.size === 0 && filmed.size === 0 && !micStarting && !videoStarting;
-  /** The offscreen page's WAV (or WebM) `id`, read in parts: one message carries at most 64 MiB. */
-  async function readWav(id: number, size: number, kind: 'mic-part' | 'video-part' = 'mic-part', type = 'audio/wav'): Promise<Blob> {
+  const offscreenIdle = () => voiced.size === 0 && !micStarting;
+  /** The offscreen page's WAV `id`, read in parts: one message carries at most 64 MiB. */
+  async function readWav(id: number, size: number): Promise<Blob> {
     const parts: Uint8Array<ArrayBuffer>[] = [];
     for (let offset = 0; offset < size; offset += OFFSCREEN_PART_BYTES) {
-      const part: OffscreenReply = await browser.runtime.sendMessage({ target: 'offscreen', kind, id, offset } satisfies OffscreenRequest);
+      const part: OffscreenReply = await browser.runtime.sendMessage({ target: 'offscreen', kind: 'mic-part', id, offset } satisfies OffscreenRequest);
       if (!part.ok || !part.wav) throw new Error(part.ok ? 'the recording broke off' : part.error);
       const bytes = Uint8Array.from(atob(part.wav), (c) => c.charCodeAt(0)) as Uint8Array<ArrayBuffer>;
       // A short part would shift every sample after it.
       if (bytes.length !== Math.min(OFFSCREEN_PART_BYTES, size - offset)) throw new Error('a part of the recording is missing');
       parts.push(bytes);
     }
-    return new Blob(parts, { type });
-  }
-
-  /**
-   * Video mode (Chrome): the tab filmed in the offscreen page, for canvas, WebGL and video that
-   * the DOM recording replays blank. One tab at a time. Without it, the replay alone shows the
-   * tab and a gap says why.
-   */
-  const filmed = new Set<number>();
-  let videoStarting = false;
-  type Film = { startedAt: number; truncated: boolean; webm: Blob };
-  /** The video of a Stop that the app did not take: the next Stop sends it again. */
-  const keptFilm = new Map<number, Film>();
-  async function startVideo(tabId: number) {
-    const gap = (reason: string) => buffer.gap(tabId, 'video', reason);
-    if (import.meta.env.FIREFOX || typeof browser.tabCapture?.getMediaStreamId !== 'function') return gap('Video mode needs Chrome: the replay alone shows this tab');
-    if (filmed.has(tabId)) return;
-    if (filmed.size > 0 || videoStarting) return gap('Video mode already films another tab');
-    if (!(await browser.permissions.contains({ permissions: ['tabCapture'] }).catch(() => false))) {
-      return gap('Video mode needs the permission to film the tab');
-    }
-    videoStarting = true;
-    try {
-      const streamId = await browser.tabCapture.getMediaStreamId({ targetTabId: tabId });
-      const started = await offscreen({ target: 'offscreen', kind: 'video-start', streamId });
-      if (!started.ok) throw new Error(started.error);
-      // The recording ended while the video started.
-      if (!sessions.has(tabId)) await offscreen({ target: 'offscreen', kind: 'video-cancel' });
-      else filmed.add(tabId);
-    } catch (error) {
-      gap(`The tab could not be filmed: ${(error as Error).message}`);
-    } finally {
-      videoStarting = false;
-      checkpoint();
-    }
-    if (offscreenIdle()) await closeMicrophonePage();
-  }
-  async function endVideo(tabId: number, kind: 'video-stop' | 'video-cancel'): Promise<Film | null> {
-    if (!filmed.delete(tabId)) return null;
-    try {
-      const ended = await offscreen({ target: 'offscreen', kind });
-      if (!ended.ok) throw new Error(ended.error);
-      if (kind === 'video-cancel' || !ended.size || ended.id === undefined) return null;
-      if (ended.truncated) buffer.gap(tabId, 'video', 'The video reached 200 MiB and ends there');
-      return { startedAt: ended.startedAt, truncated: ended.truncated ?? false, webm: await readWav(ended.id, ended.size, 'video-part', 'video/webm') };
-    } catch (error) {
-      if (kind === 'video-stop') buffer.gap(tabId, 'video', `The video was lost: ${(error as Error).message}`);
-      return null;
-    } finally {
-      checkpoint();
-      if (offscreenIdle()) await closeMicrophonePage();
-    }
+    return new Blob(parts, { type: 'audio/wav' });
   }
 
   /** Whether the page shows a large canvas (2D or WebGL) or a video: the replay shows them blank. */
@@ -828,10 +773,10 @@ export default defineBackground(() => {
   // A start in progress per tab: a second start (two panels, a double click) gets the same answer
   // instead of starting the microphone again, which would cancel the first start's voice.
   const starting = new Map<number, Promise<SessionStart>>();
-  function startSession(tabId: number, voice = false, videoMode = false): Promise<SessionStart> {
+  function startSession(tabId: number, voice = false): Promise<SessionStart> {
     const running = starting.get(tabId);
     if (running) return running;
-    const start = beginSession(tabId, voice, videoMode).finally(() => starting.delete(tabId));
+    const start = beginSession(tabId, voice).finally(() => starting.delete(tabId));
     starting.set(tabId, start);
     return start;
   }
@@ -849,7 +794,7 @@ export default defineBackground(() => {
     void broadcast({ kind: 'tabChanged', tabId: tabId ?? -1 });
   }
 
-  async function beginSession(tabId: number, voice: boolean, videoMode: boolean): Promise<SessionStart> {
+  async function beginSession(tabId: number, voice: boolean): Promise<SessionStart> {
     if (deep?.isDeclined()) await resumeDebugger(tabId);
     if (buffer.mode(tabId) === undefined) return { ok: false, error: 'Lens does not collect on this site yet.' };
     if (voice && !voiced.has(tabId)) {
@@ -863,7 +808,7 @@ export default defineBackground(() => {
         // The tab stopped collecting while the microphone asked for permission.
         if (buffer.mode(tabId) === undefined) {
           await microphone('mic-cancel').catch(() => {});
-          if (filmed.size === 0 && !videoStarting) await closeMicrophonePage();
+          await closeMicrophonePage();
           return { ok: false, error: 'Lens stopped collecting on this site while the microphone started.' };
         }
         voiced.add(tabId);
@@ -878,7 +823,6 @@ export default defineBackground(() => {
     holdAll(tabId, startedAt);
     checkpoint();
     await browser.tabs.sendMessage(tabId, { kind: 'lens-snapshot' }).catch(() => {});
-    if (videoMode) await startVideo(tabId);
     void broadcast({ kind: 'tabChanged', tabId });
     return { ok: true, startedAt };
   }
@@ -897,8 +841,6 @@ export default defineBackground(() => {
     holdAll(tabId, null);
     // Only the recording kept the tab here, on a site outside the project: it collects nothing there.
     if (off) stop(tabId);
-    keptFilm.delete(tabId);
-    await endVideo(tabId, 'video-cancel');
     await endMicrophone(tabId, 'mic-cancel');
     checkpoint();
     void broadcast({ kind: 'tabChanged', tabId });
@@ -916,15 +858,15 @@ export default defineBackground(() => {
   // A Stop in progress per tab: a second Stop gets the same answer instead of a second capture,
   // which would find the microphone taken and save no voice.
   const stopping = new Map<number, Promise<CaptureResult>>();
-  function stopSession(tabId: number): Promise<CaptureResult> {
+  function stopSession(tabId: number, video?: RecordedVideoRef | null): Promise<CaptureResult> {
     const running = stopping.get(tabId);
     if (running) return running;
-    const stop = endSession(tabId).finally(() => stopping.delete(tabId));
+    const stop = endSession(tabId, video).finally(() => stopping.delete(tabId));
     stopping.set(tabId, stop);
     return stop;
   }
 
-  async function endSession(tabId: number): Promise<CaptureResult> {
+  async function endSession(tabId: number, video?: RecordedVideoRef | null): Promise<CaptureResult> {
     // The tab's latest site and grant first: the worker may have slept through a navigation.
     const tab = await browser.tabs.get(tabId).catch(() => null);
     if (tab) await sync(tabId, tab.url);
@@ -938,17 +880,9 @@ export default defineBackground(() => {
     if (restored.has(tabId)) {
       return { ok: false, error: 'Lens restarted in the background and is picking this recording up again. Press Stop again in a moment' };
     }
-    // The video goes into the evidence as a blob the app holds. Not taken (the app is away): it
-    // stays for Stop again.
-    const film = keptFilm.get(tabId) ?? (await endVideo(tabId, 'video-stop'));
-    keptFilm.delete(tabId);
-    if (film) {
-      // An app older than video mode refuses the type: then the gap says why there is no video.
-      const video = await client()
-        .upload(film.webm, 'video/webm' as Parameters<LensClient['upload']>[1])
-        .catch((error: Error) => (buffer.gap(tabId, 'video', `A Stop could not send the video: ${error.message}`), null));
-      if (video) buffer.record(tabId, 'video', { blob: video, startedAt: film.startedAt, truncated: film.truncated });
-      else keptFilm.set(tabId, film);
+    if (video) {
+      if (video.truncated) buffer.gap(tabId, 'video', 'The video reached 200 MiB and ends there');
+      buffer.record(tabId, 'video', { blob: video.blob, startedAt: video.startedAt, truncated: video.truncated });
     }
     const voiceSoFar = keptVoice.has(tabId)
       ? Promise.resolve(keptVoice.get(tabId) ?? null)
@@ -977,7 +911,6 @@ export default defineBackground(() => {
       return { ok: false, error: `${result.error}. The recording is kept${kept}: press Stop again when the Lens app runs` };
     }
     keptVoice.delete(tabId);
-    keptFilm.delete(tabId);
     dropEvidence(tabId, startedAt);
     sessions.delete(tabId);
     restored.delete(tabId);
@@ -1068,7 +1001,7 @@ export default defineBackground(() => {
     if (message.kind === 'startSession' || message.kind === 'stopSession') {
       ready
         .then((): Promise<SessionStart | CaptureResult> =>
-          message.kind === 'startSession' ? startSession(message.tabId, message.voice, message.videoMode) : stopSession(message.tabId),
+          message.kind === 'startSession' ? startSession(message.tabId, message.voice) : stopSession(message.tabId, message.video),
         )
         .then(reply, (error: Error) => reply({ ok: false, error: error.message }));
       return true;
@@ -1140,7 +1073,6 @@ export default defineBackground(() => {
       restored.add(removed);
       if (gone.off) offProject.add(removed);
       if (gone.voiced) voiced.add(removed);
-      if (gone.filmed) filmed.add(removed);
     }
     // A prerendered page swapped in: to the person it is the same tab, so a recording moves along.
     if (sessions.has(removed)) {
@@ -1162,10 +1094,6 @@ export default defineBackground(() => {
       if (keptVoice.has(removed)) keptVoice.set(added, keptVoice.get(removed)!);
       keptVoice.delete(removed);
       if (voiced.delete(removed)) voiced.add(added);
-      // The film is of the old tab, and ends with it; what it holds still belongs to the recording.
-      if (filmed.delete(removed)) filmed.add(added);
-      if (keptFilm.has(removed)) keptFilm.set(added, keptFilm.get(removed)!);
-      keptFilm.delete(removed);
       if (offProject.delete(removed)) offProject.add(added);
       if (restored.delete(removed)) restored.add(added);
       checkpoint();

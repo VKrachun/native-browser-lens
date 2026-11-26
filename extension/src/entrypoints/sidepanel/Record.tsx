@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import type { LensClient } from '@/lens-client';
-import { NO_ANSWER, send, type CaptureResult, type SessionStart, type TabStatus } from '@/messages';
+import { NO_ANSWER, send, type CaptureResult, type RecordedVideoRef, type SessionStart, type TabStatus } from '@/messages';
 import { MicIcon, StopIcon } from '@/ui/icons';
+import { recordTabVideo, VideoCancelled, type RecordedVideo, type VideoRecording } from '@/video';
 import { MicrophoneBlocked, record, toWav, type Recording } from '@/voice';
 import { purge, spool, spooled, unspool } from '@/voice-spool';
 import type { SpeechStatus } from '@/protocol/SpeechStatus';
@@ -117,7 +118,7 @@ export function RecordControls({
   onProblem: (message: string | null) => void;
 }) {
   const [voice, setVoice] = useStored('lens.voice', true);
-  /** Chrome: also film the tab, for canvas, WebGL and video that the DOM recording replays blank. */
+  /** Also film the tab via getDisplayMedia, for canvas, WebGL and video that the DOM recording replays blank. */
   const [videoMode, setVideoMode] = useStored('lens.videoMode', false);
   const [notice, setNotice] = useState<string | null>(null);
   const [marked, setMarked] = useState(false);
@@ -126,6 +127,10 @@ export function RecordControls({
   /** Firefox: the panel's one microphone, and the tab whose recording it belongs to. */
   const microphone = useRef<Recording | null>(null);
   const microphoneTab = useRef<number | null>(null);
+  /** The tab video recorded in the panel via getDisplayMedia, and which tab it belongs to. */
+  const videoRec = useRef<VideoRecording | null>(null);
+  const videoTab = useRef<number | null>(null);
+  const keptVideo = useRef<{ film: RecordedVideo; tab: number; session: number } | null>(null);
   /** The voice of a Stop that the app did not take: the next Stop in that tab saves it. */
   const keptVoice = useRef<Kept | null>(null);
   /** The recording the panel's microphone spools for, once the background named it. */
@@ -165,20 +170,32 @@ export function RecordControls({
   // Firefox only: closing the panel ends its microphone; the session keeps running in the tab, and
   // the voice so far waits in the spool for its Stop. Chrome records the voice in the background,
   // so it survives the panel.
-  useEffect(() => () => microphone.current?.cancel(), []);
+  useEffect(() => () => (microphone.current?.cancel(), videoRec.current?.cancel()), []);
   const inBackground = !import.meta.env.FIREFOX;
 
   // One start at a time: a second click while the first starts would start the microphone again,
   // and the second start cancels the first one's voice.
   async function start() {
-    if (busy) return;
-    // The first await of the click: Chrome shows the permission prompt only during the gesture.
-    const video =
-      inBackground && videoMode && (await browser.permissions.request({ permissions: ['tabCapture'] }).catch(() => false));
+    if (busy || tabId === null) return;
     setBusy(true);
-    setNotice(inBackground && videoMode && !video ? 'No tab video: the browser did not allow it. Lens records the page and steps.' : null);
+    let film: VideoRecording | null = null;
     try {
-      await begin(video);
+      // The first await of the click: browsers open the screen-share picker only during a user gesture.
+      if (videoMode) {
+        try {
+          film = await recordTabVideo();
+          setNotice(null);
+        } catch (error) {
+          setNotice(
+            error instanceof VideoCancelled
+              ? 'No tab video: screen sharing was cancelled. Lens records the page and steps.'
+              : `No tab video: ${(error as Error).message}. Lens records the page and steps.`,
+          );
+        }
+      } else {
+        setNotice(null);
+      }
+      await begin(film);
     } finally {
       setBusy(false);
     }
@@ -201,13 +218,18 @@ export function RecordControls({
     return () => clearTimeout(timer);
   }, [notice]);
 
-  async function begin(video: boolean) {
-    if (tabId === null) return;
+  async function begin(film: VideoRecording | null) {
+    if (tabId === null) {
+      film?.cancel();
+      return;
+    }
     onProblem(null);
     if (voice && !inBackground) {
       // One microphone: a recording with voice in another tab keeps it until its Stop.
-      if (microphone.current && microphoneTab.current !== tabId)
+      if (microphone.current && microphoneTab.current !== tabId) {
+        film?.cancel();
         return onProblem('Stop the recording in the other tab first: it is using the microphone.');
+      }
       try {
         // Earlier recordings of this tab are over: their voice can only be stale now.
         await purge((entry) => entry.tab !== tabId);
@@ -225,6 +247,7 @@ export function RecordControls({
         });
         microphoneTab.current = tabId;
       } catch (error) {
+        film?.cancel();
         if (error instanceof MicrophoneBlocked) {
           await browser.tabs.create({ url: browser.runtime.getURL('/microphone.html') });
           return onProblem('Allow the microphone in the tab that opened, then press Record again.');
@@ -232,8 +255,9 @@ export function RecordControls({
         return onProblem(`The microphone did not start: ${(error as Error).message}`);
       }
     }
-    const started = (await send<SessionStart>({ kind: 'startSession', tabId, voice: voice && inBackground, videoMode: video })) ?? NO_ANSWER;
+    const started = (await send<SessionStart>({ kind: 'startSession', tabId, voice: voice && inBackground })) ?? NO_ANSWER;
     if (!started.ok) {
+      film?.cancel();
       if (microphoneTab.current === tabId) {
         microphone.current?.cancel();
         microphone.current = microphoneTab.current = null;
@@ -243,6 +267,11 @@ export function RecordControls({
         return onProblem('Allow the microphone in the tab that opened, then press Record again.');
       }
       return onProblem(started.error);
+    }
+    if (film) {
+      videoRec.current?.cancel();
+      videoRec.current = film;
+      videoTab.current = tabId;
     }
     if (microphoneTab.current === tabId) spoolFor.current = started.startedAt;
     setNow(Date.now());
@@ -256,16 +285,30 @@ export function RecordControls({
     const mine = microphoneTab.current === tabId;
     const spoken = mine ? microphone.current : null;
     if (mine) microphone.current = microphoneTab.current = null;
+    const mineVideo = videoTab.current === tabId;
+    const activeVideo = mineVideo ? videoRec.current : null;
+    if (mineVideo) videoRec.current = videoTab.current = null;
     try {
       const mineKept = keptVoice.current?.tab === tabId && keptVoice.current.session === session;
       const kept = mineKept ? keptVoice.current : spoken ? null : await fromSpool(tabId, session);
+      const mineKeptVideo = keptVideo.current?.tab === tabId && keptVideo.current.session === session;
+      const film = mineKeptVideo ? keptVideo.current!.film : activeVideo ? await activeVideo.stop().catch(() => null) : null;
+      let uploadedVideo: RecordedVideoRef | null = null;
+      if (film) {
+        const blob = await client
+          .upload(film.webm, 'video/webm' as Parameters<LensClient['upload']>[1])
+          .catch(() => null);
+        if (blob) uploadedVideo = { blob, startedAt: film.startedAt, truncated: film.truncated };
+        else keptVideo.current = { film, tab: tabId, session };
+      }
       const [result, wav] = await Promise.all([
-        send<CaptureResult>({ kind: 'stopSession', tabId }).then((reply) => reply ?? NO_ANSWER),
+        send<CaptureResult>({ kind: 'stopSession', tabId, video: uploadedVideo }).then((reply) => reply ?? NO_ANSWER),
         kept ? Promise.resolve(kept.wav) : spoken ? spoken.stop() : Promise.resolve(null),
       ]);
       const startedAt = kept?.startedAt ?? spoken?.startedAt;
       if (!result.ok) {
         setFailedStop(session);
+        if (film) keptVideo.current = { film, tab: tabId, session };
         // The background keeps the session; the voice waits here for Stop again.
         if (wav && startedAt !== undefined) {
           keptVoice.current = { wav, startedAt, tab: tabId, session };
@@ -279,6 +322,7 @@ export function RecordControls({
         return onProblem(`The recording was not saved: ${result.error}`);
       }
       if (kept) keptVoice.current = null;
+      if (film) keptVideo.current = null;
       setFailedStop(null);
       // The recording is saved: a voice note that fails says so, and the review still opens.
       let voiceProblem: string | null = null;
@@ -319,7 +363,12 @@ export function RecordControls({
         microphone.current?.cancel();
         microphone.current = microphoneTab.current = null;
       }
+      if (videoTab.current === tabId) {
+        videoRec.current?.cancel();
+        videoRec.current = videoTab.current = null;
+      }
       keptVoice.current = null;
+      keptVideo.current = null;
       await unspool(tabId, running).catch(() => {});
       setFailedStop(null);
       onProblem(null);
@@ -339,7 +388,7 @@ export function RecordControls({
         {/* The status is what is recorded, not the clock: a ticking live region reads out every second. */}
         <span className="small muted record-what" role="status" aria-label="Recording">
           {microphone.current || keptVoice.current || site?.voice ? 'Screen, steps and your voice' : 'Screen and steps'}
-          {site?.videoMode && ' · video'}
+          {(videoTab.current === tabId || keptVideo.current?.tab === tabId) && ' · video'}
         </span>
         <button
           type="button"
@@ -398,18 +447,16 @@ export function RecordControls({
           onCancel={() => client.request({ method: 'cancelSpeechDownload' }).then(setSpeech)}
         />
       )}
-      {inBackground && (
-        <label className="check">
-          <input type="checkbox" checked={videoMode} onChange={(e) => setVideoMode(e.target.checked)} />
-          <span>
-            Video mode
-            <span className="small muted" style={{ display: 'block' }}>
-              Record tab video for canvas, WebGL and video
-            </span>
+      <label className="check">
+        <input type="checkbox" checked={videoMode} onChange={(e) => setVideoMode(e.target.checked)} />
+        <span>
+          Video mode
+          <span className="small muted" style={{ display: 'block' }}>
+            Record tab video for canvas, WebGL and video (keep panel open)
           </span>
-        </label>
-      )}
-      {inBackground && !videoMode && site?.hasHeavyMedia && (
+        </span>
+      </label>
+      {!videoMode && site?.hasHeavyMedia && (
         <p className="small muted record-hint" role="note">
           Canvas or video detected on this page — turn on Video mode to capture pixels.
         </p>
