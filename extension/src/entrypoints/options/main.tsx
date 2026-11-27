@@ -5,6 +5,7 @@ import {
   getLlmConfig,
   listProviderModels,
   saveLlmConfig,
+  testLlmConnection,
   type LlmConfig,
   type LlmProvider,
 } from '@/engine/llm';
@@ -341,6 +342,8 @@ function Models() {
   const [config, setConfig] = useState<LlmConfig | null>(null);
   const [liveModels, setLiveModels] = useState<string[]>([]);
   const [loadingModels, setLoadingModels] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<string | null>(null);
   const [savedNotice, setSavedNotice] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
 
@@ -373,8 +376,12 @@ function Models() {
   }, [activeProvider, activeKey]);
 
   useEffect(() => {
-    if (activeProvider && activeKey) void refreshModels();
-    else setLiveModels([]);
+    if (!activeProvider || activeKey.trim().length < 10) {
+      setLiveModels([]);
+      return;
+    }
+    const timer = setTimeout(() => void refreshModels(), 600);
+    return () => clearTimeout(timer);
   }, [activeProvider, activeKey, refreshModels]);
 
   if (!config) return problem ? <Problem text={problem} /> : null;
@@ -457,13 +464,9 @@ function Models() {
           className="input"
           type="password"
           autoComplete="off"
-          defaultValue={config.keys.openrouter}
+          value={config.keys.openrouter}
           placeholder="sk-or-v1-..."
-          onBlur={(e) => {
-            if (e.target.value.trim() !== config.keys.openrouter) {
-              void update({ keys: { ...config.keys, openrouter: e.target.value.trim() } });
-            }
-          }}
+          onChange={(e) => void update({ keys: { ...config.keys, openrouter: e.target.value } })}
         />
       </div>
 
@@ -476,13 +479,9 @@ function Models() {
           className="input"
           type="password"
           autoComplete="off"
-          defaultValue={config.keys.anthropic}
+          value={config.keys.anthropic}
           placeholder="sk-ant-..."
-          onBlur={(e) => {
-            if (e.target.value.trim() !== config.keys.anthropic) {
-              void update({ keys: { ...config.keys, anthropic: e.target.value.trim() } });
-            }
-          }}
+          onChange={(e) => void update({ keys: { ...config.keys, anthropic: e.target.value } })}
         />
       </div>
 
@@ -495,13 +494,9 @@ function Models() {
           className="input"
           type="password"
           autoComplete="off"
-          defaultValue={config.keys.openai}
+          value={config.keys.openai}
           placeholder="sk-..."
-          onBlur={(e) => {
-            if (e.target.value.trim() !== config.keys.openai) {
-              void update({ keys: { ...config.keys, openai: e.target.value.trim() } });
-            }
-          }}
+          onChange={(e) => void update({ keys: { ...config.keys, openai: e.target.value } })}
         />
       </div>
 
@@ -514,13 +509,9 @@ function Models() {
           className="input"
           type="password"
           autoComplete="off"
-          defaultValue={config.keys.gemini}
+          value={config.keys.gemini}
           placeholder="AIza..."
-          onBlur={(e) => {
-            if (e.target.value.trim() !== config.keys.gemini) {
-              void update({ keys: { ...config.keys, gemini: e.target.value.trim() } });
-            }
-          }}
+          onChange={(e) => void update({ keys: { ...config.keys, gemini: e.target.value } })}
         />
       </div>
 
@@ -560,6 +551,32 @@ function Models() {
           ))}
         </datalist>
       </div>
+
+      {activeProvider && activeKey && (
+        <div className="actions">
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            disabled={testing}
+            onClick={() => {
+              setTesting(true);
+              setTestResult(null);
+              setProblem(null);
+              void testLlmConnection()
+                .then((res) => setTestResult(`Connected: ${res.provider} (${res.model})`))
+                .catch((error: Error) => setProblem(error.message))
+                .finally(() => setTesting(false));
+            }}
+          >
+            {testing ? 'Testing…' : 'Test API key'}
+          </button>
+          {testResult && (
+            <span className="small" role="status">
+              <DoneIcon size={14} /> {testResult}
+            </span>
+          )}
+        </div>
+      )}
 
       {savedNotice && (
         <p className="small muted" role="status">

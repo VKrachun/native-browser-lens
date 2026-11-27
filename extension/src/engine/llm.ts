@@ -119,16 +119,28 @@ export async function saveLlmConfig(patch: Partial<LlmConfig>): Promise<LlmConfi
 }
 
 function resolveProvider(cfg: LlmConfig, requested?: LlmProvider | Agent | null): { provider: LlmProvider; apiKey: string; model: string } {
+  const all: LlmProvider[] = ['openrouter', 'anthropic', 'openai', 'gemini'];
   const mapAgent = (a: LlmProvider | Agent | null | undefined): LlmProvider | null => {
     if (!a) return null;
     if (a === 'claude') return 'anthropic';
     if (a === 'codex') return 'openai';
     return a;
   };
-  const preferred = mapAgent(requested) ?? cfg.provider;
-  const order: LlmProvider[] = preferred
-    ? [preferred]
-    : ['openrouter', 'anthropic', 'openai', 'gemini'];
+  const isLegacyAgent = requested === 'claude' || requested === 'codex';
+  const explicitProvider = !isLegacyAgent ? mapAgent(requested) : null;
+
+  // Respect the user's selected provider first; for legacy 'claude'/'codex' buttons, fall back to any configured key (e.g. OpenRouter/Gemini).
+  const order: LlmProvider[] = [];
+  const push = (p: LlmProvider | null) => {
+    if (p && !order.includes(p)) order.push(p);
+  };
+  if (explicitProvider) {
+    push(explicitProvider);
+  } else {
+    push(cfg.provider);
+    if (isLegacyAgent) push(mapAgent(requested));
+    for (const p of all) push(p);
+  }
 
   for (const p of order) {
     const key = cfg.keys[p]?.trim();
@@ -141,6 +153,36 @@ function resolveProvider(cfg: LlmConfig, requested?: LlmProvider | Agent | null)
     'auth',
     'No AI API key configured. Add an OpenRouter, Anthropic, OpenAI, or Gemini API key in Settings.',
   );
+}
+
+/** Returns the provider & model that will currently be used, or null if no key is configured. */
+export function activeLlmSummary(cfg: LlmConfig): { provider: LlmProvider; label: string; model: string } | null {
+  try {
+    const r = resolveProvider(cfg);
+    const names: Record<LlmProvider, string> = {
+      openrouter: 'OpenRouter',
+      anthropic: 'Anthropic',
+      openai: 'OpenAI',
+      gemini: 'Gemini',
+    };
+    return { provider: r.provider, label: names[r.provider], model: r.model };
+  } catch {
+    return null;
+  }
+}
+
+/** Sends a tiny JSON ping to verify the currently configured API key + model work end-to-end. */
+export async function testLlmConnection(): Promise<{ provider: LlmProvider; model: string }> {
+  const cfg = await getLlmConfig();
+  const { provider, apiKey, model } = resolveProvider(cfg);
+  await callJsonLlm(
+    provider,
+    apiKey,
+    model,
+    'Return {"ok":true} as JSON only.',
+    'Ping. Respond with {"ok":true}.',
+  );
+  return { provider, model };
 }
 
 /** Legacy protocol compatibility wrappers so Review.tsx keeps working cleanly. */
@@ -272,18 +314,28 @@ async function callJsonLlm(
       },
       body: JSON.stringify({
         model,
-        response_format: { type: 'json_object' },
+        // Direct OpenAI supports json_object reliably; OpenRouter routes to many providers (e.g. Anthropic) where json_object can 400.
+        ...(provider === 'openai' ? { response_format: { type: 'json_object' } } : {}),
         messages: [
-          { role: 'system', content: `${system}\nReturn valid JSON only.` },
+          { role: 'system', content: `${system}\nReturn valid JSON only with no markdown fences or extra text.` },
           { role: 'user', content },
         ],
       }),
     });
     if (!res.ok) {
-      const err = await res.text().catch(() => '');
+      const errText = await res.text().catch(() => '');
+      let detail = errText.slice(0, 240);
+      try {
+        const parsed = JSON.parse(errText) as { error?: { message?: string; metadata?: { raw?: string } } };
+        if (parsed.error?.message) {
+          detail = parsed.error.metadata?.raw ? `${parsed.error.message} (${parsed.error.metadata.raw})` : parsed.error.message;
+        }
+      } catch {
+        // keep raw snippet
+      }
       throw new LensError(
         res.status === 401 ? 'auth' : 'internal',
-        `${provider === 'openrouter' ? 'OpenRouter' : 'OpenAI'} API error (${res.status}): ${err.slice(0, 200)}`,
+        `${provider === 'openrouter' ? 'OpenRouter' : 'OpenAI'} API error (${res.status}): ${detail}`,
       );
     }
     const body = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };

@@ -124,7 +124,7 @@ describe('in-extension LensClient + engine', () => {
 
   it('files reviews to VibeQ durably via fetch', async () => {
     const client = new LensClient();
-    const fetchMock = vi.fn(async (url: string | URL) => {
+    const fetchMock = vi.fn(async (url: string | URL, _init?: RequestInit) => {
       const s = String(url);
       if (s.endsWith('/auth/me')) {
         return new Response(JSON.stringify({ id: 'u1', name: 'Igor' }), { status: 200 });
@@ -264,7 +264,7 @@ describe('in-extension LensClient + engine', () => {
       keys: { openrouter: 'sk-or-v1-test', anthropic: '', openai: '', gemini: '' },
     });
 
-    const fetchMock = vi.fn(async (url: string | URL) => {
+    const fetchMock = vi.fn(async (url: string | URL, _init?: RequestInit) => {
       const s = String(url);
       if (s === 'https://openrouter.ai/api/v1/models') {
         return new Response(JSON.stringify({ data: [{ id: 'anthropic/claude-haiku-5.5' }, { id: 'openai/gpt-5.4-mini' }] }), { status: 200 });
@@ -298,5 +298,32 @@ describe('in-extension LensClient + engine', () => {
       'https://openrouter.ai/api/v1/chat/completions',
       expect.objectContaining({ method: 'POST' }),
     );
+    // OpenRouter must not send OpenAI-only response_format (breaks Anthropic models on OpenRouter).
+    const reqInit = fetchMock.mock.calls.find((c) => String(c[0]).includes('chat/completions'))?.[1];
+    expect(JSON.parse(String(reqInit?.body ?? '{}')).response_format).toBeUndefined();
+
+    // Legacy 'claude' investigate call must still route through OpenRouter when only OpenRouter is configured.
+    const obs = await client.request({ method: 'getObservation', params: { id: cap.observation } });
+    const rev = await client.request({
+      method: 'createReview',
+      params: {
+        observation: obs.id,
+        revision: obs.revision,
+        captures: [cap.id],
+        recordings: [],
+        typedValues: true,
+        screenshotsChecked: true,
+      },
+    });
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          choices: [{ message: { content: JSON.stringify({ markdown: '## Bug\nPay returned 402.', findings: [] }) } }],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+    const suggestion = await client.request({ method: 'investigate', params: { review: rev.id, agent: 'claude' } });
+    expect(suggestion.markdown).toContain('Pay returned 402');
   });
 });

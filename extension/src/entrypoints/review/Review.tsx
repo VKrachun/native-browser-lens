@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { activeLlmSummary, getLlmConfig } from '@/engine/llm';
 import { enqueueTranscription } from '@/engine/speech';
 import { LensClient, LensError } from '@/lens-client';
 import { originOf } from '@/messages';
@@ -63,6 +64,7 @@ export function Review({ observation: id }: { observation: number }) {
   const [startingReview, setStarting] = useState<number | null>(null);
   const starting = review !== null && startingReview === review.id;
   const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [aiLabel, setAiLabel] = useState<string | null>(null);
   const [drafting, setDrafting] = useState<Agent | null>(null);
   const [suggestion, setSuggestion] = useState<Suggestion | null>(null);
   const [usingDraft, setUsingDraft] = useState(false);
@@ -318,6 +320,12 @@ export function Review({ observation: id }: { observation: number }) {
       .request({ method: 'listAgents' })
       .then(setAgents)
       .catch(() => setAgents([]));
+    void getLlmConfig()
+      .then((cfg) => {
+        const active = activeLlmSummary(cfg);
+        setAiLabel(active ? `${active.label} (${active.model})` : null);
+      })
+      .catch(() => setAiLabel(null));
   }, [client, review]);
 
   useEffect(() => {
@@ -472,18 +480,18 @@ export function Review({ observation: id }: { observation: number }) {
           <Handoff state={handoff} review={review.id} />
 
           <footer className="action-bar">
-            {readyAgents.map((a) => (
+            {readyAgents.length > 0 && (
               <button
-                key={a.agent}
                 type="button"
                 className="btn btn-ghost"
-                onClick={() => void draft(a.agent)}
+                onClick={() => void draft(readyAgents[0]!.agent)}
                 disabled={drafting !== null}
+                title={aiLabel ?? undefined}
               >
                 <DraftIcon />
-                {drafting === a.agent ? 'Drafting…' : `Draft the report with ${name(a.agent)}`}
+                {drafting !== null ? 'Drafting…' : aiLabel ? `Draft report with ${aiLabel.split(' ')[0]}` : 'Draft report with AI'}
               </button>
-            ))}
+            )}
             <span className="spacer" />
             <button
               type="button"
@@ -567,7 +575,7 @@ export function Review({ observation: id }: { observation: number }) {
           <section className="card summary" aria-label="Title and findings">
             <Notes key={notesVersion} client={client} id={id} onSaved={() => {}} flushRef={flushNotes} />
             <p className="small muted summary-state" role="status" aria-label="Summary">
-              {summary.state === 'running' && <Running text="Claude is writing a title and the findings…" />}
+              {summary.state === 'running' && <Running text="AI is writing a title and the findings…" />}
               {summary.state === 'idle' && findingsOff && <>Automatic findings are off in Settings.</>}
               {summary.state === 'idle' && !findingsOff && waitingForWords && <>The title and findings follow once your words are written down.</>}
               {summary.state === 'done' && <>{summary.label} wrote the title and the findings. Edit them as you like.</>}
