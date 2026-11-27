@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  defaultLocalSpeechModel,
   getSpeechConfig,
   LOCAL_WHISPER_MODELS,
   saveSpeechConfig,
@@ -97,7 +98,7 @@ export function Voice({ client }: { client: LensClient }) {
               onChange={() =>
                 void save({
                   backend: value,
-                  model: value === 'local' ? 'parakeet-v3' : value === 'groq' ? 'whisper-large-v3-turbo' : 'whisper-1',
+                  model: value === 'local' ? defaultLocalSpeechModel() : value === 'groq' ? 'whisper-large-v3-turbo' : 'whisper-1',
                 })
               }
             />
@@ -137,6 +138,12 @@ export function Voice({ client }: { client: LensClient }) {
               </label>
             ))}
           </div>
+          {import.meta.env.FIREFOX === true && (
+            <p className="small muted">
+              On Firefox, Whisper base (~75 MB) runs fastest and stays well under Firefox&apos;s extension memory limit;
+              Parakeet TDT uses ~2 GB RAM on WASM.
+            </p>
+          )}
         </>
       )}
 
