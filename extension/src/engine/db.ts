@@ -35,13 +35,20 @@ import {
 } from './helpers';
 
 const DB_NAME = 'sirv-lens-v1';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 export interface StoredBlob {
   sha256: string;
   size: number;
   mediaType: string;
   bytes: ArrayBuffer;
+  createdAt: number;
+}
+
+export interface StoredBlobMeta {
+  sha256: string;
+  size: number;
+  mediaType: string;
   createdAt: number;
 }
 
@@ -94,6 +101,21 @@ export function openDb(): Promise<IDBDatabase> {
       const db = req.result;
       if (!db.objectStoreNames.contains('counters')) db.createObjectStore('counters', { keyPath: 'name' });
       if (!db.objectStoreNames.contains('blobs')) db.createObjectStore('blobs', { keyPath: 'sha256' });
+      if (!db.objectStoreNames.contains('blobMeta')) {
+        const metaStore = db.createObjectStore('blobMeta', { keyPath: 'sha256' });
+        // Backfill lightweight metadata from existing v1 blobs without loading all blobs into memory at once.
+        const upgradeTx = req.transaction;
+        if (upgradeTx && db.objectStoreNames.contains('blobs')) {
+          const cursorReq = upgradeTx.objectStore('blobs').openCursor();
+          cursorReq.onsuccess = () => {
+            const cursor = cursorReq.result;
+            if (!cursor) return;
+            const b = cursor.value as StoredBlob;
+            metaStore.put({ sha256: b.sha256, size: b.size, mediaType: b.mediaType, createdAt: b.createdAt });
+            cursor.continue();
+          };
+        }
+      }
       if (!db.objectStoreNames.contains('observations')) db.createObjectStore('observations', { keyPath: 'id' });
       if (!db.objectStoreNames.contains('captures')) {
         const s = db.createObjectStore('captures', { keyPath: 'id' });
@@ -157,23 +179,36 @@ async function nextId(tx: IDBTransaction, name: string): Promise<number> {
 // Blobs
 // ---------------------------------------------------------------------------
 
+const textDecoder = new TextDecoder();
+
 export async function putBlob(data: Blob | Uint8Array | ArrayBuffer, mediaType: string): Promise<BlobRef> {
   let bytes: ArrayBuffer;
   if (data instanceof Blob) {
     bytes = await data.arrayBuffer();
   } else if (data instanceof Uint8Array) {
-    const copy = new Uint8Array(data.byteLength);
-    copy.set(data);
-    bytes = copy.buffer;
+    if (data.byteOffset === 0 && data.byteLength === data.buffer.byteLength && data.buffer instanceof ArrayBuffer) {
+      bytes = data.buffer;
+    } else {
+      const copy = new Uint8Array(data.byteLength);
+      copy.set(data);
+      bytes = copy.buffer;
+    }
   } else {
-    bytes = data.slice(0);
+    bytes = data;
   }
   const sha256 = await sha256Hex(bytes);
   const size = bytes.byteLength;
+  const now = Date.now();
   const db = await openDb();
-  const tx = db.transaction('blobs', 'readwrite');
-  const record: StoredBlob = { sha256, size, mediaType, bytes, createdAt: Date.now() };
-  await reqPromise(tx.objectStore('blobs').put(record));
+  const tx = db.transaction(['blobs', 'blobMeta'], 'readwrite');
+  const metaStore = tx.objectStore('blobMeta');
+  const existing = (await reqPromise(metaStore.get(sha256))) as StoredBlobMeta | undefined;
+  if (!existing) {
+    const record: StoredBlob = { sha256, size, mediaType, bytes, createdAt: now };
+    await reqPromise(tx.objectStore('blobs').put(record));
+  }
+  const meta: StoredBlobMeta = { sha256, size, mediaType: existing?.mediaType ?? mediaType, createdAt: now };
+  await reqPromise(metaStore.put(meta));
   await txDone(tx);
   return { sha256, size, mediaType };
 }
@@ -184,7 +219,8 @@ export async function getBlob(sha256: string): Promise<{ ref: BlobRef; bytes: Ui
   const tx = db.transaction('blobs', 'readonly');
   const found = (await reqPromise(tx.objectStore('blobs').get(sha256))) as StoredBlob | undefined;
   if (!found) return null;
-  const bytes = new Uint8Array(found.bytes.slice(0));
+  // IndexedDB already returns a freshly structured-cloned ArrayBuffer; no extra copy needed.
+  const bytes = new Uint8Array(found.bytes);
   return {
     ref: { sha256: found.sha256, size: found.size, mediaType: found.mediaType },
     bytes,
@@ -200,7 +236,7 @@ export async function getBlobAsBlob(ref: BlobRef): Promise<Blob> {
 export async function getBlobJson<T = unknown>(ref: BlobRef): Promise<T> {
   const found = await getBlob(ref.sha256);
   if (!found) throw notFound(`Blob ${ref.sha256} not found`);
-  return JSON.parse(new TextDecoder().decode(found.bytes)) as T;
+  return JSON.parse(textDecoder.decode(found.bytes)) as T;
 }
 
 // ---------------------------------------------------------------------------
@@ -895,9 +931,10 @@ export async function saveFilingAttempt(attempt: StoredFilingAttempt): Promise<v
 
 export async function getStorageUsage(): Promise<StorageUsage> {
   const db = await openDb();
-  const tx = db.transaction(['blobs', 'observations', 'reviews', 'settings'], 'readonly');
+  // Read lightweight blobMeta (~80 B/entry) instead of loading multi-MB binary payloads into RAM.
+  const tx = db.transaction(['blobMeta', 'observations', 'reviews', 'settings'], 'readonly');
   const [blobs, obsCount, reviewCount, retDaysRow, retFiledRow] = await Promise.all([
-    reqPromise(tx.objectStore('blobs').getAll()) as Promise<StoredBlob[]>,
+    reqPromise(tx.objectStore('blobMeta').getAll()) as Promise<StoredBlobMeta[]>,
     reqPromise(tx.objectStore('observations').count()),
     reqPromise(tx.objectStore('reviews').count()),
     reqPromise(tx.objectStore('settings').get('storage.retention.days')) as Promise<{ value: number | null } | undefined>,
@@ -930,8 +967,8 @@ export async function getStorageUsage(): Promise<StorageUsage> {
     if (typeof caches !== 'undefined') {
       const cache = await caches.open('transformers-cache');
       const keys = await cache.keys();
-      for (const req of keys) {
-        const res = await cache.match(req);
+      const responses = await Promise.all(keys.map((req) => cache.match(req)));
+      for (const res of responses) {
         const len = Number(res?.headers.get('content-length') ?? 0);
         if (len > 0) modelsBytes += len;
       }
@@ -968,13 +1005,13 @@ const SHA_RE = /[0-9a-f]{64}/g;
 
 export async function sweepOrphanBlobs(graceMs = 3600_000): Promise<number> {
   const db = await openDb();
-  const readTx = db.transaction(['captures', 'voiceNotes', 'reviews', 'filings', 'blobs'], 'readonly');
+  const readTx = db.transaction(['captures', 'voiceNotes', 'reviews', 'filings', 'blobMeta'], 'readonly');
   const [captures, voices, reviews, filings, blobs] = await Promise.all([
     reqPromise(readTx.objectStore('captures').getAll()),
     reqPromise(readTx.objectStore('voiceNotes').getAll()),
     reqPromise(readTx.objectStore('reviews').getAll()),
     reqPromise(readTx.objectStore('filings').getAll()),
-    reqPromise(readTx.objectStore('blobs').getAll()) as Promise<StoredBlob[]>,
+    reqPromise(readTx.objectStore('blobMeta').getAll()) as Promise<StoredBlobMeta[]>,
   ]);
 
   const keep = new Set<string>();
@@ -994,10 +1031,13 @@ export async function sweepOrphanBlobs(graceMs = 3600_000): Promise<number> {
   if (toDelete.length === 0) return 0;
 
   let freed = 0;
-  const writeTx = db.transaction('blobs', 'readwrite');
+  const writeTx = db.transaction(['blobs', 'blobMeta'], 'readwrite');
+  const blobStore = writeTx.objectStore('blobs');
+  const metaStore = writeTx.objectStore('blobMeta');
   for (const b of toDelete) {
     freed += b.size;
-    await reqPromise(writeTx.objectStore('blobs').delete(b.sha256));
+    blobStore.delete(b.sha256);
+    metaStore.delete(b.sha256);
   }
   await txDone(writeTx);
   return freed;

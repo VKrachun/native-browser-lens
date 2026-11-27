@@ -1,4 +1,4 @@
-import { zipSync } from 'fflate';
+import { zipSync, type Zippable } from 'fflate';
 import type { BlobRef } from '@/protocol/BlobRef';
 import type { Capture } from '@/protocol/Capture';
 import type { Evidence } from '@/protocol/Evidence';
@@ -36,7 +36,14 @@ import {
 } from './repro';
 
 const MAX_ATTACHMENTS = 64;
-const EXTENSION_VERSION = '1.0.0';
+
+function getExtensionVersion(): string {
+  try {
+    return browser.runtime.getManifest().version;
+  } catch {
+    return '0.13.0';
+  }
+}
 
 /** Freezes an observation into an immutable Review (matching Rust `daemon/review.rs`). */
 export async function createReview(req: ReviewRequest): Promise<Review> {
@@ -224,15 +231,14 @@ export interface ReviewBundle {
   files: Map<string, { bytes: Uint8Array<ArrayBuffer>; contentType: string }>;
 }
 
+const textEncoder = new TextEncoder();
+
 /** Materializes every export/filing/MCP file for a frozen Review. */
 export async function buildReviewBundle(review: Review): Promise<ReviewBundle> {
-  const enc = new TextEncoder();
   const files = new Map<string, { bytes: Uint8Array<ArrayBuffer>; contentType: string }>();
   const addText = (name: string, text: string, contentType: string) => {
-    const u8 = enc.encode(text);
-    const copy = new Uint8Array(u8.byteLength);
-    copy.set(u8);
-    files.set(name, { bytes: copy, contentType });
+    const u8 = textEncoder.encode(text) as Uint8Array<ArrayBuffer>;
+    files.set(name, { bytes: u8, contentType });
   };
 
   const md: string[] = [`# ${escapeMdHeading(review.title)}`];
@@ -261,7 +267,7 @@ export async function buildReviewBundle(review: Review): Promise<ReviewBundle> {
     const har = buildHar(evidence);
     const hasHar = har.log.entries.length > 0;
     const spec = buildPlaywrightSpec(evidence, n, review.title, item.pageUrl, { hasHar });
-    const lensCapture = await buildLensCapture(review, item, evidence, EXTENSION_VERSION);
+    const lensCapture = await buildLensCapture(review, item, evidence, getExtensionVersion());
 
     addText(`capture-${n}-evidence.json`, JSON.stringify(evidence, null, 2), 'application/json');
     addText(`capture-${n}.lens.json`, lensCapture, 'application/vnd.sirv.lens-capture+json');
@@ -269,35 +275,33 @@ export async function buildReviewBundle(review: Review): Promise<ReviewBundle> {
     addText(`capture-${n}.spec.ts`, spec, 'text/typescript; charset=utf-8');
     if (hasHar) addText(`capture-${n}.har`, JSON.stringify(har, null, 2), 'application/json');
 
-    if (filesEndScreenshot(item)) {
-      const png = await getBlob(item.screenshot.sha256);
-      if (png) files.set(`capture-${n}.png`, { bytes: png.bytes, contentType: 'image/png' });
-    }
-    if (item.recording) {
-      const rec = await getBlob(item.recording.sha256);
-      if (rec) files.set(`capture-${n}.rrweb.json`, { bytes: rec.bytes, contentType: 'application/vnd.rrweb+json' });
-    }
-    for (let k = 0; k < item.shots.length; k += 1) {
-      const shot = await getBlob(item.shots[k]!.image.sha256);
-      if (shot) files.set(`capture-${n}-shot-${k + 1}.webp`, { bytes: shot.bytes, contentType: 'image/webp' });
-    }
-
-    // Optional tab video attachment (WebM)
-    let hasVideo = false;
+    // Fetch binary attachments in parallel instead of serially awaiting IndexedDB.
+    let videoSha: string | null = null;
     for (const ev of evidence.events) {
       if (ev.kind === 'video' && ev.data && typeof ev.data === 'object') {
         const d = ev.data as Record<string, unknown>;
         const blob = (d.blob ?? d.video ?? d) as Record<string, unknown>;
         if (typeof blob.sha256 === 'string') {
-          const webm = await getBlob(blob.sha256);
-          if (webm) {
-            files.set(`capture-${n}.webm`, { bytes: webm.bytes, contentType: 'video/webm' });
-            hasVideo = true;
-            break;
-          }
+          videoSha = blob.sha256;
+          break;
         }
       }
     }
+
+    const [png, rec, webm, shotBlobs] = await Promise.all([
+      filesEndScreenshot(item) ? getBlob(item.screenshot.sha256) : Promise.resolve(null),
+      item.recording ? getBlob(item.recording.sha256) : Promise.resolve(null),
+      videoSha ? getBlob(videoSha) : Promise.resolve(null),
+      Promise.all(item.shots.map((s) => getBlob(s.image.sha256))),
+    ]);
+
+    if (png) files.set(`capture-${n}.png`, { bytes: png.bytes, contentType: 'image/png' });
+    if (rec) files.set(`capture-${n}.rrweb.json`, { bytes: rec.bytes, contentType: 'application/vnd.rrweb+json' });
+    shotBlobs.forEach((shot, k) => {
+      if (shot) files.set(`capture-${n}-shot-${k + 1}.webp`, { bytes: shot.bytes, contentType: 'image/webp' });
+    });
+    const hasVideo = Boolean(webm);
+    if (webm) files.set(`capture-${n}.webm`, { bytes: webm.bytes, contentType: 'video/webm' });
 
     md.push('', `## ${item.kind === 'session' ? 'Recording' : 'Capture'} ${n}`);
     if (item.pageUrl) md.push(`Page: ${item.pageTitle ? `${item.pageTitle} (${item.pageUrl})` : item.pageUrl}`);
@@ -325,6 +329,8 @@ export async function buildReviewBundle(review: Review): Promise<ReviewBundle> {
   return { reportMarkdown, files };
 }
 
+const ALREADY_COMPRESSED_EXT = /\.(png|webp|webm|mp4|jpe?g|gif|woff2?)$/i;
+
 /** Creates the evidence ZIP bytes (`lens-review-<id>-evidence.zip`) in pure JS via fflate. */
 export async function buildEvidenceZip(reviewId: number): Promise<{ filename: string; bytes: Uint8Array<ArrayBuffer> }> {
   const stored = await getStoredReview(reviewId);
@@ -332,14 +338,15 @@ export async function buildEvidenceZip(reviewId: number): Promise<{ filename: st
   const bundle = await buildReviewBundle(review);
   const folder = `lens-review-${review.id}-${slugify(review.title)}`;
 
-  const entries: Record<string, Uint8Array> = {};
+  const entries: Zippable = {};
   for (const [name, entry] of bundle.files) {
-    entries[`${folder}/${name}`] = entry.bytes;
+    // Store already-compressed binary media (PNG/WebP/WebM) at level 0 to avoid seconds of wasted JS deflate CPU.
+    entries[`${folder}/${name}`] = ALREADY_COMPRESSED_EXT.test(name)
+      ? [entry.bytes, { level: 0 }]
+      : [entry.bytes, { level: 6 }];
   }
-  const zipped = zipSync(entries, { level: 6 });
-  const copy = new Uint8Array(zipped.byteLength);
-  copy.set(zipped);
-  return { filename: `lens-review-${review.id}-evidence.zip`, bytes: copy };
+  const zipped = zipSync(entries) as Uint8Array<ArrayBuffer>;
+  return { filename: `lens-review-${review.id}-evidence.zip`, bytes: zipped };
 }
 
 /** Triggers a browser download of a Blob (works in any extension page with zero extra permissions). */

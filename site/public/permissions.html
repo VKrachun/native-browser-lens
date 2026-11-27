@@ -37,7 +37,6 @@
       <thead><tr><th>Permission</th><th>Why Lens needs it</th></tr></thead>
       <tbody>
         <tr><td><code>debugger</code></td><td>To see what the page did while you tested it: network requests and their status, the bodies of the site's own API calls and failed requests, console errors, and a screenshot after each step. Lens attaches only to tabs of sites you allowed, and Chrome shows its "started debugging this browser" bar while it does.</td></tr>
-        <tr><td><code>nativeMessaging</code></td><td>To talk to the Lens app on your computer, which stores recordings, writes down your voice, files tasks and serves coding agents. Lens talks to no server.</td></tr>
         <tr><td><code>sidePanel</code></td><td>Lens works from the browser's side panel: Record, Stop, your recordings and their notes.</td></tr>
         <tr><td><code>tabs</code></td><td>To know which site the active tab shows, so Lens collects only on sites you allowed, and to open the review page after a recording.</td></tr>
         <tr><td><code>scripting</code></td><td>To add the recorder to tabs of allowed sites. It records the page structure and your steps for the replay, with passwords and private fields masked.</td></tr>
@@ -54,7 +53,7 @@
       <thead><tr><th>Permission</th><th>Why Lens needs it</th></tr></thead>
       <tbody>
         <tr><td><code>webRequest</code></td><td>Firefox has no debugger for extensions; Lens uses this to see the addresses, methods and status of the requests of allowed sites. It does not read request or response bodies in Firefox.</td></tr>
-        <tr><td><code>nativeMessaging</code>, <code>tabs</code>, <code>scripting</code>, <code>activeTab</code>, <code>storage</code></td><td>As in Chrome, above. Lens works from Firefox's sidebar.</td></tr>
+        <tr><td><code>tabs</code>, <code>scripting</code>, <code>activeTab</code>, <code>storage</code>, <code>alarms</code></td><td>As in Chrome, above. Lens works from Firefox's sidebar and stores recordings locally in IndexedDB with no native companion app.</td></tr>
         <tr><td>Site access (optional): one site at a time</td><td>As in Chrome, above.</td></tr>
         <tr><td>Access to all websites (optional): <code>&lt;all_urls&gt;</code></td><td>Firefox lets an extension take a screenshot of a tab only with access to all websites, or right after you click its toolbar button. Lens asks for it when you first record, capture or collect, so it can take the screenshots of your recording. It still records only on the sites you added.</td></tr>
       </tbody>

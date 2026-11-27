@@ -45,12 +45,8 @@ export default defineConfig({
           relativeDest: `ort/${file}`,
         });
       }
-      for (const file of [
-        'ort-wasm-simd-threaded.jsep.mjs',
-        'ort-wasm-simd-threaded.jsep.wasm',
-        'ort-wasm-simd-threaded.mjs',
-        'ort-wasm-simd-threaded.wasm',
-      ]) {
+      // parakeet.js's ort.bundle.min.mjs only ever loads the .jsep.{mjs,wasm} pair (both WebGPU and WASM).
+      for (const file of ['ort-wasm-simd-threaded.jsep.mjs', 'ort-wasm-simd-threaded.jsep.wasm']) {
         assets.push({
           absoluteSrc: join(parakeetOrtDist, file),
           relativeDest: `ort-parakeet/${file}`,

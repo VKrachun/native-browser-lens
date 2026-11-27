@@ -39,10 +39,10 @@
         <h1>Show the bug. Say what's wrong. Hand it to an&nbsp;agent.</h1>
         <p class="lede">Lens records your browser session with your voice. It keeps what you did, what the page did and what you said on one clock, and turns it into a task with the steps, the failed requests, the console errors and a replay.</p>
         <div class="actions">
-          <a class="btn btn-primary btn-lg" href="#download" data-download>Download Lens</a>
+          <a class="btn btn-primary btn-lg" href="#download">Install extension</a>
           <a class="btn btn-line btn-lg" href="#how">How it works</a>
         </div>
-        <p class="fine">Free. For Chrome, Edge, Brave and Firefox, on macOS, Windows and Linux. Recordings stay on your computer until you file them.</p>
+        <p class="fine">Free. 100% browser extension — no desktop companion app needed. For Chrome, Edge, Brave and Firefox on macOS, Windows and Linux.</p>
       </div>
 
       <figure class="sheet" aria-labelledby="sheet-title">
@@ -108,10 +108,10 @@
       <article class="step">
         <div class="step-text">
           <h3>File it, or put an agent on it</h3>
-          <p>Lens writes a title and findings with your Claude Code or Codex, if you have one. Edit them, then take the review to Linear, Jira Cloud, Basecamp, or GitHub Issues. You choose when to submit the task.</p>
+          <p>Lens writes a title and findings with your own API key (OpenRouter, Anthropic, OpenAI, or Gemini). Edit them, then take the review to VibeQ, Linear, Jira Cloud, Basecamp, or GitHub Issues. You choose when to submit the task.</p>
           <ul>
-            <li>Hand the review to Claude Code, Codex, T3 Code or Zeron in your project’s folder.</li>
-            <li>Prefer files? Export it to a folder with a Playwright test.</li>
+            <li>Connect Claude Code, Codex, or Cursor directly via Remote HTTP MCP (<code>https://lens.sirv.studio/mcp</code>) with zero local daemon.</li>
+            <li>Prefer files? Export an Evidence ZIP with a Playwright test, HAR, screenshots, and replay.</li>
           </ul>
         </div>
         <div class="exhibits">
@@ -137,10 +137,10 @@
           <dt>Steps with real locators</dt><dd>Role, name, test ID and CSS for each click and field, so a test can find the element again.</dd>
           <dt>What the screen did</dt><dd>The text that appeared and went away after each click.</dd>
           <dt>The failures that matter</dt><dd>Failed requests with their bodies, linked to the step that caused them, and the console errors.</dd>
-          <dt>Your words, on the same clock</dt><dd>What you said, where you said it, corrected if Whisper misheard.</dd>
+          <dt>Your words, on the same clock</dt><dd>What you said, where you said it — transcribed locally in your browser with NVIDIA Parakeet TDT or Whisper (WebGPU/WASM), or via Groq/OpenAI.</dd>
           <dt>A replay and screenshots</dt><dd>The DOM recording and a shot after each step, with your masks burned in.</dd>
         </dl>
-        <p class="mcp">Working locally? One click in Settings, or <code>lens agents connect</code>, gives Claude Code, Codex, Cursor and Gemini CLI the Lens skill and MCP server: they find a review and read it straight from Lens. No MCP? <code>lens review &lt;id&gt;</code> and <code>lens export &lt;id&gt;</code> work from any shell.</p>
+        <p class="mcp">Connect Claude Code, Codex, or Cursor with one command from Settings using Remote HTTP MCP (<code>https://lens.sirv.studio/mcp</code>) authenticated with your personal Bearer token — no desktop app or local daemon required.</p>
       </div>
 <pre class="record" tabindex="0" aria-label="An excerpt of a Lens record"><code><span class="cmt">// capture-1.lens.json (excerpt)</span>
 {
@@ -165,13 +165,13 @@
   <section class="station" id="privacy" aria-labelledby="privacy-title">
     <div class="wrap">
       <h2 class="section-title" id="privacy-title">Private by default</h2>
-      <p class="section-lede">Lens is an app on your computer, not a cloud service. Nothing goes to Sirv: there is no Sirv server in the loop.</p>
+      <p class="section-lede">Lens runs completely inside your browser and stores recordings locally in IndexedDB. Nothing leaves your browser until you choose to export, file, or sync a review.</p>
       <dl class="points">
         <div><dt>You choose the sites</dt><dd>Lens reads a site only after you allow it, one site at a time. Everywhere else it does nothing.</dd></div>
-        <div><dt>Local transcription</dt><dd>Whisper transcribes your voice on your computer. You choose whether to include microphone audio in a replay video you share.</dd></div>
+        <div><dt>Local transcription</dt><dd>NVIDIA Parakeet TDT 0.6B and Whisper run directly inside your browser (WebGPU/WASM) with zero API cost, or use your own Groq/OpenAI key.</dd></div>
         <div><dt>Secrets are left out</dt><dd>Passwords, card numbers and private fields are masked. Cookies, headers and tokens are never recorded.</dd></div>
         <div><dt>Replays stay offline</dt><dd>A replay loads nothing from the recorded site unless you ask it to show the site’s images.</dd></div>
-        <div><dt>Nothing leaves until you file</dt><dd>Recordings stay on your computer. They go only where you send them: your tracker, an agent or a folder.</dd></div>
+        <div><dt>Nothing leaves until you file</dt><dd>Recordings stay in your browser profile. They go only where you send them: your tracker, your Remote MCP token namespace, or a ZIP download.</dd></div>
         <div><dt>No tracking</dt><dd>No analytics, no telemetry, no ads. This website does not use cookies either.</dd></div>
       </dl>
       <p class="fine more">The details: <a href="/privacy">privacy policy</a> and <a href="/permissions">why Lens asks for each permission</a>.</p>
@@ -180,43 +180,37 @@
 
   <section class="station download" id="download" aria-labelledby="download-title">
     <div class="wrap">
-      <h2 class="section-title" id="download-title">Download Lens</h2>
-      <p class="section-lede">Install the app and open it once. It walks you through adding the browser extension, and installs for you only, without administrator rights.</p>
-      <div class="downloads" data-downloads>
-        <div class="dl" data-os="mac">
-          <h3>macOS</h3>
-          <p class="meta">Apple silicon and Intel. Signed and notarized by Apple.</p>
-          <div class="files" data-files="mac"></div>
+      <h2 class="section-title" id="download-title">Install Sirv Lens</h2>
+      <p class="section-lede">Everything runs inside the browser extension — no desktop installer, no daemon, no native messaging setup. Add it to your browser and start recording immediately.</p>
+      <div class="downloads">
+        <div class="dl">
+          <h3>Chrome, Edge &amp; Brave</h3>
+          <p class="meta">Full debugger evidence, network bodies, step screenshots, WebGPU/WASM voice transcription, and tab video.</p>
+          <div class="files">
+            <a class="btn btn-primary" href="https://chromewebstore.google.com/detail/sirv-lens/lihjnfpbomppjmdlnchkookggmefanbg">Add from Chrome Web Store</a>
+          </div>
         </div>
-        <div class="dl" data-os="windows">
-          <h3>Windows</h3>
-          <p class="meta">Windows 10 and 11, x64. Installs for you only, without administrator rights.</p>
-          <div class="files" data-files="windows"></div>
-          <p class="note">The installer is not code-signed yet. If Windows shows “Windows protected your PC”, choose <strong>More info</strong>, then <strong>Run anyway</strong>.</p>
-        </div>
-        <div class="dl" data-os="linux">
-          <h3>Linux</h3>
-          <p class="meta">x86-64. AppImage for any distribution, or a package.</p>
-          <div class="files" data-files="linux"></div>
+        <div class="dl">
+          <h3>Firefox</h3>
+          <p class="meta">Sidebar recording, DOM replay, in-browser voice transcription, and tracker handoff.</p>
+          <div class="files">
+            <a class="btn btn-primary" href="https://addons.mozilla.org/firefox/addon/sirv-lens/">Add from Firefox Add-ons</a>
+          </div>
         </div>
       </div>
-      <p class="fine more">Every file and its SHA-256 sum is also on <a href="https://github.com/sirv/native-browser-lens/releases/latest">GitHub Releases</a>.</p>
-      <div class="extension-note">
-        <h3>The browser extension</h3>
-        <p>Chrome, Edge and Brave: <a href="https://chromewebstore.google.com/detail/sirv-lens/lihjnfpbomppjmdlnchkookggmefanbg">add Sirv Lens from the Chrome Web Store</a>. Firefox: <a href="https://addons.mozilla.org/firefox/addon/sirv-lens/">add Sirv Lens from Firefox Add-ons</a>. The app opens these links for you after you install it.</p>
-      </div>
+      <p class="fine more">Extension archives and SHA-256 sums are also published on <a href="https://github.com/sirv/native-browser-lens/releases/latest">GitHub Releases</a>.</p>
     </div>
   </section>
 
   <section class="station" id="faq" aria-labelledby="faq-title">
     <div class="wrap faq">
       <h2 class="section-title" id="faq-title">Questions</h2>
-      <details><summary><span class="qa">Q.</span>Is Lens free?</summary><p><span class="qa">A.</span>Yes.</p></details>
-      <details><summary><span class="qa">Q.</span>Why is there an app and an extension?</summary><p><span class="qa">A.</span>The extension records the page. The app keeps the recordings on your computer, writes down your voice with Whisper, files tasks and serves recordings to coding agents. Browsers do not let an extension do all of that on its own.</p></details>
+      <details><summary><span class="qa">Q.</span>Is Lens free?</summary><p><span class="qa">A.</span>Yes. Everything runs locally in your browser at zero cost.</p></details>
+      <details><summary><span class="qa">Q.</span>Do I need to install a desktop companion app?</summary><p><span class="qa">A.</span>No. Starting with v0.13.0, Lens is 100% self-contained inside the browser extension: local IndexedDB storage, in-browser Parakeet TDT &amp; Whisper transcription (WebGPU/WASM), pure-JS Evidence ZIP export, BYOK AI summaries, and Remote HTTP MCP sync.</p></details>
       <details><summary><span class="qa">Q.</span>Which browsers work?</summary><p><span class="qa">A.</span>Chrome, Edge, Brave and Chromium, with network bodies and screenshots after each step. Firefox works too, with request details limited by what Firefox lets extensions see.</p></details>
-      <details><summary><span class="qa">Q.</span>Where do tasks go?</summary><p><span class="qa">A.</span>Open a draft in Linear or GitHub Issues, or copy the summary into a Jira Cloud issue or Basecamp to-do. Use Clipboard for another tracker. Export to Downloads gives you the full evidence to attach.</p></details>
-      <details><summary><span class="qa">Q.</span>Do I need an AI subscription?</summary><p><span class="qa">A.</span>No. With Claude Code or Codex installed and signed in, Lens writes titles and findings, splits long recordings and checks for duplicates. Without them you write the title yourself; everything else works.</p></details>
-      <details><summary><span class="qa">Q.</span>Does anything go to Sirv?</summary><p><span class="qa">A.</span>No. Lens has no server of its own. See the <a href="/privacy">privacy policy</a>.</p></details>
+      <details><summary><span class="qa">Q.</span>Where do tasks go?</summary><p><span class="qa">A.</span>File directly to VibeQ, open a draft in Linear or GitHub Issues, copy a summary into Jira Cloud or Basecamp, sync to Remote HTTP MCP for Claude Code / Codex / Cursor, or download the full Evidence ZIP.</p></details>
+      <details><summary><span class="qa">Q.</span>Do I need an AI API key?</summary><p><span class="qa">A.</span>No. If you add an OpenRouter, Anthropic, OpenAI, or Google Gemini key in Settings, Lens drafts titles and findings, splits long recordings into tasks, and checks for duplicates. Without one you write the title yourself; everything else works.</p></details>
+      <details><summary><span class="qa">Q.</span>Does anything go to Sirv?</summary><p><span class="qa">A.</span>Not unless you turn on Remote HTTP MCP sync (which stores only the reviews you explicitly sync under your private Bearer token hash) or file to VibeQ. See the <a href="/privacy">privacy policy</a>.</p></details>
     </div>
   </section>
 </main>

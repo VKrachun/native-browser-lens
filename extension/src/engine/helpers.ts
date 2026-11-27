@@ -188,12 +188,23 @@ export function plainTitle(raw: string, maxLen = 200): string {
     .trim();
 }
 
+const HEX_TABLE = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, '0'));
+
 export async function sha256Hex(data: ArrayBuffer | Uint8Array): Promise<string> {
-  const view = data instanceof Uint8Array ? data : new Uint8Array(data);
-  const copy = new Uint8Array(view.byteLength);
-  copy.set(view);
-  const digest = await crypto.subtle.digest('SHA-256', copy.buffer);
-  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+  let buf: ArrayBuffer;
+  if (data instanceof ArrayBuffer) {
+    buf = data;
+  } else if (data.byteOffset === 0 && data.byteLength === data.buffer.byteLength && data.buffer instanceof ArrayBuffer) {
+    buf = data.buffer;
+  } else {
+    const copy = new Uint8Array(data.byteLength);
+    copy.set(data);
+    buf = copy.buffer;
+  }
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', buf));
+  let hex = '';
+  for (let i = 0; i < digest.length; i += 1) hex += HEX_TABLE[digest[i]!]!;
+  return hex;
 }
 
 function uuidToBytes(uuid: string): Uint8Array {
