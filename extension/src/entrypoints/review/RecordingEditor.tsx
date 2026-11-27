@@ -182,9 +182,14 @@ export function RecordingEditor({
     }
   }, [speed, span]);
 
-  // One clock: the replay's time drives the voice and the drawings.
+  // One clock: the replay's time drives the voice and the drawings (only runs rAF while playing!).
   useEffect(() => {
-    if (!span) return;
+    if (!span || !playing) {
+      for (const element of audio.current.values()) {
+        if (!element.paused) element.pause();
+      }
+      return;
+    }
     let frame = 0;
     const tick = () => {
       // The next frame is asked for first: one failure must not stop the clock for good.
@@ -199,25 +204,23 @@ export function RecordingEditor({
         const offset = replayer.getCurrentTime();
         if (!(offset >= 0 && offset <= span.end - span.start + 1000)) return;
         const at = Math.round(span.start + offset);
-        setNow(at);
+        setNow((prev) => (prev === at ? prev : at));
         const kept = keptRanges(edits, { start: Math.max(span.start, capture.startedAt), end: span.end });
         // A cut part plays as if it were not there: the replay jumps over it.
-        if (playing) {
-          const inCut = !kept.some((r) => at >= r.from && at < r.to);
-          if (inCut) {
-            const next = kept.find((r) => r.from > at);
-            if (next) player.current!.goto(next.from - span.start, true);
-            else (player.current!.pause(), setPlaying(false));
-          }
+        const inCut = !kept.some((r) => at >= r.from && at < r.to);
+        if (inCut) {
+          const next = kept.find((r) => r.from > at);
+          if (next) player.current!.goto(next.from - span.start, true);
+          else (player.current!.pause(), setPlaying(false));
         }
         for (const note of voice) {
           const element = audio.current.get(note.id);
           if (!element) continue;
           if (element.playbackRate !== speed) element.playbackRate = speed;
-          const offset = (at - Number(note.startedAt)) / 1000;
-          const inside = offset >= 0 && offset < Number(note.durationMs) / 1000;
-          if (playing && inside) {
-            if (Math.abs(element.currentTime - offset) > 0.3 * speed) element.currentTime = offset;
+          const noteOffset = (at - Number(note.startedAt)) / 1000;
+          const inside = noteOffset >= 0 && noteOffset < Number(note.durationMs) / 1000;
+          if (inside) {
+            if (Math.abs(element.currentTime - noteOffset) > 0.3 * speed) element.currentTime = noteOffset;
             if (element.paused) void element.play().catch(() => {});
           } else if (!element.paused) element.pause();
         }
@@ -227,8 +230,8 @@ export function RecordingEditor({
     return () => cancelAnimationFrame(frame);
   }, [span, playing, edits, voice, capture.startedAt, speed]);
 
-  // The voice recordings. A changed list (a corrected transcript, a deleted note) loads them again:
-  // the old elements go with their revoked URLs, so none plays a revoked or deleted note.
+  // Load voice audio elements only when the underlying audio blobs change (not on transcript/status polls).
+  const audioKey = voice.map((v) => `${v.id}:${v.audio.sha256}`).join(',');
   useEffect(() => {
     let live = true;
     const urls: string[] = [];
@@ -247,7 +250,8 @@ export function RecordingEditor({
       elements.clear();
       urls.forEach(URL.revokeObjectURL);
     };
-  }, [client, voice]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, audioKey]);
 
   // Edits save shortly after each change. A failed save says so; Try again (or the next edit) saves again.
   const [saveFailed, setSaveFailed] = useState<string | null>(null);
@@ -442,7 +446,7 @@ export function RecordingEditor({
       context.fillStyle = '#fff';
       context.fillText(label, a.x + 6, top + 14);
     }
-  });
+  }, [now, edits.annotations, draft, strokes, hover, span]);
 
   const toPage = (event: ReactPointerEvent) => {
     const geometry = frameGeometry();

@@ -219,7 +219,7 @@ export function Review({ observation: id }: { observation: number }) {
     const timer = setInterval(() => {
       void client
         .request({ method: 'listVoiceNotes', params: { observation: id } })
-        .then(setVoice)
+        .then((next) => setVoice((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next)))
         .catch(() => {});
     }, 2000);
     return () => clearInterval(timer);

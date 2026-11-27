@@ -692,6 +692,13 @@ const queuedTranscriptions = new Set<number>();
 const transcriptionQueue: number[] = [];
 let transcriptionQueueRunning = false;
 
+async function runWithSpeechLock<T>(fn: () => Promise<T>): Promise<T> {
+  if (typeof navigator !== 'undefined' && navigator.locks?.request) {
+    return navigator.locks.request('sirv-lens-speech-transcribe', fn);
+  }
+  return fn();
+}
+
 async function drainTranscriptionQueue(): Promise<void> {
   if (transcriptionQueueRunning) return;
   transcriptionQueueRunning = true;
@@ -699,29 +706,33 @@ async function drainTranscriptionQueue(): Promise<void> {
     while (transcriptionQueue.length > 0) {
       const voiceNoteId = transcriptionQueue.shift()!;
       try {
-        const note = await getVoiceNote(voiceNoteId);
-        const blob = await getBlob(note.audio.sha256);
-        if (!blob) throw new Error('Audio blob missing');
-        const cfg = await getSpeechConfig();
+        await runWithSpeechLock(async () => {
+          const note = await getVoiceNote(voiceNoteId);
+          // Another tab (e.g. replay.html vs review.html) may have already transcribed or started this note.
+          if (note.state === 'done' || note.state === 'transcribing') return;
+          const blob = await getBlob(note.audio.sha256);
+          if (!blob) throw new Error('Audio blob missing');
+          const cfg = await getSpeechConfig();
 
-        await patchVoiceNote(voiceNoteId, { state: 'transcribing', detail: null });
+          await patchVoiceNote(voiceNoteId, { state: 'transcribing', detail: null });
 
-        let out: { language: string | null; segments: VoiceSegment[] };
-        if (cfg.backend === 'openai') {
-          if (!cfg.openaiApiKey) throw new Error('Add your OpenAI API key in Settings → Voice notes.');
-          out = await transcribeWithCloudApi('openai', cfg.openaiApiKey, cfg.model, cfg.language, cfg.prompt, blob.bytes, note.durationMs);
-        } else if (cfg.backend === 'groq') {
-          if (!cfg.groqApiKey) throw new Error('Add your Groq API key in Settings → Voice notes.');
-          out = await transcribeWithCloudApi('groq', cfg.groqApiKey, cfg.model, cfg.language, cfg.prompt, blob.bytes, note.durationMs);
-        } else {
-          out = await transcribeLocally(cfg, blob.bytes, note.durationMs);
-        }
+          let out: { language: string | null; segments: VoiceSegment[] };
+          if (cfg.backend === 'openai') {
+            if (!cfg.openaiApiKey) throw new Error('Add your OpenAI API key in Settings → Voice notes.');
+            out = await transcribeWithCloudApi('openai', cfg.openaiApiKey, cfg.model, cfg.language, cfg.prompt, blob.bytes, note.durationMs);
+          } else if (cfg.backend === 'groq') {
+            if (!cfg.groqApiKey) throw new Error('Add your Groq API key in Settings → Voice notes.');
+            out = await transcribeWithCloudApi('groq', cfg.groqApiKey, cfg.model, cfg.language, cfg.prompt, blob.bytes, note.durationMs);
+          } else {
+            out = await transcribeLocally(cfg, blob.bytes, note.durationMs);
+          }
 
-        await patchVoiceNote(voiceNoteId, {
-          state: 'done',
-          language: out.language,
-          segments: out.segments,
-          detail: null,
+          await patchVoiceNote(voiceNoteId, {
+            state: 'done',
+            language: out.language,
+            segments: out.segments,
+            detail: null,
+          });
         });
       } catch (error) {
         await patchVoiceNote(voiceNoteId, {

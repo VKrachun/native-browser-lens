@@ -3,7 +3,7 @@ members = [".", "speech"]
 
 [package]
 name = "lens"
-version = "0.13.0"
+version = "0.13.1"
 edition = "2024"
 
 [dependencies]

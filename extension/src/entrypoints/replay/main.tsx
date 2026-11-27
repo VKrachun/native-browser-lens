@@ -1,5 +1,6 @@
 import { StrictMode, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { enqueueTranscription } from '@/engine/speech';
 import { LensClient, captureProblem } from '@/lens-client';
 import type { Capture } from '@/protocol/Capture';
 import type { VoiceNote } from '@/protocol/VoiceNote';
@@ -29,18 +30,24 @@ function Recording({ id }: { id: number }) {
     return () => client.disconnect();
   }, [client, id]);
 
-  // Transcripts finish in the daemon: look again until each one is done.
+  // Kick off in-browser/cloud transcription for waiting voice notes (serialized across tabs via Web Locks),
+  // and poll only while transcription is active — updating state only when something actually changed.
   const transcribing = voice.some((v) => v.state === 'waiting' || v.state === 'transcribing');
   useEffect(() => {
+    for (const v of voice) {
+      if (v.state === 'waiting') enqueueTranscription(v.id);
+    }
     if (!transcribing || !capture) return;
     const timer = setInterval(() => {
       void client
         .request({ method: 'listVoiceNotes', params: { observation: capture.observation } })
-        .then(setVoice)
+        .then((next) =>
+          setVoice((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next)),
+        )
         .catch(() => {});
     }, 2000);
     return () => clearInterval(timer);
-  }, [client, capture, transcribing]);
+  }, [client, capture, transcribing, voice]);
 
   return (
     <main className="page recording">
