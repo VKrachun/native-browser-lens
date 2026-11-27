@@ -40,7 +40,17 @@ export function Voice({ client }: { client: LensClient }) {
   const [prompt, setPrompt] = useState('');
   const [problem, setProblem] = useState<string | null>(null);
 
-  const loadStatus = useCallback(() => client.request({ method: 'speechStatus' }).then(setSpeech).catch(() => {}), [client]);
+  const loadStatus = useCallback(
+    () =>
+      client
+        .request({ method: 'speechStatus' })
+        .then((next) => {
+          setSpeech(next);
+          window.dispatchEvent(new Event('lens-settings-changed'));
+        })
+        .catch(() => {}),
+    [client],
+  );
   const load = useCallback(
     () =>
       Promise.all([
@@ -121,8 +131,18 @@ export function Voice({ client }: { client: LensClient }) {
           ) : (
             <ModelNotice
               speech={speech}
-              onInstall={() => client.request({ method: 'installSpeech' }).then(setSpeech)}
-              onCancel={() => client.request({ method: 'cancelSpeechDownload' }).then(setSpeech)}
+              onInstall={() =>
+                client.request({ method: 'installSpeech' }).then((next) => {
+                  setSpeech(next);
+                  window.dispatchEvent(new Event('lens-settings-changed'));
+                })
+              }
+              onCancel={() =>
+                client.request({ method: 'cancelSpeechDownload' }).then((next) => {
+                  setSpeech(next);
+                  window.dispatchEvent(new Event('lens-settings-changed'));
+                })
+              }
             />
           )}
           <div className="choices" role="radiogroup" aria-label="Speech model size">

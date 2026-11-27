@@ -1,14 +1,26 @@
 @import '@/ui/page.css';
 
 .settings {
-  max-width: 600px;
-  gap: 16px;
+  max-width: 780px;
+  gap: 18px;
+  padding-bottom: 48px;
 }
+.settings-wizard {
+  min-height: 100vh;
+  grid-template-rows: auto auto auto 1fr auto;
+}
+
 .settings-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.settings-brand {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 4px;
 }
 .settings-head .mark {
   width: 22px;
@@ -16,12 +28,236 @@
 }
 .settings-head h1 {
   font-size: 22px;
-  flex: 1;
 }
+.version-badge {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--muted);
+}
+
+/* ---------- Wizard stepper ---------- */
+.wizard-stepper {
+  display: grid;
+  gap: 12px;
+  padding: 14px 16px;
+}
+.wizard-stepper-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.wizard-progress-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--muted);
+  overflow: hidden;
+}
+.wizard-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--primary);
+  transition: width 240ms var(--ease);
+}
+.wizard-step-list {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.wizard-step-list > li {
+  min-width: 0;
+}
+.wizard-step-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 9px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color 140ms var(--ease),
+    border-color 140ms var(--ease),
+    box-shadow 140ms var(--ease);
+}
+.wizard-step-btn:hover {
+  background: var(--muted);
+}
+.wizard-step-btn[data-active='true'] {
+  background: var(--background);
+  border-color: var(--border-primary);
+  box-shadow: var(--app-shadow-xs);
+}
+.wizard-step-badge {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font: 600 11px/1 var(--font-heading);
+}
+.wizard-step-btn[data-active='true'] .wizard-step-badge {
+  background: var(--primary);
+  color: var(--on-primary);
+}
+.wizard-step-btn[data-ready='true'] .wizard-step-badge {
+  background: var(--card-success);
+  color: var(--success-foreground);
+}
+.wizard-step-btn[data-active='true'][data-ready='true'] .wizard-step-badge {
+  background: var(--success);
+  color: var(--on-success);
+}
+.wizard-step-copy {
+  display: grid;
+  min-width: 0;
+}
+.wizard-step-name {
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wizard-step-detail {
+  font-size: 11px;
+  color: var(--muted-foreground);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------- Active step heading ---------- */
+.wizard-stage-head {
+  display: grid;
+  gap: 5px;
+  padding: 2px 2px 0;
+}
+.wizard-stage-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.wizard-stage-title {
+  font-size: 19px;
+}
+
+/* ---------- Step panels & footer ---------- */
+.wizard-panels {
+  display: grid;
+  gap: 16px;
+  align-content: start;
+}
+.wizard-panel {
+  display: grid;
+  gap: 16px;
+}
+.wizard-panel[hidden] {
+  display: none;
+}
+
+.wizard-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 4px -24px -48px;
+  padding: 12px 24px;
+  background: oklch(from var(--background) l c h / 92%);
+  backdrop-filter: blur(8px);
+  border-top: 1px solid var(--border-subtle);
+}
+.wizard-footer-left,
+.wizard-footer-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ---------- Step 5 setup summary ---------- */
+.notice.setup-complete-banner {
+  align-items: center;
+  background: var(--card-success);
+  color: var(--success-foreground);
+  box-shadow: var(--app-shadow-hairline-success);
+}
+.notice.setup-complete-banner svg {
+  color: var(--success-foreground);
+}
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.summary-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color 120ms var(--ease),
+    border-color 120ms var(--ease);
+}
+.summary-item:hover {
+  background: var(--muted);
+  border-color: var(--border);
+}
+.summary-icon {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border-radius: 8px;
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+.summary-icon[data-ready='true'] {
+  background: var(--card-success);
+  color: var(--success-foreground);
+}
+.summary-text {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+}
+.summary-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+.summary-action {
+  color: var(--primary);
+  font-weight: 500;
+  flex: none;
+}
+
+/* ---------- Existing section cards ---------- */
 .settings-section {
   display: grid;
   gap: 14px;
-  padding: 16px;
+  padding: 18px;
 }
 .section-row {
   display: flex;
@@ -31,7 +267,21 @@
 }
 .actions {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
+}
+
+.provider-keys-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.provider-key-field[data-active='true'] .label {
+  color: var(--primary);
+}
+.provider-key-field[data-active='true'] .input {
+  border-color: var(--border-primary);
 }
 
 .account {
@@ -100,7 +350,7 @@
   list-style: none;
 }
 
-/* What is ready and what is missing, above the sections. */
+/* What is ready and what is missing, above the sections (All settings view). */
 .status-line {
   display: flex;
   flex-wrap: wrap;
@@ -174,10 +424,31 @@
 .cleanup .input {
   width: 6em;
 }
-.inline-fields .select {
+.inline-fields .select,
+.inline-fields .input {
   flex: 1;
   min-width: 12em;
 }
 .language-code {
+  flex: 0 0 auto !important;
   width: 7em;
+  min-width: 0 !important;
+}
+
+@media (max-width: 680px) {
+  .wizard-step-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .summary-grid,
+  .provider-keys-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wizard-progress-fill,
+  .wizard-step-btn,
+  .summary-item {
+    transition: none;
+  }
 }

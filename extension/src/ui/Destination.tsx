@@ -112,6 +112,7 @@ export function DestinationForm({ client, onboarding = false }: { client: LensCl
         choice: { tracker: selected, address: field ? value.trim() : '' }, onlyIfUnset: false,
       }});
       await refresh();
+      window.dispatchEvent(new Event('lens-destination-changed'));
       setTracker(null);
       setAddress(null);
       setMessage('Default saved.');

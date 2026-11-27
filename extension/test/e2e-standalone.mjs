@@ -56,12 +56,28 @@ try {
   const appPage = await context.newPage();
   await appPage.goto(siteUrl);
 
-  // 2. Open Options page and verify zero-daemon settings sections
+  // 2. Open Options page and verify guided wizard + all-settings mode
   const options = await context.newPage();
   await options.goto(`chrome-extension://${extensionId}/options.html`);
   await options.getByRole('heading', { name: 'Settings' }).waitFor({ timeout: 10_000 });
+  // Step 1: Destination
+  await options.getByRole('heading', { name: 'Default destination' }).waitFor({ timeout: 5_000 });
+  // Step 2: Voice notes
+  await options.getByRole('button', { name: /Next: Voice/ }).click();
+  await options.getByRole('heading', { name: 'Voice notes' }).waitFor({ timeout: 5_000 });
+  // Step 3: AI summaries
+  await options.getByRole('button', { name: /Next: AI summaries/ }).click();
   await options.getByRole('heading', { name: 'AI model (BYOK)' }).waitFor({ timeout: 5_000 });
+  // Step 4: Coding agents
+  await options.getByRole('button', { name: /Next: Coding agents/ }).click();
   await options.getByRole('heading', { name: 'Coding agents (Remote HTTP MCP)' }).waitFor({ timeout: 5_000 });
+  // Step 5: Privacy & Storage
+  await options.getByRole('button', { name: /Next: Privacy/ }).click();
+  await options.getByRole('heading', { name: 'Setup checklist' }).waitFor({ timeout: 5_000 });
+  await options.getByRole('heading', { name: 'Storage and retention' }).waitFor({ timeout: 5_000 });
+  // Switch to All settings view and confirm all sections appear together
+  await options.getByRole('button', { name: 'All settings', exact: true }).click();
+  await options.getByRole('heading', { name: 'AI model (BYOK)' }).waitFor({ timeout: 5_000 });
   await options.getByRole('heading', { name: 'Voice notes' }).waitFor({ timeout: 5_000 });
   await options.close();
 

@@ -2,10 +2,13 @@ import { HugeiconsIcon } from '@hugeicons/react';
 import {
   Alert02Icon,
   ArrowLeft01Icon,
+  ArrowRight01Icon,
   ArrowTurnBackwardIcon,
   Camera01Icon,
   CheckmarkCircle02Icon,
+  Compass01Icon,
   Copy01Icon,
+  CpuIcon,
   Download04Icon,
   EraserIcon,
   FloppyDiskIcon,
@@ -13,7 +16,10 @@ import {
   LinkSquare02Icon,
   PencilEdit02Icon,
   PlayCircleIcon,
+  Rocket01Icon,
   Settings02Icon,
+  Shield01Icon,
+  SlidersHorizontalIcon,
   SquareIcon,
   ArrowUpRight01Icon,
   SparklesIcon,
@@ -45,8 +51,14 @@ function make(icon: typeof Camera01Icon) {
 export const CameraIcon = make(Camera01Icon);
 export const SettingsIcon = make(Settings02Icon);
 export const BackIcon = make(ArrowLeft01Icon);
+export const NextIcon = make(ArrowRight01Icon);
 export const AlertIcon = make(Alert02Icon);
 export const DoneIcon = make(CheckmarkCircle02Icon);
+export const CompassIcon = make(Compass01Icon);
+export const AgentIcon = make(CpuIcon);
+export const ShieldIcon = make(Shield01Icon);
+export const SlidersIcon = make(SlidersHorizontalIcon);
+export const RocketIcon = make(Rocket01Icon);
 export const CopyIcon = make(Copy01Icon);
 export const ExportIcon = make(Download04Icon);
 export const PenIcon = make(PencilEdit02Icon);
