@@ -119,13 +119,22 @@ try {
   await appPage.getByText('Status 500').waitFor({ timeout: 5_000 });
   await appPage.waitForTimeout(500);
 
-  // Stop recording and wait for Review tab to open
+  // Stop recording and wait for Replay (recording editor) tab to open
   await panel.bringToFront();
+  const replayPromise = context.waitForEvent('page', {
+    predicate: (p) => p.url().includes('/replay.html'),
+    timeout: 15_000,
+  });
+  await panel.getByRole('button', { name: /^Stop$/ }).click();
+  const replayPage = await replayPromise;
+  await replayPage.waitForLoadState('domcontentloaded');
+
+  // Open Review from the recording page's "Review and export" button
   const reviewPromise = context.waitForEvent('page', {
     predicate: (p) => p.url().includes('/review.html'),
     timeout: 15_000,
   });
-  await panel.getByRole('button', { name: /^Stop$/ }).click();
+  await replayPage.getByRole('button', { name: 'Review and export' }).click();
   const reviewPage = await reviewPromise;
   await reviewPage.waitForLoadState('domcontentloaded');
 

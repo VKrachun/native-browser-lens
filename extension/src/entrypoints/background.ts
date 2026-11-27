@@ -734,12 +734,15 @@ export default defineBackground(() => {
     return { ok: true, at };
   }
 
-  /** Opens the review page for a newly finished recording in the same window and focuses it. */
+  /** Opens the recording editor (or review page if no replay exists) in the same window and focuses it. */
   async function openRecordedTab(capture: Capture, sourceTabId: number) {
     const sourceTab = await browser.tabs.get(sourceTabId).catch(() => null);
+    const nextPage = capture.recording
+      ? `/replay.html?capture=${capture.id}`
+      : `/review.html?observation=${capture.observation}`;
     await browser.tabs
       .create({
-        url: browser.runtime.getURL(`/review.html?observation=${capture.observation}`),
+        url: browser.runtime.getURL(nextPage as '/'),
         active: true,
         ...(sourceTab?.windowId !== undefined ? { windowId: sourceTab.windowId } : {}),
       })

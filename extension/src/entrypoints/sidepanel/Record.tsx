@@ -365,8 +365,11 @@ export function RecordControls({
         voiceProblem = `The recording is saved, but its voice note is not: ${(error as Error).message}`;
       }
       onProblem(voiceProblem);
+      const nextPage = result.capture.recording
+        ? `/replay.html?capture=${result.capture.id}`
+        : `/review.html?observation=${result.capture.observation}`;
       await browser.tabs.create({
-        url: browser.runtime.getURL(`/review.html?observation=${result.capture.observation}`),
+        url: browser.runtime.getURL(nextPage as '/'),
         active: true,
       });
     } catch (error) {
