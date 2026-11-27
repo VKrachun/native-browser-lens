@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { enqueueTranscription } from '@/engine/speech';
 import { LensClient, LensError } from '@/lens-client';
 import { originOf } from '@/messages';
 import type { Capture } from '@/protocol/Capture';
@@ -205,9 +206,13 @@ export function Review({ observation: id }: { observation: number }) {
     void summarize();
   }, [review, observation, captures, waitingForWords, summarize, findingsSettings, findingsOff]);
 
-  // Transcripts finish in the daemon after the page opens: look again until each one is done.
+  // Kick off local/cloud transcription for any waiting voice notes saved by background.ts,
+  // and poll until every note finishes.
   const transcribing = voice.some((v) => v.state === 'waiting' || v.state === 'transcribing');
   useEffect(() => {
+    for (const v of voice) {
+      if (v.state === 'waiting') enqueueTranscription(v.id);
+    }
     if (!transcribing) return;
     const timer = setInterval(() => {
       void client
@@ -216,7 +221,7 @@ export function Review({ observation: id }: { observation: number }) {
         .catch(() => {});
     }, 2000);
     return () => clearInterval(timer);
-  }, [client, id, transcribing]);
+  }, [client, id, transcribing, voice]);
 
   /** Freezes the review; returns it, or null when it did not freeze. */
   async function freeze(): Promise<FrozenReview | null> {

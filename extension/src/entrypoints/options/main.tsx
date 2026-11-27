@@ -1,28 +1,34 @@
 import { StrictMode, useCallback, useEffect, useState, type FormEvent } from 'react';
 import { createRoot } from 'react-dom/client';
+import {
+  DEFAULT_LLM_MODELS,
+  getLlmConfig,
+  listProviderModels,
+  saveLlmConfig,
+  type LlmConfig,
+  type LlmProvider,
+} from '@/engine/llm';
+import {
+  DEFAULT_MCP_ENDPOINT,
+  generateRemoteMcpToken,
+  getRemoteMcpConfig,
+  saveRemoteMcpConfig,
+  type RemoteMcpConfig,
+} from '@/engine/mcp-sync';
 import { LensClient } from '@/lens-client';
 import { sitePattern } from '@/messages';
 import type { VibeQSettings } from '@/protocol/VibeQSettings';
-import type { UpdateState } from '@/protocol/UpdateState';
-import type { FindingsSettings } from '@/protocol/FindingsSettings';
-import type { Agent } from '@/protocol/Agent';
-import type { AgentInfo } from '@/protocol/AgentInfo';
-import type { AgentSetup } from '@/protocol/AgentSetup';
-import { useStored } from '../sidepanel/Record';
 import { AlertIcon, DoneIcon, LensMark, LinkIcon } from '@/ui/icons';
 import { Problem, useLoadOnFocus } from './shared';
 import { Voice } from './VoiceSettings';
-import { VideoExport } from './VideoExport';
 import { Storage } from './Storage';
 import { PrivacyRules } from './PrivacyRules';
 import '@/ui/base.css';
 import { followSystemTheme } from '@/ui/theme';
 import './style.css';
 import { DestinationForm } from '@/ui/Destination';
-import { AppStatus } from '@/ui/AppStatus';
 
 const DEFAULT_VIBEQ = 'https://work.sirv.studio';
-/** How long Lens waits for the person to sign in to VibeQ in the other tab. */
 const SIGN_IN_WAIT_MS = 10 * 60_000;
 
 function Settings() {
@@ -47,19 +53,16 @@ function Settings() {
       <DestinationForm client={client} />
       <VibeQ client={client} />
       <Voice client={client} />
-      <Models client={client} />
-      <CodingAgents client={client} />
-      <VideoExport client={client} />
+      <Models />
+      <CodingAgents />
       <Storage client={client} />
       <PrivacyRules client={client} />
-      <Updates client={client} />
       <section className="card settings-section" aria-label="Privacy">
         <h2>What Lens reads</h2>
         <p className="small muted">
-          Lens reads a site only after you allow it from the side panel. While it collects network bodies and console
-          messages, Chrome shows a bar that says Lens started debugging this browser. That bar is how the debugger
-          permission looks, and it goes away when the tab closes. To stop collection everywhere, use Pause collection
-          in the Lens menu of your system tray.
+          Lens runs completely inside your browser and stores recordings locally in IndexedDB. It reads a site only
+          after you allow it from the side panel. While it collects network bodies and console messages, Chrome shows
+          a bar that says Lens started debugging this browser; you can pause collection anytime from the side panel.
         </p>
         {!import.meta.env.FIREFOX && <IncognitoNote />}
       </section>
@@ -67,44 +70,45 @@ function Settings() {
   );
 }
 
-/**
- * What is ready and what is missing, at a glance; each item jumps to its section below. It asks
- * again when the window comes back, after a sign-in or a download in another tab.
- */
 function StatusLine({ client }: { client: LensClient }) {
   const [items, setItems] = useState<{ label: string; ok: boolean; target: string }[] | null>(null);
   const load = useCallback(async () => {
-    const [speech, agents, setup] = await Promise.all([
+    const [speech, llm, mcp] = await Promise.all([
       client.request({ method: 'speechStatus' }).catch(() => null),
-      client.request({ method: 'listAgents' }).catch(() => null),
-      client.request({ method: 'setupStatus' }).catch(() => null),
+      getLlmConfig().catch(() => null),
+      getRemoteMcpConfig().catch(() => null),
     ]);
-    const ready = agents?.filter((a) => a.state === 'ready').map((a) => (a.agent === 'codex' ? 'Codex' : 'Claude Code')) ?? [];
+    const configuredLlm = llm
+      ? (['openrouter', 'anthropic', 'openai', 'gemini'] as LlmProvider[]).filter((p) => Boolean(llm.keys[p]))
+      : [];
     setItems([
       {
-        label: speech?.model.state === 'ready' ? `Voice: ready (${speech.engines[0] ?? 'CPU'})` : 'Voice: needs the speech model',
+        label: speech?.model.state === 'ready' ? `Voice: ready (${speech.engines[0] ?? 'WASM'})` : 'Voice: click Download in Voice notes',
         ok: speech?.model.state === 'ready',
         target: 'Voice notes',
       },
-      { label: ready.length ? `AI model: ${ready.join(', ')}` : 'AI model: none signed in', ok: ready.length > 0, target: 'AI model' },
-      { label: setup?.service ? 'Starts at login' : 'Does not start at login', ok: !!setup?.service, target: '' },
+      {
+        label: configuredLlm.length ? `AI model: ${configuredLlm.join(', ')}` : 'AI model: add an API key',
+        ok: configuredLlm.length > 0,
+        target: 'AI model',
+      },
+      {
+        label: mcp?.enabled && mcp.token ? 'Remote MCP: enabled' : 'Remote MCP: off',
+        ok: Boolean(mcp?.enabled && mcp.token),
+        target: 'Coding agents',
+      },
     ]);
   }, [client]);
-  useEffect(() => {
-    void load();
-    window.addEventListener('focus', load);
-    return () => window.removeEventListener('focus', load);
-  }, [load]);
+  useLoadOnFocus(load);
   if (!items) return null;
   return (
     <nav className="status-line" aria-label="Status">
       {items.map((item) => (
         <button
-          key={item.label}
+          key={item.target}
           type="button"
           className="pill"
           data-tone={item.ok ? 'success' : 'warning'}
-          disabled={!item.target}
           onClick={() => document.querySelector(`section[aria-label="${item.target}"]`)?.scrollIntoView({ behavior: 'smooth' })}
         >
           {item.label}
@@ -114,10 +118,6 @@ function StatusLine({ client }: { client: LensClient }) {
   );
 }
 
-/**
- * Lens signs in with the VibeQ session this browser already has: VibeQ mints a personal token for
- * a signed-in member, and the daemon keeps it in the system secret store.
- */
 function VibeQ({ client }: { client: LensClient }) {
   const [settings, setSettings] = useState<VibeQSettings | null>(null);
   const [address, setAddress] = useState('');
@@ -145,7 +145,6 @@ function VibeQ({ client }: { client: LensClient }) {
     [client],
   );
 
-  /** One attempt: true when VibeQ knew the person and Lens saved the token. */
   const tryToken = useCallback(
     async (origin: string) => {
       const token = await mintToken(origin);
@@ -163,7 +162,6 @@ function VibeQ({ client }: { client: LensClient }) {
     } catch {
       return setProblem('Type the VibeQ address, for example https://work.sirv.studio');
     }
-    // Chrome grants a permission only while the click is in progress, so Lens asks before anything else.
     let granted: boolean;
     try {
       granted = await browser.permissions.request({ origins: [sitePattern(origin)] });
@@ -185,12 +183,10 @@ function VibeQ({ client }: { client: LensClient }) {
     }
   }
 
-  // While the person signs in to VibeQ in the other tab, try again until VibeQ knows them.
   useEffect(() => {
     if (!waitingFor) return;
     const started = Date.now();
     let running = false;
-    // Cancel during a request: its token, when it comes, is not saved.
     let cancelled = false;
     const attempt = async () => {
       if (running || cancelled) return;
@@ -246,15 +242,11 @@ function VibeQ({ client }: { client: LensClient }) {
           </span>
           <span className="account-text">
             <strong>{settings.account ?? 'Signed in'}</strong>
-            <span className="small muted">
-              {settings.tokenFromEnvironment ? `${host} · token from LENS_VIBEQ_TOKEN` : host}
-            </span>
+            <span className="small muted">{host}</span>
           </span>
-          {!settings.tokenFromEnvironment && (
-            <button type="button" className="btn btn-secondary btn-sm" onClick={() => void signOut()}>
-              Sign out
-            </button>
-          )}
+          <button type="button" className="btn btn-secondary btn-sm" onClick={() => void signOut()}>
+            Sign out
+          </button>
         </div>
       ) : (
         <>
@@ -271,15 +263,6 @@ function VibeQ({ client }: { client: LensClient }) {
               disabled={!!waitingFor}
             />
           </div>
-          {settings.secretStore.state === 'unavailable' && !settings.tokenFromEnvironment && (
-            <div role="alert" className="notice" data-tone="warning">
-              <AlertIcon size={16} />
-              <span>
-                The system secret store is unavailable ({settings.secretStore.reason}). Lens cannot keep a VibeQ
-                sign-in.
-              </span>
-            </div>
-          )}
           {waitingFor ? (
             <div role="status" aria-label="Sign-in" className="notice waiting" data-tone="info">
               <span className="spinner" aria-hidden="true" />
@@ -306,7 +289,6 @@ function VibeQ({ client }: { client: LensClient }) {
   );
 }
 
-/** For a browser without a VibeQ session: a personal token from VibeQ, pasted once. */
 function TokenForm({ address, save }: { address: string; save: (endpoint: string, token: string) => Promise<void> }) {
   const [token, setToken] = useState('');
   const [problem, setProblem] = useState<string | null>(null);
@@ -341,7 +323,6 @@ function TokenForm({ address, save }: { address: string; save: (endpoint: string
   );
 }
 
-/** A new personal token from VibeQ for the member signed in to it in this browser, or null when nobody is. */
 async function mintToken(origin: string): Promise<string | null> {
   const response = await fetch(`${origin}/auth/mcp-token?label=${encodeURIComponent('Sirv Lens')}`, {
     credentials: 'include',
@@ -355,309 +336,392 @@ async function mintToken(origin: string): Promise<string | null> {
   return token;
 }
 
-const AGENT_STATE = { ready: 'Ready', signIn: 'Not signed in', missing: 'Not installed' } as const;
-
-/**
- * Which model writes titles and findings, splits long recordings and checks for duplicates. It
- * runs through the person's own Claude Code or Codex on this computer.
- */
-function Models({ client }: { client: LensClient }) {
-  const [agents, setAgents] = useState<AgentInfo[] | null>(null);
-  const [choice, setChoice] = useState<Agent | null | undefined>(undefined);
+/** Direct BYOK LLM API keys (Anthropic, OpenAI, Gemini) for findings, task splitting, and duplicate checks. */
+function Models() {
+  const [config, setConfig] = useState<LlmConfig | null>(null);
+  const [liveModels, setLiveModels] = useState<string[]>([]);
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [savedNotice, setSavedNotice] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
-  const [findings, setFindings] = useState<FindingsSettings | null>(null);
-  // Again when the window comes back: the person may sign in to an agent in a terminal meanwhile.
-  const load = useCallback(
-    () =>
-      Promise.all([
-        client.request({ method: 'listAgents' }),
-        client.request({ method: 'getSummaryAgent' }),
-        client.request({ method: 'getFindingsSettings' }).catch(() => null),
-      ])
-        .then(([found, chosen, settings]) => {
-          setAgents(found);
-          setChoice(chosen);
-          setFindings(settings);
-        })
-        .catch((error: Error) => setProblem(error.message)),
-    [client],
-  );
+
+  const load = useCallback(() => {
+    void getLlmConfig()
+      .then(setConfig)
+      .catch((error: Error) => setProblem(error.message));
+  }, []);
   useLoadOnFocus(load);
-  if (!agents || choice === undefined) return problem ? <p role="alert" className="notice">{problem}</p> : null;
-  const state = (agent: Agent) => agents.find((a) => a.agent === agent)?.state ?? 'missing';
-  const options: { value: Agent | null; label: string; detail: string }[] = [
-    { value: null, label: 'Automatic', detail: 'Claude Code when it is ready, otherwise Codex.' },
-    { value: 'claude', label: 'Claude Code (Haiku)', detail: AGENT_STATE[state('claude')] },
-    { value: 'codex', label: 'Codex', detail: AGENT_STATE[state('codex')] },
+
+  const activeProvider: LlmProvider | null = config
+    ? config.provider ?? (['openrouter', 'anthropic', 'openai', 'gemini'] as LlmProvider[]).find((p) => Boolean(config.keys[p])) ?? null
+    : null;
+  const activeKey = config && activeProvider ? config.keys[activeProvider] : '';
+
+  const refreshModels = useCallback(async () => {
+    if (!activeProvider || !activeKey) {
+      setLiveModels([]);
+      return;
+    }
+    setLoadingModels(true);
+    setProblem(null);
+    try {
+      setLiveModels(await listProviderModels(activeProvider, activeKey));
+    } catch (error) {
+      setProblem((error as Error).message);
+    } finally {
+      setLoadingModels(false);
+    }
+  }, [activeProvider, activeKey]);
+
+  useEffect(() => {
+    if (activeProvider && activeKey) void refreshModels();
+    else setLiveModels([]);
+  }, [activeProvider, activeKey, refreshModels]);
+
+  if (!config) return problem ? <Problem text={problem} /> : null;
+
+  async function update(patch: Partial<LlmConfig>) {
+    setProblem(null);
+    setSavedNotice(false);
+    const optimistic: LlmConfig = {
+      ...config!,
+      ...patch,
+      keys: { ...config!.keys, ...(patch.keys ?? {}) },
+    };
+    setConfig(optimistic);
+    try {
+      const next = await saveLlmConfig(patch);
+      setConfig(next);
+      setSavedNotice(true);
+    } catch (error) {
+      setProblem((error as Error).message);
+    }
+  }
+
+  const providers: Array<[LlmProvider | null, string, string]> = [
+    [null, 'Automatic', 'Uses the first configured key (OpenRouter → Anthropic → OpenAI → Gemini).'],
+    ['openrouter', `OpenRouter (${DEFAULT_LLM_MODELS.openrouter})`, config.keys.openrouter ? 'API key saved' : 'No key set'],
+    ['anthropic', `Anthropic (${DEFAULT_LLM_MODELS.anthropic})`, config.keys.anthropic ? 'API key saved' : 'No key set'],
+    ['openai', `OpenAI (${DEFAULT_LLM_MODELS.openai})`, config.keys.openai ? 'API key saved' : 'No key set'],
+    ['gemini', `Google Gemini (${DEFAULT_LLM_MODELS.gemini})`, config.keys.gemini ? 'API key saved' : 'No key set'],
   ];
-  async function choose(value: Agent | null) {
-    const before = choice;
-    setChoice(value);
-    setProblem(null);
-    try {
-      await client.request({ method: 'setSummaryAgent', params: { agent: value } });
-    } catch (error) {
-      setChoice(before ?? null);
-      setProblem((error as Error).message);
-    }
-  }
-  /** The provider is the agent chosen above: the app keeps one setting for both. */
-  async function saveFindings(change: Partial<FindingsSettings>) {
-    if (!findings) return;
-    setProblem(null);
-    try {
-      setFindings(
-        await client.request({ method: 'setFindingsSettings', params: { ...findings, provider: choice ?? null, ...change } }),
-      );
-    } catch (error) {
-      setProblem((error as Error).message);
-    }
-  }
+
   return (
     <section aria-label="AI model" className="card settings-section">
       <div className="section">
-        <h2>AI model</h2>
+        <h2>AI model (BYOK)</h2>
         <p className="small muted">
-          Writes the title and findings, splits long recordings into tasks and looks for duplicates. Lens runs it through
-          the tool on this computer, with your own subscription. It sends text only: your words, the steps and the page
-          text. Audio and screenshots stay here.
+          Writes the title and findings, splits long recordings into tasks, and checks for duplicates directly from your
+          browser using your own API key (OpenRouter, Anthropic, OpenAI, or Gemini). Keys stay local in this browser profile.
         </p>
       </div>
-      <div className="choices" role="radiogroup" aria-label="AI model">
-        {options.map((o) => {
-          const unavailable = o.value !== null && state(o.value) !== 'ready';
-          return (
-            <label key={o.label} className="check">
-              <input type="radio" name="summary-agent" checked={choice === o.value} onChange={() => void choose(o.value)} />
-              <span>
-                {o.label}
-                <span className="small muted" style={{ display: 'block' }} data-unavailable={unavailable || undefined}>
-                  {o.detail}
-                </span>
-              </span>
-            </label>
-          );
-        })}
-      </div>
-      {choice !== null && state(choice) !== 'ready' && (
-        <p role="alert" className="small">
-          {choice === 'claude' ? 'Claude Code' : 'Codex'} is {AGENT_STATE[state(choice)].toLowerCase()}, so Lens writes no
-          titles or findings until you install it and sign in, or choose Automatic.
-        </p>
-      )}
-      {findings && (
-        <>
-          <label className="check">
-            <input
-              type="checkbox"
-              checked={findings.enabled}
-              onChange={(e) => void saveFindings({ enabled: e.target.checked })}
-            />
-            <span>
-              Draft the title and findings after each recording
-              <span className="small muted" style={{ display: 'block' }}>
-                Off: you write the title and findings yourself.
-              </span>
-            </span>
-          </label>
-          <div className="field">
-            <label htmlFor="findings-model" className="label">
-              Model name (optional)
-            </label>
-            <input
-              key={findings.model ?? ''}
-              id="findings-model"
-              className="input"
-              defaultValue={findings.model ?? ''}
-              placeholder={choice === 'codex' ? 'The Codex default, or for example gpt-5' : 'haiku by default, or for example sonnet'}
-              maxLength={100}
-              spellCheck={false}
-              onBlur={(e) => {
-                const model = e.target.value.trim();
-                if (model !== (findings.model ?? '')) void saveFindings({ model: model || null });
-              }}
-            />
-          </div>
-        </>
-      )}
-      {problem && (
-        <p role="alert" className="small">
-          {problem}
-        </p>
-      )}
-    </section>
-  );
-}
 
-/** Connects the coding agents here to Lens: the sirv-lens skill and MCP server. */
-function CodingAgents({ client }: { client: LensClient }) {
-  const [live, setLive] = useStored('lens.agentsLive', false);
-  const [busy, setBusy] = useState(false);
-  const [done, setDone] = useState<AgentSetup[] | null>(null);
-  const [problem, setProblem] = useState<string | null>(null);
-  /** Whether connect ran here (the sirv-lens skill is installed); null until the app answers. */
-  const [connected, setConnected] = useState<boolean | null>(null);
-  const load = useCallback(
-    () =>
-      client
-        .request({ method: 'setupStatus' })
-        .then((s) => setConnected(s.codingAgentsConnected))
-        .catch(() => {}),
-    [client],
-  );
-  useEffect(() => {
-    void load();
-    window.addEventListener('focus', load);
-    return () => window.removeEventListener('focus', load);
-  }, [load]);
-  async function run(method: 'connectAgents' | 'disconnectAgents') {
-    setBusy(true);
-    setProblem(null);
-    // The result of an earlier run is not the result of this one.
-    setDone(null);
-    try {
-      setDone(await client.request({ method }));
-    } catch (error) {
-      setProblem((error as Error).message);
-    }
-    // The buttons follow the new state, not the one before the run.
-    await load();
-    setBusy(false);
-  }
-  return (
-    <section aria-label="Coding agents" className="card settings-section">
-      <div className="section">
-        <h2>Coding agents</h2>
-        <p className="small muted">
-          Lets Claude Code, Codex, Cursor and Gemini CLI read your reviews: the sirv-lens skill tells them how, and the
-          Lens MCP server serves the steps, evidence, screenshots and tests. They only read, and only what you reviewed.
-          The same works in a terminal with <code>lens agents connect</code>.
-        </p>
-      </div>
-      {connected && (
-        <p className="small" role="status" aria-label="Coding agents state">
-          <DoneIcon size={14} /> Connected. Connect again after you install another agent.
-        </p>
-      )}
-      <div className="actions">
-        <button
-          type="button"
-          className={connected ? 'btn btn-secondary' : 'btn btn-primary'}
-          onClick={() => void run('connectAgents')}
-          disabled={busy}
-        >
-          {busy ? 'Working…' : connected ? 'Connect again' : 'Connect coding agents'}
-        </button>
-        {/* Unknown (the app did not answer) keeps the way out. */}
-        {connected !== false && (
-          <button type="button" className="btn btn-ghost" onClick={() => void run('disconnectAgents')} disabled={busy}>
-            Disconnect
-          </button>
-        )}
-      </div>
       <label className="check">
-        <input type="checkbox" checked={live} onChange={(e) => setLive(e.target.checked)} />
+        <input
+          type="checkbox"
+          checked={config.enabled}
+          onChange={(e) => void update({ enabled: e.target.checked })}
+        />
         <span>
-          Let coding agents read the last ten minutes
+          Draft the title and findings after each recording
           <span className="small muted" style={{ display: 'block' }}>
-            On the sites Lens collects on, while the browser is open: failed requests, console errors and steps, without a
-            recording. Screenshots, the replay and your voice are not included.
+            Off: you write the title and findings yourself.
           </span>
         </span>
       </label>
-      {done && (
-        <ul className="small agent-setup" role="status" aria-label="Coding agents result">
-          {done.map((a) => (
-            <li key={a.agent}>
-              {a.ok ? <DoneIcon size={14} /> : <AlertIcon size={14} />} <strong>{a.agent}</strong>: {a.detail}
-            </li>
+
+      <div className="choices" role="radiogroup" aria-label="AI provider">
+        {providers.map(([value, label, detail]) => (
+          <label key={label} className="check">
+            <input
+              type="radio"
+              name="llm-provider"
+              checked={config.provider === value}
+              onChange={() => void update({ provider: value })}
+            />
+            <span>
+              {label}
+              <span className="small muted" style={{ display: 'block' }}>
+                {detail}
+              </span>
+            </span>
+          </label>
+        ))}
+      </div>
+
+      <div className="field">
+        <label htmlFor="key-openrouter" className="label">
+          OpenRouter API key
+        </label>
+        <input
+          id="key-openrouter"
+          className="input"
+          type="password"
+          autoComplete="off"
+          defaultValue={config.keys.openrouter}
+          placeholder="sk-or-v1-..."
+          onBlur={(e) => {
+            if (e.target.value.trim() !== config.keys.openrouter) {
+              void update({ keys: { ...config.keys, openrouter: e.target.value.trim() } });
+            }
+          }}
+        />
+      </div>
+
+      <div className="field">
+        <label htmlFor="key-anthropic" className="label">
+          Anthropic API key
+        </label>
+        <input
+          id="key-anthropic"
+          className="input"
+          type="password"
+          autoComplete="off"
+          defaultValue={config.keys.anthropic}
+          placeholder="sk-ant-..."
+          onBlur={(e) => {
+            if (e.target.value.trim() !== config.keys.anthropic) {
+              void update({ keys: { ...config.keys, anthropic: e.target.value.trim() } });
+            }
+          }}
+        />
+      </div>
+
+      <div className="field">
+        <label htmlFor="key-openai" className="label">
+          OpenAI API key
+        </label>
+        <input
+          id="key-openai"
+          className="input"
+          type="password"
+          autoComplete="off"
+          defaultValue={config.keys.openai}
+          placeholder="sk-..."
+          onBlur={(e) => {
+            if (e.target.value.trim() !== config.keys.openai) {
+              void update({ keys: { ...config.keys, openai: e.target.value.trim() } });
+            }
+          }}
+        />
+      </div>
+
+      <div className="field">
+        <label htmlFor="key-gemini" className="label">
+          Google Gemini API key
+        </label>
+        <input
+          id="key-gemini"
+          className="input"
+          type="password"
+          autoComplete="off"
+          defaultValue={config.keys.gemini}
+          placeholder="AIza..."
+          onBlur={(e) => {
+            if (e.target.value.trim() !== config.keys.gemini) {
+              void update({ keys: { ...config.keys, gemini: e.target.value.trim() } });
+            }
+          }}
+        />
+      </div>
+
+      <div className="field">
+        <label htmlFor="findings-model" className="label">
+          Model {activeProvider ? `(${activeProvider})` : '(optional)'}
+        </label>
+        <div className="inline-fields">
+          <input
+            id="findings-model"
+            className="input"
+            list="live-llm-models"
+            defaultValue={config.model ?? ''}
+            key={`${activeProvider ?? 'auto'}:${config.model ?? ''}`}
+            placeholder={activeProvider ? `Default: ${DEFAULT_LLM_MODELS[activeProvider]}` : 'Leave empty for provider default'}
+            maxLength={100}
+            spellCheck={false}
+            onBlur={(e) => {
+              const model = e.target.value.trim() || null;
+              if (model !== config.model) void update({ model });
+            }}
+          />
+          {activeProvider && activeKey && (
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              disabled={loadingModels}
+              onClick={() => void refreshModels()}
+            >
+              {loadingModels ? 'Loading…' : `Refresh (${liveModels.length})`}
+            </button>
+          )}
+        </div>
+        <datalist id="live-llm-models">
+          {liveModels.map((m) => (
+            <option key={m} value={m} />
           ))}
-        </ul>
+        </datalist>
+      </div>
+
+      {savedNotice && (
+        <p className="small muted" role="status">
+          <DoneIcon size={14} /> AI settings saved.
+        </p>
       )}
       {problem && <Problem text={problem} />}
     </section>
   );
 }
 
-/** Lens updates itself from signed releases, unless a package manager or the Store does. */
-function Updates({ client }: { client: LensClient }) {
-  const [state, setState] = useState<UpdateState | null>(null);
-  /** What runs now: the button says it, and nothing else starts meanwhile. */
-  const [busy, setBusy] = useState<'install' | 'check' | 'automatic' | null>(null);
+/** Remote HTTP MCP configuration so Claude Code, Codex, and Cursor can read synced reviews without any local daemon. */
+function CodingAgents() {
+  const [config, setConfig] = useState<RemoteMcpConfig | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
-  useEffect(() => {
-    client.request({ method: 'getUpdates' }).then(setState).catch(() => {});
-  }, [client]);
-  if (!state) return null;
-  const act = async (what: NonNullable<typeof busy>, work: () => Promise<UpdateState>) => {
-    setBusy(what);
+
+  const load = useCallback(() => {
+    void getRemoteMcpConfig()
+      .then(setConfig)
+      .catch((error: Error) => setProblem(error.message));
+  }, []);
+  useLoadOnFocus(load);
+
+  if (!config) return problem ? <Problem text={problem} /> : null;
+
+  async function update(patch: Partial<RemoteMcpConfig>) {
+    setProblem(null);
+    setConfig((cur) => (cur ? { ...cur, ...patch } : cur));
     try {
-      setState(await work());
-      setProblem(null);
+      setConfig(await saveRemoteMcpConfig(patch));
     } catch (error) {
       setProblem((error as Error).message);
-    } finally {
-      setBusy(null);
     }
-  };
+  }
+
+  const mcpUrl = `${config.endpoint.replace(/\/+$/, '')}/mcp`;
+  const claudeCmd = `claude mcp add --transport http sirv-lens ${mcpUrl} --header "Authorization: Bearer ${config.token || '<your-token>'}"`;
+  const mcpJson = JSON.stringify(
+    {
+      mcpServers: {
+        'sirv-lens': {
+          url: mcpUrl,
+          headers: { Authorization: `Bearer ${config.token || '<your-token>'}` },
+        },
+      },
+    },
+    null,
+    2,
+  );
+
+  async function copy(label: string, text: string) {
+    await navigator.clipboard.writeText(text);
+    setCopied(label);
+    setTimeout(() => setCopied(null), 2500);
+  }
+
   return (
-    <section aria-label="Updates" className="card settings-section">
-      <div className="section-row">
-        <div className="section">
-          <h2>Updates</h2>
-          <p className="small muted num">
-            {state.available
-              ? `Lens ${state.available} is available.`
-              : state.checkedAt && state.lastError
-                ? `The last check failed, ${new Date(state.checkedAt).toLocaleString()}.`
-                : state.checkedAt
-                  ? `Up to date. Checked ${new Date(state.checkedAt).toLocaleString()}.`
-                : `Lens ${state.current}`}
-          </p>
-        </div>
-        {!state.managedBy && (
-          <button
-            type="button"
-            className="btn btn-secondary btn-sm"
-            // Check now only checks; the button installs only when it says so.
-            onClick={() =>
-              void (state.available
-                ? act('install', () => client.request({ method: 'updateNow' }))
-                : act('check', () => client.request({ method: 'checkUpdates' })))
-            }
-            disabled={busy !== null}
-          >
-            {busy === 'install' ? 'Installing…' : busy === 'check' ? 'Checking…' : state.available ? 'Install now' : 'Check now'}
-          </button>
-        )}
+    <section aria-label="Coding agents" className="card settings-section">
+      <div className="section">
+        <h2>Coding agents (Remote HTTP MCP)</h2>
+        <p className="small muted">
+          Sync reviewed bug reports to your remote MCP endpoint so Claude Code, Codex, and Cursor can inspect steps,
+          HARs, screenshots, and Playwright tests with zero local desktop app installed.
+        </p>
       </div>
-      {state.managedBy ? (
-        <p className="small muted">{state.managedBy} updates this copy of Lens.</p>
-      ) : (
-        <label className="check">
-          <input
-            type="checkbox"
-            checked={state.automatic}
-            disabled={busy !== null}
-            onChange={(e) => {
-              const enabled = e.target.checked;
-              void act('automatic', () => client.request({ method: 'setAutomaticUpdates', params: { enabled } }));
-            }}
-          />
-          <span>
-            Install updates automatically
-            <span className="small muted" style={{ display: 'block' }}>
-              Signed releases only. Lens restarts in the background.
+
+      <label className="check">
+        <input
+          type="checkbox"
+          checked={config.enabled}
+          onChange={(e) => {
+            const enabled = e.target.checked;
+            void update({ enabled, token: enabled && !config.token ? generateRemoteMcpToken() : config.token });
+          }}
+        />
+        <span>Enable Remote HTTP MCP sync</span>
+      </label>
+
+      {config.enabled && (
+        <>
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={config.autoSync}
+              onChange={(e) => void update({ autoSync: e.target.checked })}
+            />
+            <span>Automatically sync each new review when created</span>
+          </label>
+
+          <div className="field">
+            <label htmlFor="mcp-endpoint" className="label">
+              Remote MCP server URL
+            </label>
+            <input
+              id="mcp-endpoint"
+              className="input"
+              defaultValue={config.endpoint}
+              placeholder={DEFAULT_MCP_ENDPOINT}
+              spellCheck={false}
+              onBlur={(e) => {
+                const next = e.target.value.trim().replace(/\/+$/, '') || DEFAULT_MCP_ENDPOINT;
+                if (next !== config.endpoint) void update({ endpoint: next });
+              }}
+            />
+          </div>
+
+          <div className="field">
+            <label htmlFor="mcp-token" className="label">
+              Personal access token
+            </label>
+            <div className="inline-fields">
+              <input
+                id="mcp-token"
+                className="input"
+                type="password"
+                autoComplete="off"
+                value={config.token}
+                onChange={(e) => void update({ token: e.target.value })}
+                placeholder="lens_..."
+              />
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => void update({ token: generateRemoteMcpToken() })}
+              >
+                Generate token
+              </button>
+            </div>
+            <span className="small muted">
+              Your extension and your coding agents share this token so only you can read your synced reviews.
             </span>
-          </span>
-        </label>
+          </div>
+
+          {config.token && (
+            <div className="section">
+              <p className="label">Connect Claude Code</p>
+              <pre className="code small" style={{ overflowX: 'auto', padding: '8px' }}>
+                {claudeCmd}
+              </pre>
+              <div className="actions">
+                <button type="button" className="btn btn-secondary btn-sm" onClick={() => void copy('Claude Code command', claudeCmd)}>
+                  Copy Claude Code command
+                </button>
+                <button type="button" className="btn btn-ghost btn-sm" onClick={() => void copy('MCP JSON', mcpJson)}>
+                  Copy MCP JSON (Cursor / Codex)
+                </button>
+                {copied && (
+                  <span className="small muted" role="status">
+                    <DoneIcon size={14} /> Copied {copied}.
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+        </>
       )}
-      {(problem || state.lastError) && <Problem text={(problem ?? state.lastError)!} />}
+      {problem && <Problem text={problem} />}
     </section>
   );
 }
 
-/** Chrome hides every extension in Incognito until the person turns on Allow in Incognito. */
 function IncognitoNote() {
   const [allowed, setAllowed] = useState<boolean | null>(null);
   const load = useCallback(() => {
@@ -686,7 +750,6 @@ followSystemTheme();
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <AppStatus />
     <Settings />
   </StrictMode>,
 );

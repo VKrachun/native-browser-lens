@@ -3,7 +3,7 @@ import { DeepCollector } from '@/collector/deep';
 import { LimitedCollector, captureTab, visibleShot } from '@/collector/limited';
 import { maskShot, privateRects } from '@/collector/shot-mask';
 import { PRIVACY_KEY, privacySettings, sanitize, sanitizeText, sanitizeUrl, setCustomRedaction } from '@/collector/sanitize';
-import { LensClient } from '@/lens-client';
+import { BackgroundLensClient as LensClient } from '@/engine/bg-client';
 import { clientInfo } from '@/identity';
 import {
   originOf,
@@ -1124,69 +1124,6 @@ export default defineBackground(() => {
     });
   }
 
-  /**
-   * Live evidence for coding agents, when the person turned it on in Settings: one request waits
-   * for an agent's question, on a connection of its own, while Lens collects on a tab. The answer
-   * is the same buffer a capture takes, without the screenshot, the shots and the replay.
-   */
-  let agentsLive = false;
-  let serving = false;
-  const LIVE_KEY = 'lens.agentsLive';
-  async function serveAgents() {
-    if (serving) return;
-    serving = true;
-    const poller = new LensClient();
-    let after = 0;
-    try {
-      while (agentsLive) {
-        const recorded = (await browser.tabs.query({})).filter((t) => t.id !== undefined && buffer.mode(t.id) !== undefined);
-        if (recorded.length === 0 || paused) {
-          await new Promise((done) => setTimeout(done, 5000));
-          continue;
-        }
-        const ask = await poller.request({ method: 'waitForAsk', params: { after } });
-        if (!ask) continue;
-        after = ask.id;
-        // The person may have paused Lens or turned this off while the question waited.
-        paused = (await poller.request({ method: 'hello' })).paused;
-        if (!agentsLive || paused) {
-          await poller.request({ method: 'provideEvidence', params: { ask: ask.id, tabs: [] } });
-          continue;
-        }
-        const from = Date.now() - WINDOW_MS;
-        const tabs = [];
-        for (const tab of await browser.tabs.query({})) {
-          // A recording can span projects: its evidence leaves as a review, not here.
-          if (tab.id === undefined || !collecting(tab.id) || sessions.has(tab.id)) continue;
-          let host = '';
-          try {
-            host = new URL(tab.url ?? '').hostname;
-          } catch {
-            continue;
-          }
-          if (ask.site && host !== ask.site && !host.endsWith(`.${ask.site}`)) continue;
-          const snapshot = buffer.snapshot(tab.id, from);
-          if (!snapshot) continue;
-          tabs.push({
-            url: sanitizeUrl(tab.url ?? ''),
-            title: sanitizeText(tab.title ?? ''),
-            evidence: { ...snapshot, page: null, actions: actions.snapshot(tab.id, from), elements: [] } as unknown as JsonValue,
-          });
-        }
-        await poller.request({ method: 'provideEvidence', params: { ask: ask.id, tabs } });
-      }
-    } catch {
-      // Lens stopped or restarted: try again soon.
-      setTimeout(() => void serveAgents(), 10_000);
-    } finally {
-      poller.disconnect();
-      serving = false;
-    }
-  }
-  void browser.storage.local.get(LIVE_KEY).then((found) => {
-    agentsLive = found[LIVE_KEY] === true;
-    if (agentsLive) void serveAgents();
-  });
   browser.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
     if (PRIVACY_KEY in changes) applyPrivacy(changes[PRIVACY_KEY]?.newValue);
@@ -1194,18 +1131,13 @@ export default defineBackground(() => {
       lastProjectsSync = String(changes[PROJECTS_SYNC_KEY]?.newValue ?? '');
       void ready.then(() => loadProjects()).then(() => broadcast({ kind: 'tabChanged', tabId: -1 }));
     }
-    if (LIVE_KEY in changes) {
-      agentsLive = changes[LIVE_KEY]?.newValue === true;
-      if (agentsLive) void serveAgents();
-    }
   });
 
   // The recordings of an earlier worker first: the sync after it then resumes them.
   restoring = restore().catch(() => {});
   ready = restoring
     .then(async () => {
-      // An app that does not answer holds nothing up for long: the projects come with the next look.
-      await Promise.race([loadProjects(), new Promise((done) => setTimeout(done, 10_000))]);
+      await loadProjects();
       // A microphone page that no restored recording owns records nothing anyone can save. Before
       // any message is handled, so no new start loses its microphone to this.
       if (!import.meta.env.FIREFOX && offscreenIdle() && (await browser.offscreen.hasDocument().catch(() => false))) {
@@ -1214,13 +1146,26 @@ export default defineBackground(() => {
     })
     .catch(() => {});
   void ready.then(() => broadcast({ kind: 'tabChanged', tabId: -1 }));
-  // Pause and resume come from the Lens menu, outside the browser: check for them regularly.
-  setInterval(() => {
-    const before = paused;
-    void loadProjects().then(() => {
-      if (before !== paused) void broadcast({ kind: 'tabChanged', tabId: -1 });
-    });
-  }, 15_000);
+
+  // Periodic storage retention & orphan blob sweep (replaces the old daemon hourly loop).
+  const SWEEP_ALARM = 'lens.sweep';
+  void browser.alarms.create(SWEEP_ALARM, { periodInMinutes: 60 });
+  browser.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name !== SWEEP_ALARM) return;
+    void (async () => {
+      try {
+        const usage = await client().request({ method: 'getStorage' });
+        if (usage.retentionDays !== null) {
+          await client().request({
+            method: 'pruneStorage',
+            params: { olderThanDays: usage.retentionDays, filedOnly: usage.retentionFiledOnly },
+          });
+        }
+      } catch {
+        // ignore transient alarm errors
+      }
+    })();
+  });
 });
 
 function broadcast(message: Broadcast) {

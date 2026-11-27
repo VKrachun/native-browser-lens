@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { LensClient, PROTOCOL_VERSION, type LensError } from '@/lens-client';
+import { LensClient } from '@/lens-client';
 import { originOf, send, sitePattern, type Broadcast, type TabStatus } from '@/messages';
 import type { Capture } from '@/protocol/Capture';
 import type { Hello } from '@/protocol/Hello';
@@ -11,12 +11,8 @@ import { Notes } from './Notes';
 import { VoiceNotes } from './Voice';
 import { RecordControls, ScreenNotice, useStored } from './Record';
 import { DestinationForm } from '@/ui/Destination';
-import { InstallApp, SetupCard, hostNotFound } from './Onboarding';
 
-type Connection = { state: 'connecting' } | { state: 'ready'; hello: Hello } | { state: 'failed'; message: string; quit: boolean };
-
-/** 3 s for the first tries (an update restarts the app), then twice as long each time, up to a minute. */
-const retryAfter = (failures: number) => Math.min(60_000, 3000 * 2 ** Math.max(0, failures - 4));
+type Connection = { state: 'connecting' } | { state: 'ready'; hello: Hello } | { state: 'failed'; message: string };
 
 const MODE = {
   deep: { tone: 'success', label: 'Collecting', detail: 'Collecting network, console and errors' },
@@ -49,18 +45,6 @@ function SiteIcon({ origin }: { origin: string }) {
   return <img className="site-icon" src={src} alt="" onError={() => setFailed(true)} />;
 }
 
-/** Reloads this page at most once a minute, so a page that cannot heal does not reload forever. */
-function reloadOnce() {
-  try {
-    const last = Number(sessionStorage.getItem('lens.healedAt'));
-    if (Date.now() - last < 60_000) return;
-    sessionStorage.setItem('lens.healedAt', String(Date.now()));
-  } catch {
-    return;
-  }
-  location.reload();
-}
-
 export function App() {
   const [client, setClient] = useState<LensClient | null>(null);
   const [connection, setConnection] = useState<Connection>({ state: 'connecting' });
@@ -69,14 +53,6 @@ export function App() {
   const [tabId, setTabId] = useState<number | null>(null);
   const [site, setSite] = useState<TabStatus | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
-  const [attempt, setAttempt] = useState(0);
-  const wasReady = useRef(false);
-  const failures = useRef(0);
-  const [reconnecting, setReconnecting] = useState(false);
-  /** The person quit the app (the host said so): the panel says that, not that it failed. */
-  const [quit, setQuit] = useState(false);
-  const session = useRef(false);
-  session.current = site?.session != null;
   const lastWebTab = useRef<number | null>(null);
 
   /**
@@ -98,44 +74,20 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    // Until the app answers, try again every few seconds: installing it continues this panel.
-    let retry: ReturnType<typeof setTimeout> | undefined;
-    let failed = false;
     let alive = true;
-    const fail = (error: LensError) => {
-      if (failed || !alive) return;
-      failed = true;
-      failures.current += 1;
-      retry = setTimeout(() => setAttempt((n) => n + 1), retryAfter(failures.current));
-      setQuit(error.code === 'quit');
-      // A connection that worked and dropped (the app restarts for an update) heals within a few
-      // tries: the panel stays as it was. During a recording it always stays, so the recording
-      // and its microphone keep going.
-      if (wasReady.current && (failures.current <= 4 || session.current)) setReconnecting(true);
-      else setConnection({ state: 'failed', message: error.message, quit: error.code === 'quit' });
-      // The port itself still fails after a retry while the background reaches the app: this page
-      // outlived its extension (Firefox can keep a sidebar open across an add-on update), and a
-      // reload gives it a live one. Never during a recording: the reload would end its voice.
-      if (error.code !== 'disconnected' || failures.current < 2 || session.current) return;
-      void send<boolean>({ kind: 'lensReachable' })
-        .catch(() => true)
-        .then((reachable) => alive && reachable && reloadOnce());
-    };
-    const lens = new LensClient(fail);
+    const lens = new LensClient();
     setClient(lens);
     Promise.all([lens.request({ method: 'hello' }), lens.request({ method: 'listObservations' })])
       .then(([hello, list]) => {
         if (!alive) return;
-        wasReady.current = true;
-        failures.current = 0;
-        setReconnecting(false);
-        setQuit(false);
         setConnection({ state: 'ready', hello });
         setObservations(list);
-        // The background script connects and announces too, now that the app exists.
         void send({ kind: 'projectsChanged' }).catch(() => {});
       })
-      .catch(fail);
+      .catch((error: Error) => {
+        if (!alive) return;
+        setConnection({ state: 'failed', message: error.message });
+      });
     void refreshSite();
     const listener = (message: Broadcast) => {
       if (message.kind === 'tabChanged') void refreshSite();
@@ -147,11 +99,10 @@ export function App() {
     browser.runtime.onMessage.addListener(listener);
     return () => {
       alive = false;
-      clearTimeout(retry);
       browser.runtime.onMessage.removeListener(listener);
       lens.disconnect();
     };
-  }, [refreshSite, attempt]);
+  }, [refreshSite]);
 
   const reloadObservations = useCallback(() => {
     void client?.request({ method: 'listObservations' }).then(setObservations);
@@ -163,12 +114,17 @@ export function App() {
     return () => clearInterval(timer);
   }, [connection.state, reloadObservations]);
 
+  async function togglePaused() {
+    if (!client) return;
+    const nextPaused = !site?.paused;
+    await client.request({ method: 'setPaused', params: { paused: nextPaused } });
+    await send({ kind: 'projectsChanged' });
+    await refreshSite();
+  }
+
   async function track() {
     if (!client || !site?.origin) return;
     const origin = site.origin;
-    // The permission prompt must open inside the click, before any other await. The site only:
-    // Firefox's screenshot access (all sites) is its own prompt at Record and Capture (see
-    // useScreenAccess), so refusing that one never blocks adding the site.
     let granted: boolean;
     try {
       granted = await browser.permissions.request({ origins: [sitePattern(origin)] });
@@ -203,15 +159,23 @@ export function App() {
           className="conn"
           data-state={connection.state}
           role="status"
-          aria-label="Connection"
+          aria-label="Status"
           title={connection.state === 'failed' ? connection.message : undefined}
         >
-          {connection.state === 'connecting' && 'Connecting…'}
-          {connection.state === 'ready' &&
-            (reconnecting ? (quit ? 'Lens quit' : 'Reconnecting…') : `Connected · Lens ${connection.hello.version}`)}
-          {connection.state === 'failed' &&
-            (connection.quit ? 'Lens quit' : hostNotFound(connection.message) ? 'App not found' : 'Disconnected')}
+          {connection.state === 'connecting' && 'Loading…'}
+          {connection.state === 'ready' && `Ready · v${connection.hello.version}`}
+          {connection.state === 'failed' && 'Storage error'}
         </span>
+        {connection.state === 'ready' && (
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            title={site?.paused ? 'Resume evidence collection' : 'Pause evidence collection'}
+            onClick={() => void togglePaused()}
+          >
+            {site?.paused ? 'Resume' : 'Pause'}
+          </button>
+        )}
         <button
           type="button"
           className="btn btn-ghost btn-icon btn-sm"
@@ -223,29 +187,17 @@ export function App() {
         </button>
       </header>
 
-      {connection.state === 'failed' && <InstallApp reason={connection.message} quit={connection.quit} />}
+      {connection.state === 'failed' && (
+        <div role="alert" className="notice">
+          <AlertIcon />
+          <span>Lens local storage failed to open: {connection.message}</span>
+        </div>
+      )}
 
       {connection.state === 'ready' && client && (
         <>
-          {reconnecting && quit && (
-            <div role="alert" className="notice" data-tone="warning">
-              <AlertIcon />
-              <span>You quit the Lens app. Open Sirv Lens from your applications. This panel continues when the app answers.</span>
-            </div>
-          )}
-          {connection.hello.protocol !== PROTOCOL_VERSION && (
-            <div role="alert" className="notice" data-tone="warning">
-              <AlertIcon />
-              <span>
-                {connection.hello.protocol < PROTOCOL_VERSION
-                  ? 'The Lens app is older than this extension. Download the newest Lens app from lens.sirv.studio.'
-                  : 'This extension is older than the Lens app. Update the extension.'}
-              </span>
-            </div>
-          )}
           <ScreenNotice />
           <DestinationForm client={client} onboarding />
-          <SetupCard client={client} refresh={site?.mode ? 1 : 0} />
 
           <section className="card site" aria-label="This site">
             {!current && (
@@ -263,7 +215,7 @@ export function App() {
                     </span>
                     <span className="small muted">
                       {site.paused
-                        ? 'Collection is paused from the Lens menu.'
+                        ? 'Collection is paused. Click Resume in the header to collect again.'
                         : site.debuggerDeclined
                           ? 'Debugging cancelled — network and console paused'
                           : (mode?.detail ?? 'Lens does not collect evidence here yet.')}

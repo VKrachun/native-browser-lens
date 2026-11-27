@@ -1,12 +1,20 @@
 {
-  // lens.sirv.studio: a static site, served by Workers static assets. `node site/deploy.mjs`
-  // assembles dist/ (pages plus the installers and their manifest) and deploys it.
+  // lens.sirv.studio: static site + Remote Streamable HTTP MCP server (/mcp, /api/mcp/*).
   "name": "sirv-lens-site",
+  "main": "./worker/index.ts",
   "compatibility_date": "2026-11-01",
+  "kv_namespaces": [
+    {
+      "binding": "LENS_MCP_KV",
+      "id": "cf6bc68325fb44f581073a0651a4f585"
+    }
+  ],
   "assets": {
     "directory": "./dist",
+    "binding": "ASSETS",
     "not_found_handling": "404-page",
-    "html_handling": "auto-trailing-slash"
+    "html_handling": "auto-trailing-slash",
+    "run_worker_first": ["/mcp", "/api/mcp/*"]
   },
   "routes": [{ "pattern": "lens.sirv.studio", "custom_domain": true }]
 }
