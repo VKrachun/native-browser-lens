@@ -22,7 +22,9 @@ export type BackgroundRequest =
   /** Whether the background's own connection to the app answers: true or false. */
   | { kind: 'lensReachable' };
 
-export type CaptureResult = { ok: true; capture: Capture } | { ok: false; error: string };
+export type CaptureResult =
+  | { ok: true; capture: Capture; voiceError?: string }
+  | { ok: false; error: string };
 
 export type SessionStart =
   | { ok: true; startedAt: number }

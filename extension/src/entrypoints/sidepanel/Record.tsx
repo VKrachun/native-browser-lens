@@ -167,6 +167,20 @@ export function RecordControls({
     return () => clearInterval(timer);
   }, [running]);
 
+  // Firefox: if the session stopped externally (e.g. Alt+Shift+R shortcut) while the sidebar held the mic,
+  // release the microphone so the browser mic indicator does not stay stuck on.
+  useEffect(() => {
+    if (running !== null || tabId === null) return;
+    if (microphoneTab.current === tabId && microphone.current) {
+      microphone.current.cancel();
+      microphone.current = microphoneTab.current = null;
+    }
+    if (videoTab.current === tabId && videoRec.current) {
+      videoRec.current.cancel();
+      videoRec.current = videoTab.current = null;
+    }
+  }, [running, tabId]);
+
   // Firefox only: closing the panel ends its microphone; the session keeps running in the tab, and
   // the voice so far waits in the spool for its Stop. Chrome records the voice in the background,
   // so it survives the panel.
@@ -301,9 +315,17 @@ export function RecordControls({
         if (blob) uploadedVideo = { blob, startedAt: film.startedAt, truncated: film.truncated };
         else keptVideo.current = { film, tab: tabId, session };
       }
+      let decodeVoiceError: string | null = null;
       const [result, wav] = await Promise.all([
         send<CaptureResult>({ kind: 'stopSession', tabId, video: uploadedVideo }).then((reply) => reply ?? NO_ANSWER),
-        kept ? Promise.resolve(kept.wav) : spoken ? spoken.stop() : Promise.resolve(null),
+        kept
+          ? Promise.resolve(kept.wav)
+          : spoken
+            ? spoken.stop().catch((error: Error) => {
+                decodeVoiceError = error.message;
+                return null;
+              })
+            : Promise.resolve(null),
       ]);
       const startedAt = kept?.startedAt ?? spoken?.startedAt;
       if (!result.ok) {
@@ -325,7 +347,10 @@ export function RecordControls({
       if (film) keptVideo.current = null;
       setFailedStop(null);
       // The recording is saved: a voice note that fails says so, and the review still opens.
-      let voiceProblem: string | null = null;
+      let voiceProblem: string | null = result.voiceError ?? null;
+      if (decodeVoiceError) {
+        voiceProblem = `The recording is saved, but its voice note could not be decoded: ${decodeVoiceError}`;
+      }
       try {
         if (wav && startedAt !== undefined) {
           const audio = await client.upload(wav, 'audio/wav');
@@ -334,7 +359,7 @@ export function RecordControls({
             params: { observation: result.capture.observation, startedAt, audio },
           });
         }
-        await unspool(tabId, session);
+        await unspool(tabId, session).catch(() => {});
       } catch (error) {
         // The voice stays in the browser's spool; only the voice note is missing.
         voiceProblem = `The recording is saved, but its voice note is not: ${(error as Error).message}`;
@@ -342,6 +367,7 @@ export function RecordControls({
       onProblem(voiceProblem);
       await browser.tabs.create({
         url: browser.runtime.getURL(`/review.html?observation=${result.capture.observation}`),
+        active: true,
       });
     } catch (error) {
       onProblem(`The recording was not saved: ${(error as Error).message}`);

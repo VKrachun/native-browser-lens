@@ -24,6 +24,7 @@ import type { CoverageGap } from '@/protocol/CoverageGap';
 import type { Action } from '@/protocol/Action';
 import type { PageElement } from '@/protocol/PageElement';
 import type { BlobRef } from '@/protocol/BlobRef';
+import type { Capture } from '@/protocol/Capture';
 import type { Prepared, RecorderMessage } from './recorder.content';
 import { spool, spooled, unspool } from '@/voice-spool';
 import * as evidence from '@/collector/evidence-spool';
@@ -733,12 +734,29 @@ export default defineBackground(() => {
     return { ok: true, at };
   }
 
+  /** Opens the review page for a newly finished recording in the same window and focuses it. */
+  async function openRecordedTab(capture: Capture, sourceTabId: number) {
+    const sourceTab = await browser.tabs.get(sourceTabId).catch(() => null);
+    await browser.tabs
+      .create({
+        url: browser.runtime.getURL(`/review.html?observation=${capture.observation}`),
+        active: true,
+        ...(sourceTab?.windowId !== undefined ? { windowId: sourceTab.windowId } : {}),
+      })
+      .catch(() => {});
+  }
+
   /** The recording shortcuts: they work with the panel closed too. A refusal shows "!" on the badge. */
   function shortcut(command: string, tabId: number) {
     const refused = (result: { ok: boolean }) => void (result.ok || flashBadge('!', '#6b7280'));
     if (command === 'toggle-recording') {
       void ready
-        .then((): Promise<{ ok: boolean }> => (sessions.has(tabId) ? stopSession(tabId) : startSession(tabId)))
+        .then(async (): Promise<{ ok: boolean }> => {
+          if (!sessions.has(tabId)) return startSession(tabId);
+          const result = await stopSession(tabId);
+          if (result.ok) await openRecordedTab(result.capture, tabId);
+          return result;
+        })
         .then(refused, () => refused({ ok: false }));
     } else if (command === 'drop-marker') {
       void ready.then(() => refused(dropMarker(tabId)));
@@ -926,7 +944,12 @@ export default defineBackground(() => {
         params: { observation: result.capture.observation, startedAt: spoken.startedAt, audio: sent },
       });
     } catch (error) {
-      return { ok: false, error: `The recording was saved, but not the voice: ${(error as Error).message}` };
+      // The capture itself is already saved — return ok:true so the recording page still opens.
+      return {
+        ok: true,
+        capture: result.capture,
+        voiceError: `The recording was saved, but not the voice: ${(error as Error).message}`,
+      };
     } finally {
       // The kept voice is in the app now, or belongs to no recording any more.
       if (!import.meta.env.FIREFOX) void unspool(tabId, startedAt);
