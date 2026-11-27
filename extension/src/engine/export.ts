@@ -267,7 +267,7 @@ export async function buildReviewBundle(review: Review): Promise<ReviewBundle> {
     const har = buildHar(evidence);
     const hasHar = har.log.entries.length > 0;
     const spec = buildPlaywrightSpec(evidence, n, review.title, item.pageUrl, { hasHar });
-    const lensCapture = await buildLensCapture(review, item, evidence, getExtensionVersion());
+    const lensCapture = await buildLensCapture(review, item, evidence, getExtensionVersion(), n);
 
     addText(`capture-${n}-evidence.json`, JSON.stringify(evidence, null, 2), 'application/json');
     addText(`capture-${n}.lens.json`, lensCapture, 'application/vnd.sirv.lens-capture+json');

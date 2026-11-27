@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { Evidence } from '@/protocol/Evidence';
 import { createCapture, getObservation, putBlob, resetDbForTests, saveAnnotations } from './db';
 import { digestRecording, trimRecording, type RrEvent } from './digest';
-import { buildEvidenceZip, createReview } from './export';
+import { buildEvidenceZip, buildReviewBundle, createReview } from './export';
 import { buildHar, buildPlaywrightSpec } from './repro';
 
 beforeEach(async () => {
@@ -199,5 +199,52 @@ describe('engine/export + digest + repro', () => {
     const har = buildHar(ev, { from: 'https://prod.test', to: 'http://localhost:3000' });
     expect(har.log.entries).toHaveLength(1);
     expect(JSON.stringify(har)).toContain('http://localhost:3000/api/me');
+  });
+
+  it('emits lens-capture.v1 records matching VibeQ Worker & frontend contract', async () => {
+    const pngRef = await putBlob(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 0]), 'image/png');
+    const recRef = await putBlob(new TextEncoder().encode(JSON.stringify([])), 'application/json');
+    const cap = await createCapture({
+      observation: null,
+      pageUrl: 'https://shop.test/pay',
+      pageTitle: 'Pay',
+      screenshot: '',
+      screenshotBlob: pngRef,
+      evidence: {
+        mode: 'deep',
+        events: [
+          { timestamp: 1795790001000, kind: 'request', data: { requestId: 'r1', method: 'POST', url: 'https://shop.test/api/pay' } },
+          { timestamp: 1795790001200, kind: 'response', data: { requestId: 'r1', status: 500 } },
+          { timestamp: 1795790001250, kind: 'console', data: { level: 'error', text: 'Uncaught 500' } },
+        ],
+        gaps: [],
+        page: { viewport: { width: 1280, height: 800, devicePixelRatio: 2 } },
+        actions: [{ timestamp: 1795790000900, kind: 'click', url: 'https://shop.test/pay', target: { css: '#pay', role: 'button', name: 'Pay', testId: null, nth: null, text: 'Pay' }, value: null, masked: false }],
+        elements: [],
+        dropped: {},
+      },
+      recording: recRef,
+      kind: 'moment',
+      startedAt: 1795790000000,
+      shots: [],
+    });
+    const obs = await getObservation(cap.observation);
+    const review = await createReview({
+      observation: obs.id,
+      revision: obs.revision,
+      captures: [cap.id],
+      recordings: [cap.id],
+      typedValues: true,
+      screenshotsChecked: true,
+    });
+    const bundle = await buildReviewBundle(review);
+    const parsed = JSON.parse(new TextDecoder().decode(bundle.files.get('capture-1.lens.json')!.bytes));
+    expect(parsed.version).toBe(1);
+    expect(typeof parsed.capture.startedAt).toBe('string');
+    expect(parsed.capture.startedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(parsed.steps[0].seq).toBe(1);
+    expect(parsed.network[0].id).toBe('s1r1');
+    expect(parsed.shots[0]).toMatchObject({ id: 'end', file: 'capture-1.png', contentType: 'image/png' });
+    expect(parsed.recording).toMatchObject({ file: 'capture-1.rrweb.json', sha256: recRef.sha256 });
   });
 });

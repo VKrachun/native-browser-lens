@@ -12,7 +12,7 @@ import type { ReviewVoice } from '@/protocol/ReviewVoice';
 import type { ScreenNote } from '@/protocol/ScreenNote';
 import type { Shape } from '@/protocol/Shape';
 import type { TimeRange } from '@/protocol/TimeRange';
-import { NAMESPACE_OID, insideKept, isHidingShape, uuidv5 } from './helpers';
+import { NAMESPACE_OID, insideKept, isHidingShape, splitFindingsBlock, uuidv5 } from './helpers';
 
 const STATIC_RESOURCES = new Set(['script', 'stylesheet', 'font', 'image', 'media', 'manifest']);
 const STEP_WINDOW_MS = 2000;
@@ -612,143 +612,371 @@ export function filesEndScreenshot(item: ReviewItem): boolean {
   return item.kind !== 'session';
 }
 
-/** Builds the `lens-capture.v1` structured JSON record (bounded to 400 KiB). */
+/** Builds the `lens-capture.v1` structured JSON record (bounded to 400 KiB), matching Rust `src/record.rs` & VibeQ. */
 export async function buildLensCapture(
   review: Review,
   item: ReviewItem,
   evidence: Evidence,
   version: string,
+  captureIndex = 1,
 ): Promise<string> {
   const captureUuid = await uuidv5(NAMESPACE_OID, `lens-capture:${item.capture}:${item.capturedAt}`);
   const pageMeta = (evidence.page && typeof evidence.page === 'object' ? evidence.page : {}) as Record<string, unknown>;
+  const start = item.startedAt;
+  const end = Math.max(start, item.capturedAt);
+  const atMs = (t: number) => Math.round(t - start);
 
-  const reqs = new Map<string, { at: number; method: string; url: string; resourceType: string; postData?: string }>();
-  const resps = new Map<string, { at: number; status: number; mimeType?: string }>();
-  const bodies = new Map<string, string>();
-  const consoleEntries: Array<{ atMs: number; level: string; text: string }> = [];
+  // Network entries (matching src/record.rs)
+  interface RawNet {
+    requestId: string;
+    at: number;
+    ended: number | null;
+    method: string;
+    url: string;
+    kind: string;
+    status: number | null;
+    failure: string | null;
+    requestBody?: string;
+    responseBody?: string;
+  }
+  const netList: RawNet[] = [];
+  const netIdx = new Map<string, number>();
 
   for (const ev of evidence.events) {
     const d = (ev.data && typeof ev.data === 'object' ? ev.data : {}) as Record<string, unknown>;
-    if (ev.kind === 'request' && typeof d.requestId === 'string') {
-      reqs.set(d.requestId, {
+    const rid = typeof d.requestId === 'string' ? d.requestId : '';
+    if (!rid) continue;
+    if (ev.kind === 'request') {
+      netIdx.set(rid, netList.length);
+      netList.push({
+        requestId: rid,
         at: ev.timestamp,
+        ended: null,
         method: String(d.method ?? 'GET'),
         url: String(d.url ?? ''),
-        resourceType: String(d.resourceType ?? ''),
-        postData: typeof d.postData === 'string' ? d.postData.slice(0, MAX_BODY_KEEP) : undefined,
+        kind: String(d.resourceType ?? ''),
+        status: null,
+        failure: null,
+        requestBody: typeof d.postData === 'string' ? d.postData.slice(0, MAX_BODY_KEEP) : undefined,
       });
-    } else if (ev.kind === 'response' && typeof d.requestId === 'string') {
-      resps.set(d.requestId, {
-        at: ev.timestamp,
-        status: Number(d.status ?? 0),
-        mimeType: typeof d.mimeType === 'string' ? d.mimeType : undefined,
-      });
-    } else if (ev.kind === 'responseBody' && typeof d.requestId === 'string') {
-      const txt = typeof d.body === 'string' ? d.body : JSON.stringify(d.body ?? '');
-      bodies.set(d.requestId, txt.slice(0, MAX_BODY_KEEP));
-    } else if (ev.kind === 'console' || ev.kind === 'exception') {
-      const level = ev.kind === 'exception' ? 'error' : String(d.type ?? d.level ?? 'log');
-      const text = Array.isArray(d.args) ? d.args.map(String).join(' ') : String(d.text ?? d.message ?? '');
-      consoleEntries.push({ atMs: ev.timestamp - item.startedAt, level, text: text.slice(0, 1000) });
+    } else if (ev.kind === 'response') {
+      const idx = netIdx.get(rid);
+      if (idx !== undefined) {
+        netList[idx]!.status = Number(d.status ?? 0);
+        netList[idx]!.ended = ev.timestamp;
+      }
+    } else if (ev.kind === 'requestFailed') {
+      const idx = netIdx.get(rid);
+      if (idx !== undefined) {
+        netList[idx]!.failure = String(d.errorText ?? d.error ?? 'failed');
+        netList[idx]!.ended = ev.timestamp;
+      }
+    } else if (ev.kind === 'responseBody') {
+      const idx = netIdx.get(rid);
+      if (idx !== undefined) {
+        const txt = typeof d.body === 'string' ? d.body : JSON.stringify(d.body ?? '');
+        netList[idx]!.responseBody = txt.slice(0, MAX_BODY_KEEP);
+      }
     }
   }
 
-  const stepTimes = evidence.actions.map((a) => a.timestamp);
-  const nearStep = (at: number) => stepTimes.some((st) => Math.abs(at - st) <= STEP_WINDOW_MS);
+  const isFailedNet = (e: RawNet) => Boolean(e.failure) || (e.status !== null && e.status >= 400);
+  const droppedRequests: Record<string, number> = {};
+  const filteredNet = netList.filter((e) => {
+    if (e.method.toUpperCase() === 'OPTIONS' && !isFailedNet(e)) {
+      droppedRequests.preflight = (droppedRequests.preflight ?? 0) + 1;
+      return false;
+    }
+    if (STATIC_RESOURCES.has(e.kind.toLowerCase()) && !isFailedNet(e)) {
+      droppedRequests['static-asset'] = (droppedRequests['static-asset'] ?? 0) + 1;
+      return false;
+    }
+    return true;
+  });
 
+  // Console entries (errors & warnings, repeats merged)
+  const consoleEntries: Array<{ atMs: number; level: string; text: string; count: number; source?: string }> = [];
+  const consoleAt: number[] = [];
+  const seenConsole = new Map<string, number>();
+  let consoleRepeats = 0;
+
+  for (const ev of evidence.events) {
+    const d = (ev.data && typeof ev.data === 'object' ? ev.data : {}) as Record<string, unknown>;
+    let level: string | null = null;
+    let text = '';
+    let source = '';
+    if (ev.kind === 'console') {
+      const rawLevel = String(d.level ?? d.type ?? '');
+      if (rawLevel === 'error' || rawLevel === 'assert') level = 'error';
+      else if (rawLevel === 'warning' || rawLevel === 'warn') level = 'warning';
+      else continue;
+      text = Array.isArray(d.args) ? d.args.map(String).join(' ') : String(d.text ?? d.message ?? '');
+      const loc = d.location && typeof d.location === 'object' ? (d.location as Record<string, unknown>) : null;
+      source = typeof loc?.url === 'string' ? loc.url : '';
+    } else if (ev.kind === 'exception') {
+      level = 'error';
+      text = String(d.text ?? d.message ?? '');
+      source = typeof d.url === 'string' ? d.url : '';
+    } else if (ev.kind === 'log') {
+      const rawLevel = String(d.level ?? '');
+      if (rawLevel === 'error' || rawLevel === 'warning') level = rawLevel;
+      else continue;
+      text = String(d.text ?? '');
+      source = typeof d.url === 'string' ? d.url : '';
+    } else {
+      continue;
+    }
+    const cleanText = text.slice(0, 1000);
+    const key = `${cleanText}\0${source}`;
+    const prevIdx = seenConsole.get(key);
+    if (prevIdx !== undefined) {
+      consoleEntries[prevIdx]!.count += 1;
+      consoleRepeats += 1;
+      continue;
+    }
+    seenConsole.set(key, consoleEntries.length);
+    consoleAt.push(ev.timestamp);
+    consoleEntries.push({
+      atMs: atMs(ev.timestamp),
+      level,
+      text: cleanText,
+      count: 1,
+      ...(source ? { source } : {}),
+    });
+  }
+
+  // Shots (exact lens-capture.v1 shape: id, atMs, file, sha256, contentType, reason)
+  const shots: Array<{ id: string; atMs: number; file: string; sha256: string; contentType: string; reason: string }> =
+    item.shots.map((s, idx) => ({
+      id: `shot-${idx + 1}`,
+      atMs: atMs(s.at),
+      file: `capture-${captureIndex}-shot-${idx + 1}.webp`,
+      sha256: s.image.sha256,
+      contentType: 'image/webp',
+      reason: s.reason,
+    }));
+  if (filesEndScreenshot(item)) {
+    shots.push({
+      id: 'end',
+      atMs: atMs(end),
+      file: `capture-${captureIndex}.png`,
+      sha256: item.screenshot.sha256,
+      contentType: 'image/png',
+      reason: 'end',
+    });
+  }
+
+  // Draft steps: user actions + spoken voice segments + page loads
+  interface DraftStep {
+    at: number;
+    acts: boolean;
+    value: Record<string, unknown>;
+  }
+  const drafts: DraftStep[] = [];
+  for (const a of evidence.actions) {
+    if (a.kind === 'scroll') continue;
+    const step: Record<string, unknown> = { kind: a.kind };
+    if (a.kind === 'navigate' && a.url) step.url = a.url;
+    if (a.target) step.target = a.target;
+    if (a.masked) step.masked = true;
+    else if (a.value !== null && a.value !== undefined) step.value = a.value;
+    drafts.push({ at: a.timestamp, acts: true, value: step });
+  }
+  for (const note of review.voice) {
+    for (const seg of note.segments) {
+      const t = note.startedAt + seg.startMs;
+      const mid = note.startedAt + Math.floor((seg.startMs + seg.endMs) / 2);
+      if (t < start - 60_000 || t > end + 5_000) continue;
+      if (item.kept.length > 0 && !item.kept.some((r) => mid >= r.from && mid <= r.to)) continue;
+      const step: Record<string, unknown> = { kind: 'say', value: seg.text.trim() };
+      if (seg.corrected) step.corrected = true;
+      drafts.push({ at: t, acts: false, value: step });
+    }
+  }
+  drafts.sort((a, b) => a.at - b.at);
+
+  const reqIdMap = new Map<string, string>();
+  const linkedReqs = new Set<string>();
+  const steps: Array<Record<string, unknown>> = drafts.map((draft, i) => {
+    const seq = i + 1;
+    const step: Record<string, unknown> = { seq, atMs: atMs(draft.at), ...draft.value };
+    if (draft.acts) {
+      const until = Math.min(drafts[i + 1]?.at ?? Number.MAX_SAFE_INTEGER, draft.at + STEP_WINDOW_MS);
+      const inWin = (t: number) => t >= draft.at && t < until;
+      let reqCounter = 0;
+      const stepReqs: string[] = [];
+      for (const e of filteredNet) {
+        if (inWin(e.at) && !reqIdMap.has(e.requestId)) {
+          reqCounter += 1;
+          const sid = `s${seq}r${reqCounter}`;
+          reqIdMap.set(e.requestId, sid);
+          linkedReqs.add(e.requestId);
+          stepReqs.push(sid);
+        }
+      }
+      if (stepReqs.length) step.requests = stepReqs;
+
+      const stepLogs: number[] = [];
+      consoleAt.forEach((t, idx) => {
+        if (inWin(t)) stepLogs.push(idx);
+      });
+      if (stepLogs.length) step.console = stepLogs;
+
+      const caused = ['click', 'press', 'select', 'check', 'uncheck'].includes(String(step.kind));
+      const screenNote = item.screen.find((s) => s.afterClick && caused && inWin(s.at));
+      if (screenNote) {
+        step.screen = { appeared: screenNote.appeared, gone: screenNote.gone };
+      }
+
+      const shot = shots.find((s) => {
+        const shotAbs = s.atMs + start;
+        return s.reason === 'step' && shotAbs > draft.at && shotAbs - draft.at <= SHOT_WINDOW_MS;
+      });
+      if (shot) step.shot = shot.id;
+    }
+    return step;
+  });
+
+  let beforeCounter = 0;
   interface NetRow {
+    id: string;
     atMs: number;
     method: string;
     url: string;
     status: number | null;
-    failed: boolean;
+    durationMs: number | null;
+    failure?: string;
     requestBody?: string;
     responseBody?: string;
   }
-  const network: NetRow[] = [];
-  for (const [id, req] of reqs) {
-    if (req.method.toUpperCase() === 'OPTIONS') continue;
-    const resp = resps.get(id);
-    const status = resp?.status ?? null;
-    const failed = status === null || status >= 400;
-    if (!failed && STATIC_RESOURCES.has(req.resourceType.toLowerCase())) continue;
-    const keepBody = failed || nearStep(req.at);
-    const body = keepBody ? bodies.get(id) : undefined;
-    network.push({
-      atMs: req.at - item.startedAt,
-      method: req.method,
-      url: req.url,
-      status,
-      failed,
-      ...(keepBody && req.postData ? { requestBody: req.postData } : {}),
-      ...(body ? { responseBody: body } : {}),
-    });
-  }
+  const network: NetRow[] = filteredNet.map((e) => {
+    const id = reqIdMap.get(e.requestId) ?? `s0r${++beforeCounter}`;
+    const keepBody = isFailedNet(e) || linkedReqs.has(e.requestId);
+    const jsonLike = (b?: string) => Boolean(b && b.length <= MAX_BODY_KEEP && /^[\s]*[{\[]/.test(b));
+    return {
+      id,
+      atMs: atMs(e.at),
+      method: e.method,
+      url: e.url,
+      status: e.status,
+      durationMs: e.ended !== null ? Math.max(0, e.ended - e.at) : null,
+      ...(e.failure ? { failure: e.failure } : {}),
+      ...(keepBody && jsonLike(e.requestBody) ? { requestBody: e.requestBody } : {}),
+      ...(keepBody && jsonLike(e.responseBody) ? { responseBody: e.responseBody } : {}),
+    };
+  });
 
-  const steps = evidence.actions.map((a) => ({
-    atMs: a.timestamp - item.startedAt,
-    kind: a.kind,
-    url: a.url,
-    target: a.target,
-    value: a.masked ? null : a.value,
-    masked: a.masked,
-    shots: item.shots.filter((s) => Math.abs(s.at - a.timestamp) <= SHOT_WINDOW_MS).map((s) => s.at - item.startedAt),
-  }));
+  // Annotations (matching src/record.rs)
+  const annotations = item.annotations.map((a) => {
+    const aAtMs = atMs(a.at);
+    const isHighlight =
+      a.drawing.length === 1 &&
+      a.drawing[0]!.length === 5 &&
+      a.drawing[0]![0]!.x === a.drawing[0]![4]!.x &&
+      a.drawing[0]![0]!.y === a.drawing[0]![4]!.y;
+    const kind = a.drawing.length === 0 ? 'note' : isHighlight ? 'highlight' : 'drawing';
+    let nearestShot: string | undefined;
+    let bestDist = 5001;
+    for (const s of shots) {
+      const dist = Math.abs(s.atMs - aAtMs);
+      if (dist < bestDist) {
+        bestDist = dist;
+        nearestShot = s.id;
+      }
+    }
+    return {
+      id: a.id,
+      atMs: aAtMs,
+      text: a.text,
+      kind,
+      elements: a.elements,
+      ...(nearestShot ? { shot: nearestShot } : {}),
+    };
+  });
 
-  const dropped: Record<string, unknown> = { ...evidence.dropped, cut: item.cut, shotsDropped: item.shotsDropped };
+  // Findings block from review notes (falling back to item.findings)
+  const parsedBlock = splitFindingsBlock(review.notes);
+  const findingTexts = parsedBlock.findings.length > 0 ? parsedBlock.findings : item.findings;
+  const findingItems = findingTexts.map((raw) => {
+    if (raw.startsWith('Works well:')) return { text: raw.slice('Works well:'.length).trim(), kind: 'praise', atMs: null };
+    if (raw.startsWith('Question:')) return { text: raw.slice('Question:'.length).trim(), kind: 'question', atMs: null };
+    return { text: raw, kind: 'defect', atMs: null };
+  });
+
+  const viewportObj = pageMeta.viewport && typeof pageMeta.viewport === 'object' ? (pageMeta.viewport as Record<string, unknown>) : null;
+  const truncated = { bodies: 0, screenItems: 0, steps: 0, shots: item.shotsDropped };
   const record = {
-    version: 1,
-    producer: { name: 'sirv-lens-extension', version },
+    version: 1 as const,
+    producer: { name: 'sirv-lens', version },
     capture: {
       id: captureUuid,
       kind: item.kind,
-      startedAt: item.startedAt,
-      durationMs: Math.max(0, item.capturedAt - item.startedAt),
-      page: { url: item.pageUrl, title: item.pageTitle },
-      viewport: pageMeta.viewport ?? null,
-      colorScheme: pageMeta.colorScheme ?? null,
-      locale: pageMeta.locale ?? null,
-      timeZone: pageMeta.timeZone ?? null,
-      userAgent: pageMeta.userAgent ?? null,
+      startedAt: new Date(start).toISOString(),
+      durationMs: Math.max(0, end - start),
+      page: {
+        url: item.pageUrl,
+        title: item.pageTitle,
+        ...(typeof pageMeta.buildId === 'string' ? { buildSha: pageMeta.buildId } : {}),
+      },
+      viewport: viewportObj
+        ? {
+            width: viewportObj.width ?? null,
+            height: viewportObj.height ?? null,
+            devicePixelRatio: viewportObj.devicePixelRatio ?? null,
+          }
+        : null,
+      colorScheme: typeof pageMeta.colorScheme === 'string' ? pageMeta.colorScheme : null,
+      locale: typeof pageMeta.language === 'string' ? pageMeta.language : typeof pageMeta.locale === 'string' ? pageMeta.locale : null,
+      timeZone: typeof pageMeta.timeZone === 'string' ? pageMeta.timeZone : null,
+      userAgent: typeof pageMeta.userAgent === 'string' ? pageMeta.userAgent : null,
       collection: item.mode,
     },
     findings: {
       title: review.title,
-      items: item.findings.map((text) => ({
-        text,
-        kind: text.startsWith('Works well:') ? 'praise' : 'defect',
-        atMs: null,
-      })),
-      writtenBy: review.notes.startsWith('Findings (written by') ? 'model' : 'person',
+      items: findingItems,
+      writtenBy: parsedBlock.header ? 'model' : 'person',
       shownToPerson: true,
     },
-    notes: review.notes,
+    notes: parsedBlock.header ? parsedBlock.own : review.notes.trim(),
     steps,
-    annotations: item.annotations,
+    annotations,
     network,
     console: consoleEntries,
-    shots: item.shots.map((s, idx) => ({ index: idx + 1, atMs: s.at - item.startedAt, reason: s.reason })),
-    recording: item.recording ? { size: item.recording.size } : null,
-    dropped,
+    shots,
+    recording: item.recording
+      ? {
+          file: `capture-${captureIndex}.rrweb.json`,
+          sha256: item.recording.sha256,
+          size: item.recording.size,
+          rrweb: '2.2.2',
+          recordCanvas: false,
+          maskAllInputs: true,
+        }
+      : null,
+    dropped: {
+      requests: droppedRequests,
+      consoleRepeats,
+      cut: item.cut,
+      truncated,
+    },
   };
 
   let serialized = JSON.stringify(record);
   if (serialized.length > TARGET_CAPTURE_SIZE) {
-    let truncatedBodies = 0;
     for (const row of record.network) {
-      if (!row.failed && (row.requestBody || row.responseBody)) {
+      const failed = Boolean(row.failure) || (row.status !== null && row.status >= 400);
+      if (!failed && (row.requestBody || row.responseBody)) {
         delete row.requestBody;
         delete row.responseBody;
-        truncatedBodies += 1;
+        truncated.bodies += 1;
       }
     }
-    if (truncatedBodies > 0) dropped.truncatedBodies = truncatedBodies;
     serialized = JSON.stringify(record);
   }
   while (serialized.length > HARD_CAPTURE_LIMIT && record.steps.length > 5) {
     const drop = Math.max(1, Math.floor(record.steps.length * 0.1));
     record.steps.splice(0, drop);
-    dropped.truncatedSteps = Number(dropped.truncatedSteps ?? 0) + drop;
+    truncated.steps += drop;
     serialized = JSON.stringify(record);
   }
   while (serialized.length > HARD_CAPTURE_LIMIT && record.network.length > 5) {
