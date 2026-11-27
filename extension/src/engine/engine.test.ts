@@ -267,7 +267,7 @@ describe('in-extension LensClient + engine', () => {
     const fetchMock = vi.fn(async (url: string | URL, _init?: RequestInit) => {
       const s = String(url);
       if (s === 'https://openrouter.ai/api/v1/models') {
-        return new Response(JSON.stringify({ data: [{ id: 'anthropic/claude-haiku-5.5' }, { id: 'openai/gpt-5.4-mini' }] }), { status: 200 });
+        return new Response(JSON.stringify({ data: [{ id: 'anthropic/claude-haiku-5.5' }, { id: 'openai/gpt-5.6-luna' }] }), { status: 200 });
       }
       return new Response(
         JSON.stringify({
@@ -290,7 +290,7 @@ describe('in-extension LensClient + engine', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const models = await listProviderModels('openrouter', 'sk-or-v1-test');
-    expect(models).toEqual(['anthropic/claude-haiku-5.5', 'openai/gpt-5.4-mini']);
+    expect(models).toEqual(['anthropic/claude-haiku-5.5', 'openai/gpt-5.6-luna']);
 
     const summary = await client.request({ method: 'summarize', params: { observation: cap.observation } });
     expect(summary.title).toBe('Pay: card declined silently');

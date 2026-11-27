@@ -24,7 +24,7 @@ export interface LlmConfig {
 export const DEFAULT_LLM_MODELS: Record<LlmProvider, string> = {
   openrouter: 'anthropic/claude-haiku-5.5',
   anthropic: 'claude-haiku-5-5',
-  openai: 'gpt-5.4-mini',
+  openai: 'gpt-5.6-luna',
   gemini: 'gemini-3.8-flash',
 };
 
