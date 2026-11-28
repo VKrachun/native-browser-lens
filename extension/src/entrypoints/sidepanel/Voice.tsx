@@ -80,14 +80,24 @@ export function VoiceProgress({
   }
   // Waiting with a reason is waiting for something the person does, such as the model download.
   const blocked = note.state === 'waiting' && note.detail;
+  const activeText =
+    note.state === 'transcribing'
+      ? `${note.detail ?? 'Writing down what you said…'} ${clock(elapsed)}`
+      : (note.detail ?? 'In line to be written down…');
   return (
-    <p className="small muted voice-progress waiting" role="status" aria-live="polite" aria-label={ariaLabel}>
+    <div className="small muted voice-progress waiting" role="status" aria-live="polite" aria-label={ariaLabel}>
       {!blocked && <span className="spinner" aria-hidden="true" />}
-      {prefix}
-      {note.state === 'transcribing'
-        ? `Writing down what you said… ${clock(elapsed)}`
-        : (note.detail ?? 'In line to be written down…')}
-    </p>
+      <span>
+        {prefix}
+        {activeText}
+      </span>
+      {!blocked && elapsed >= 15_000 && (
+        <button type="button" className="btn btn-ghost btn-sm" onClick={() => void retry()} disabled={retrying}>
+          {retrying ? 'Retrying…' : 'Retry'}
+        </button>
+      )}
+      {problem && <span className="danger-text">{problem}</span>}
+    </div>
   );
 }
 

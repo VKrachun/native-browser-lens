@@ -101,21 +101,27 @@ export async function getLlmConfig(): Promise<LlmConfig> {
   };
 }
 
-export async function saveLlmConfig(patch: Partial<LlmConfig>): Promise<LlmConfig> {
-  const current = await getLlmConfig();
-  const next: LlmConfig = {
-    enabled: patch.enabled ?? current.enabled,
-    provider: patch.provider !== undefined ? patch.provider : current.provider,
-    model: patch.model !== undefined ? (patch.model?.trim() || null) : current.model,
-    keys: {
-      openrouter: patch.keys?.openrouter !== undefined ? patch.keys.openrouter.trim() : current.keys.openrouter,
-      anthropic: patch.keys?.anthropic !== undefined ? patch.keys.anthropic.trim() : current.keys.anthropic,
-      openai: patch.keys?.openai !== undefined ? patch.keys.openai.trim() : current.keys.openai,
-      gemini: patch.keys?.gemini !== undefined ? patch.keys.gemini.trim() : current.keys.gemini,
-    },
-  };
-  await setSetting('llm.config', next);
-  return next;
+let llmSaveChain: Promise<unknown> = Promise.resolve();
+
+export function saveLlmConfig(patch: Partial<LlmConfig>): Promise<LlmConfig> {
+  const run = llmSaveChain.then(async () => {
+    const current = await getLlmConfig();
+    const next: LlmConfig = {
+      enabled: patch.enabled ?? current.enabled,
+      provider: patch.provider !== undefined ? patch.provider : current.provider,
+      model: patch.model !== undefined ? (patch.model?.trim() || null) : current.model,
+      keys: {
+        openrouter: patch.keys?.openrouter !== undefined ? patch.keys.openrouter.trim() : current.keys.openrouter,
+        anthropic: patch.keys?.anthropic !== undefined ? patch.keys.anthropic.trim() : current.keys.anthropic,
+        openai: patch.keys?.openai !== undefined ? patch.keys.openai.trim() : current.keys.openai,
+        gemini: patch.keys?.gemini !== undefined ? patch.keys.gemini.trim() : current.keys.gemini,
+      },
+    };
+    await setSetting('llm.config', next);
+    return next;
+  });
+  llmSaveChain = run.catch(() => {});
+  return run;
 }
 
 function resolveProvider(cfg: LlmConfig, requested?: LlmProvider | Agent | null): { provider: LlmProvider; apiKey: string; model: string } {
@@ -169,6 +175,71 @@ export function activeLlmSummary(cfg: LlmConfig): { provider: LlmProvider; label
   } catch {
     return null;
   }
+}
+
+/**
+ * Verifies a specific provider's API key against its authenticated endpoint (zero token cost).
+ * Note: OpenRouter's /v1/models is public, so we verify OpenRouter against /v1/key.
+ */
+export async function verifyLlmApiKey(
+  provider: LlmProvider,
+  apiKey: string,
+): Promise<{ provider: LlmProvider; detail: string }> {
+  const key = apiKey.trim();
+  if (!key) throw new Error('Enter an API key first.');
+
+  const parseErr = async (res: Response, name: string) => {
+    const raw = await res.text().catch(() => '');
+    let msg = raw.slice(0, 180);
+    try {
+      const parsed = JSON.parse(raw) as { error?: { message?: string } };
+      if (parsed.error?.message) msg = parsed.error.message;
+    } catch {
+      // keep raw snippet
+    }
+    throw new Error(`${name} rejected the key (${res.status}): ${msg || res.statusText}`);
+  };
+
+  if (provider === 'openrouter') {
+    const res = await fetch('https://openrouter.ai/api/v1/key', {
+      headers: { Authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) await parseErr(res, 'OpenRouter');
+    const body = (await res.json().catch(() => ({}))) as { data?: { label?: string; is_free_tier?: boolean } };
+    const label = body.data?.label?.trim();
+    return { provider, detail: label ? `Verified (${label})` : 'Verified' };
+  }
+
+  if (provider === 'anthropic') {
+    const res = await fetch('https://api.anthropic.com/v1/models?limit=1', {
+      headers: {
+        'x-api-key': key,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
+      },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) await parseErr(res, 'Anthropic');
+    return { provider, detail: 'Verified' };
+  }
+
+  if (provider === 'openai') {
+    const res = await fetch('https://api.openai.com/v1/models', {
+      headers: { Authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) await parseErr(res, 'OpenAI');
+    const body = (await res.json().catch(() => ({}))) as { data?: Array<{ id?: string }> };
+    return { provider, detail: `Verified (${(body.data ?? []).length} models)` };
+  }
+
+  const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=1', {
+    headers: { 'x-goog-api-key': key },
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) await parseErr(res, 'Gemini');
+  return { provider, detail: 'Verified' };
 }
 
 /** Sends a tiny JSON ping to verify the currently configured API key + model work end-to-end. */

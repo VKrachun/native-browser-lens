@@ -208,12 +208,12 @@ export function Review({ observation: id }: { observation: number }) {
     void summarize();
   }, [review, observation, captures, waitingForWords, summarize, findingsSettings, findingsOff]);
 
-  // Kick off local/cloud transcription for any waiting voice notes saved by background.ts,
+  // Kick off local/cloud transcription for any waiting or orphaned 'transcribing' voice notes,
   // and poll until every note finishes.
   const transcribing = voice.some((v) => v.state === 'waiting' || v.state === 'transcribing');
   useEffect(() => {
     for (const v of voice) {
-      if (v.state === 'waiting') enqueueTranscription(v.id);
+      if (v.state === 'waiting' || v.state === 'transcribing') enqueueTranscription(v.id);
     }
     if (!transcribing) return;
     const timer = setInterval(() => {
@@ -221,7 +221,7 @@ export function Review({ observation: id }: { observation: number }) {
         .request({ method: 'listVoiceNotes', params: { observation: id } })
         .then((next) => setVoice((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next)))
         .catch(() => {});
-    }, 2000);
+    }, 1500);
     return () => clearInterval(timer);
   }, [client, id, transcribing, voice]);
 

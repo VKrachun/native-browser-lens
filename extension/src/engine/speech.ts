@@ -81,10 +81,12 @@ interface ParakeetLike {
   encoderSession?: { release?: () => Promise<void> | void };
   joinerSession?: { release?: () => Promise<void> | void };
   transcribe(audio: Float32Array, sampleRate: number, opts?: Record<string, unknown>): Promise<{
+    text?: string;
     utterance_text?: string;
     words?: Array<{ text: string; start_time: number; end_time: number }>;
   }>;
   transcribeLongAudio?(audio: Float32Array, sampleRate: number, opts?: Record<string, unknown>): Promise<{
+    text?: string;
     utterance_text?: string;
     words?: Array<{ text: string; start_time: number; end_time: number }>;
   }>;
@@ -184,22 +186,28 @@ export async function getSpeechConfig(): Promise<SpeechConfig> {
   };
 }
 
-export async function saveSpeechConfig(patch: Partial<SpeechConfig>): Promise<SpeechConfig> {
-  const cur = await getSpeechConfig();
-  const next: SpeechConfig = {
-    backend: patch.backend ?? cur.backend,
-    model: patch.model ?? cur.model,
-    language: patch.language !== undefined ? patch.language : cur.language,
-    prompt: patch.prompt !== undefined ? patch.prompt : cur.prompt,
-    openaiApiKey: patch.openaiApiKey !== undefined ? patch.openaiApiKey.trim() : cur.openaiApiKey,
-    groqApiKey: patch.groqApiKey !== undefined ? patch.groqApiKey.trim() : cur.groqApiKey,
-  };
-  await setSetting('speech.config', next);
-  if (next.backend === 'local' && next.model !== cur.model) {
-    await releaseLoadedSpeechModels();
-    modelState = { state: 'missing' };
-  }
-  return next;
+let speechSaveChain: Promise<unknown> = Promise.resolve();
+
+export function saveSpeechConfig(patch: Partial<SpeechConfig>): Promise<SpeechConfig> {
+  const run = speechSaveChain.then(async () => {
+    const cur = await getSpeechConfig();
+    const next: SpeechConfig = {
+      backend: patch.backend ?? cur.backend,
+      model: patch.model ?? cur.model,
+      language: patch.language !== undefined ? patch.language : cur.language,
+      prompt: patch.prompt !== undefined ? patch.prompt : cur.prompt,
+      openaiApiKey: patch.openaiApiKey !== undefined ? patch.openaiApiKey.trim() : cur.openaiApiKey,
+      groqApiKey: patch.groqApiKey !== undefined ? patch.groqApiKey.trim() : cur.groqApiKey,
+    };
+    await setSetting('speech.config', next);
+    if (next.backend === 'local' && next.model !== cur.model) {
+      await releaseLoadedSpeechModels();
+      modelState = { state: 'missing' };
+    }
+    return next;
+  });
+  speechSaveChain = run.catch(() => {});
+  return run;
 }
 
 export async function getLegacySpeechSettings(): Promise<SpeechSettings> {
@@ -214,6 +222,43 @@ export async function setLegacySpeechSettings(settings: SpeechSettings): Promise
     prompt: settings.prompt,
   });
   return { model: saved.model, language: saved.language, prompt: saved.prompt };
+}
+
+export async function verifySpeechApiKey(
+  backend: 'groq' | 'openai',
+  apiKey: string,
+): Promise<{ backend: 'groq' | 'openai'; detail: string }> {
+  const key = apiKey.trim();
+  if (!key) throw new Error(`Enter your ${backend === 'groq' ? 'Groq' : 'OpenAI'} API key first.`);
+  const url = backend === 'groq' ? 'https://api.groq.com/openai/v1/models' : 'https://api.openai.com/v1/models';
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${key}` },
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) {
+    const raw = await res.text().catch(() => '');
+    let msg = raw.slice(0, 180);
+    try {
+      const parsed = JSON.parse(raw) as { error?: { message?: string } };
+      if (parsed.error?.message) msg = parsed.error.message;
+    } catch {
+      // keep raw snippet
+    }
+    throw new Error(`${backend === 'groq' ? 'Groq' : 'OpenAI'} rejected the key (${res.status}): ${msg || res.statusText}`);
+  }
+  const body = (await res.json().catch(() => ({}))) as { data?: Array<{ id?: string }> };
+  const ids = (body.data ?? []).map((m) => m.id ?? '');
+  if (backend === 'groq') {
+    const hasWhisper = ids.some((id) => id.includes('whisper'));
+    return {
+      backend,
+      detail: hasWhisper ? 'Verified · Whisper models available' : `Verified · ${ids.length} models accessible`,
+    };
+  }
+  return {
+    backend,
+    detail: `Verified · ${ids.length} models accessible`,
+  };
 }
 
 export async function getSpeechStatus(): Promise<SpeechStatus> {
@@ -600,6 +645,7 @@ async function transcribeWithCloudApi(
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}` },
     body: form,
+    signal: AbortSignal.timeout(90_000),
   });
   if (!res.ok) {
     const err = await res.text().catch(() => '');
@@ -630,23 +676,39 @@ async function transcribeLocally(
   cfg: SpeechConfig,
   wavBytes: Uint8Array<ArrayBuffer>,
   durationMs: number,
+  onStage?: (detail: string) => void,
 ): Promise<{ language: string | null; segments: VoiceSegment[] }> {
   const info = resolveLocalModel(cfg.model);
+  const shortName = info.label.split('(')[0]!.trim();
   if (loadedModelKey !== info.key || (!loadedWhisper && !loadedParakeet)) {
-    await installLocalSpeechModel(true);
-    if (loadingPromise) await loadingPromise;
+    const cached = await getSetting<boolean>(`speech.cached.${info.key}`, false);
+    onStage?.(cached ? `Loading ${shortName}…` : `Downloading ${shortName} (~${Math.round(info.bytes / 1e6)} MB)…`);
+    const progressTimer = setInterval(() => {
+      if (modelState.state === 'downloading') {
+        const rx = Math.round(Number(modelState.received) / 1e6);
+        const tot = Math.max(1, Math.round(Number(modelState.total) / 1e6));
+        onStage?.(`Downloading ${shortName} (${rx} / ${tot} MB)…`);
+      }
+    }, 1200);
+    try {
+      await installLocalSpeechModel(true);
+      if (loadingPromise) await loadingPromise;
+    } finally {
+      clearInterval(progressTimer);
+    }
   }
 
   const pcm = decodeWavToMono16k(wavBytes);
   if (pcm.length === 0) return { language: cfg.language, segments: [] };
 
+  onStage?.(`Transcribing with ${shortName}…`);
   try {
     if (info.engine === 'parakeet') {
       if (!loadedParakeet) throw new Error('Parakeet model is not loaded.');
       const res = loadedParakeet.transcribeLongAudio
         ? await loadedParakeet.transcribeLongAudio(pcm, 16000, { returnTimestamps: true })
         : await loadedParakeet.transcribe(pcm, 16000, { returnTimestamps: true });
-      const segments = wordsToSegments(res.words ?? [], res.utterance_text ?? '', durationMs);
+      const segments = wordsToSegments(res.words ?? [], res.utterance_text ?? res.text ?? '', durationMs);
       return { language: info.key === 'parakeet-v2' ? 'en' : cfg.language, segments };
     }
 
@@ -708,13 +770,26 @@ async function drainTranscriptionQueue(): Promise<void> {
       try {
         await runWithSpeechLock(async () => {
           const note = await getVoiceNote(voiceNoteId);
-          // Another tab (e.g. replay.html vs review.html) may have already transcribed or started this note.
-          if (note.state === 'done' || note.state === 'transcribing') return;
+          // Holding the exclusive Web Lock guarantees no other tab is actively transcribing right now.
+          // If the note is still 'transcribing', the tab that started it died/closed, so we recover it cleanly.
+          if (note.state === 'done') return;
           const blob = await getBlob(note.audio.sha256);
           if (!blob) throw new Error('Audio blob missing');
           const cfg = await getSpeechConfig();
 
-          await patchVoiceNote(voiceNoteId, { state: 'transcribing', detail: null });
+          const setStage = (detail: string) => {
+            void patchVoiceNote(voiceNoteId, { state: 'transcribing', detail }).catch(() => {});
+          };
+
+          await patchVoiceNote(voiceNoteId, {
+            state: 'transcribing',
+            detail:
+              cfg.backend === 'groq'
+                ? 'Transcribing with Groq Cloud…'
+                : cfg.backend === 'openai'
+                  ? 'Transcribing with OpenAI Cloud…'
+                  : 'Preparing speech model…',
+          });
 
           let out: { language: string | null; segments: VoiceSegment[] };
           if (cfg.backend === 'openai') {
@@ -724,7 +799,7 @@ async function drainTranscriptionQueue(): Promise<void> {
             if (!cfg.groqApiKey) throw new Error('Add your Groq API key in Settings → Voice notes.');
             out = await transcribeWithCloudApi('groq', cfg.groqApiKey, cfg.model, cfg.language, cfg.prompt, blob.bytes, note.durationMs);
           } else {
-            out = await transcribeLocally(cfg, blob.bytes, note.durationMs);
+            out = await transcribeLocally(cfg, blob.bytes, note.durationMs, setStage);
           }
 
           await patchVoiceNote(voiceNoteId, {
@@ -749,9 +824,11 @@ async function drainTranscriptionQueue(): Promise<void> {
 }
 
 /** Schedules serialized asynchronous transcription for a saved VoiceNote (avoids concurrent ONNX/WASM OOM). */
-export function enqueueTranscription(voiceNoteId: number): void {
-  if (queuedTranscriptions.has(voiceNoteId)) return;
+export function enqueueTranscription(voiceNoteId: number, force = false): void {
+  if (!force && queuedTranscriptions.has(voiceNoteId)) return;
   queuedTranscriptions.add(voiceNoteId);
-  transcriptionQueue.push(voiceNoteId);
+  if (!transcriptionQueue.includes(voiceNoteId)) {
+    transcriptionQueue.push(voiceNoteId);
+  }
   void drainTranscriptionQueue();
 }

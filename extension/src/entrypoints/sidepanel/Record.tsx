@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { addVoiceNote as persistVoiceNote } from '@/engine/db';
 import type { LensClient } from '@/lens-client';
 import { NO_ANSWER, send, type CaptureResult, type RecordedVideoRef, type SessionStart, type TabStatus } from '@/messages';
 import { MicIcon, StopIcon } from '@/ui/icons';
@@ -354,10 +355,8 @@ export function RecordControls({
       try {
         if (wav && startedAt !== undefined) {
           const audio = await client.upload(wav, 'audio/wav');
-          await client.request({
-            method: 'addVoiceNote',
-            params: { observation: result.capture.observation, startedAt, audio },
-          });
+          // Save as 'waiting' without starting heavy ONNX inside the sidebar; replay.html/review.html opens next and transcribes it cleanly.
+          await persistVoiceNote({ observation: result.capture.observation, startedAt, audio });
         }
         await unspool(tabId, session).catch(() => {});
       } catch (error) {

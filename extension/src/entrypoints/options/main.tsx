@@ -6,6 +6,7 @@ import {
   listProviderModels,
   saveLlmConfig,
   testLlmConnection,
+  verifyLlmApiKey,
   type LlmConfig,
   type LlmProvider,
 } from '@/engine/llm';
@@ -828,6 +829,8 @@ function Models() {
   const [loadingModels, setLoadingModels] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<string | null>(null);
+  const [verifyingProvider, setVerifyingProvider] = useState<LlmProvider | null>(null);
+  const [verifyByProvider, setVerifyByProvider] = useState<Partial<Record<LlmProvider, { ok: boolean; text: string }>>>({});
   const [savedNotice, setSavedNotice] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
 
@@ -950,20 +953,47 @@ function Models() {
       <div className="provider-keys-grid">
         {keyInputs.map((item) => {
           const isActive = activeProvider === item.id;
+          const keyVal = config.keys[item.id];
+          const verified = verifyByProvider[item.id];
           return (
             <div className="field provider-key-field" key={item.id} data-active={isActive || undefined}>
               <label htmlFor={`key-${item.id}`} className="label">
                 {item.label}
               </label>
-              <input
-                id={`key-${item.id}`}
-                className="input"
-                type="password"
-                autoComplete="off"
-                value={config.keys[item.id]}
-                placeholder={item.placeholder}
-                onChange={(e) => void update({ keys: { ...config.keys, [item.id]: e.target.value } })}
-              />
+              <div className="key-input-row">
+                <input
+                  id={`key-${item.id}`}
+                  className="input"
+                  type="password"
+                  autoComplete="off"
+                  value={keyVal}
+                  placeholder={item.placeholder}
+                  onChange={(e) => {
+                    setVerifyByProvider((cur) => ({ ...cur, [item.id]: undefined }));
+                    void update({ keys: { ...config.keys, [item.id]: e.target.value } });
+                  }}
+                />
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  disabled={!keyVal.trim() || verifyingProvider === item.id}
+                  onClick={() => {
+                    setVerifyingProvider(item.id);
+                    setVerifyByProvider((cur) => ({ ...cur, [item.id]: undefined }));
+                    void verifyLlmApiKey(item.id, keyVal)
+                      .then((res) => setVerifyByProvider((cur) => ({ ...cur, [item.id]: { ok: true, text: res.detail } })))
+                      .catch((error: Error) => setVerifyByProvider((cur) => ({ ...cur, [item.id]: { ok: false, text: error.message } })))
+                      .finally(() => setVerifyingProvider(null));
+                  }}
+                >
+                  {verifyingProvider === item.id ? 'Checking…' : 'Verify'}
+                </button>
+              </div>
+              {verified && (
+                <span className={`small key-verify-msg ${verified.ok ? 'success-text' : 'danger-text'}`} role="status">
+                  {verified.ok && <DoneIcon size={13} />} {verified.text}
+                </span>
+              )}
             </div>
           );
         })}

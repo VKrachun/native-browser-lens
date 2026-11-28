@@ -4,6 +4,7 @@ import {
   getSpeechConfig,
   LOCAL_WHISPER_MODELS,
   saveSpeechConfig,
+  verifySpeechApiKey,
   type SpeechBackend,
   type SpeechConfig,
 } from '@/engine/speech';
@@ -39,6 +40,8 @@ export function Voice({ client }: { client: LensClient }) {
   const [otherLanguage, setOtherLanguage] = useState(false);
   const [prompt, setPrompt] = useState('');
   const [problem, setProblem] = useState<string | null>(null);
+  const [verifying, setVerifying] = useState<'groq' | 'openai' | null>(null);
+  const [verifyStatus, setVerifyStatus] = useState<Partial<Record<'groq' | 'openai', { ok: boolean; text: string }>>>({});
 
   const loadStatus = useCallback(
     () =>
@@ -172,17 +175,40 @@ export function Voice({ client }: { client: LensClient }) {
           <label htmlFor="groq-stt-key" className="label">
             Groq API key
           </label>
-          <input
-            id="groq-stt-key"
-            className="input"
-            type="password"
-            autoComplete="off"
-            defaultValue={config.groqApiKey}
-            placeholder="gsk_..."
-            onBlur={(e) => {
-              if (e.target.value.trim() !== config.groqApiKey) void save({ groqApiKey: e.target.value.trim() });
-            }}
-          />
+          <div className="key-input-row">
+            <input
+              id="groq-stt-key"
+              className="input"
+              type="password"
+              autoComplete="off"
+              value={config.groqApiKey}
+              placeholder="gsk_..."
+              onChange={(e) => {
+                setVerifyStatus((cur) => ({ ...cur, groq: undefined }));
+                void save({ groqApiKey: e.target.value });
+              }}
+            />
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              disabled={!config.groqApiKey.trim() || verifying === 'groq'}
+              onClick={() => {
+                setVerifying('groq');
+                setVerifyStatus((cur) => ({ ...cur, groq: undefined }));
+                void verifySpeechApiKey('groq', config.groqApiKey)
+                  .then((res) => setVerifyStatus((cur) => ({ ...cur, groq: { ok: true, text: res.detail } })))
+                  .catch((error: Error) => setVerifyStatus((cur) => ({ ...cur, groq: { ok: false, text: error.message } })))
+                  .finally(() => setVerifying(null));
+              }}
+            >
+              {verifying === 'groq' ? 'Verifying…' : 'Verify key'}
+            </button>
+          </div>
+          {verifyStatus.groq && (
+            <span className={`small key-verify-msg ${verifyStatus.groq.ok ? 'success-text' : 'danger-text'}`} role="status">
+              {verifyStatus.groq.ok && <DoneIcon size={13} />} {verifyStatus.groq.text}
+            </span>
+          )}
           <span className="small muted">Stored locally in your browser. Sent only to api.groq.com when transcribing.</span>
         </div>
       )}
@@ -192,17 +218,40 @@ export function Voice({ client }: { client: LensClient }) {
           <label htmlFor="openai-stt-key" className="label">
             OpenAI API key
           </label>
-          <input
-            id="openai-stt-key"
-            className="input"
-            type="password"
-            autoComplete="off"
-            defaultValue={config.openaiApiKey}
-            placeholder="sk-..."
-            onBlur={(e) => {
-              if (e.target.value.trim() !== config.openaiApiKey) void save({ openaiApiKey: e.target.value.trim() });
-            }}
-          />
+          <div className="key-input-row">
+            <input
+              id="openai-stt-key"
+              className="input"
+              type="password"
+              autoComplete="off"
+              value={config.openaiApiKey}
+              placeholder="sk-..."
+              onChange={(e) => {
+                setVerifyStatus((cur) => ({ ...cur, openai: undefined }));
+                void save({ openaiApiKey: e.target.value });
+              }}
+            />
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              disabled={!config.openaiApiKey.trim() || verifying === 'openai'}
+              onClick={() => {
+                setVerifying('openai');
+                setVerifyStatus((cur) => ({ ...cur, openai: undefined }));
+                void verifySpeechApiKey('openai', config.openaiApiKey)
+                  .then((res) => setVerifyStatus((cur) => ({ ...cur, openai: { ok: true, text: res.detail } })))
+                  .catch((error: Error) => setVerifyStatus((cur) => ({ ...cur, openai: { ok: false, text: error.message } })))
+                  .finally(() => setVerifying(null));
+              }}
+            >
+              {verifying === 'openai' ? 'Verifying…' : 'Verify key'}
+            </button>
+          </div>
+          {verifyStatus.openai && (
+            <span className={`small key-verify-msg ${verifyStatus.openai.ok ? 'success-text' : 'danger-text'}`} role="status">
+              {verifyStatus.openai.ok && <DoneIcon size={13} />} {verifyStatus.openai.text}
+            </span>
+          )}
           <span className="small muted">Stored locally in your browser. Sent only to api.openai.com when transcribing.</span>
         </div>
       )}

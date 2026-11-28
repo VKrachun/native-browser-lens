@@ -211,7 +211,7 @@ export async function dispatchRequest(req: Request): Promise<Reply> {
       return { type: 'deleted' };
     case 'retryVoiceNote': {
       const reset = await patchVoiceNote(req.params.id, { state: 'waiting', detail: null });
-      enqueueTranscription(reset.id);
+      enqueueTranscription(reset.id, true);
       return { type: 'voiceNote', data: reset };
     }
     case 'updateVoiceNote':

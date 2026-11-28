@@ -275,6 +275,7 @@
 .provider-keys-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
   gap: 12px;
 }
 .provider-key-field[data-active='true'] .label {
@@ -282,6 +283,24 @@
 }
 .provider-key-field[data-active='true'] .input {
   border-color: var(--border-primary);
+}
+.key-input-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.key-input-row .input {
+  flex: 1;
+  min-width: 0;
+}
+.key-verify-msg {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  line-height: 1.3;
+}
+.success-text {
+  color: var(--success-foreground);
 }
 
 .account {
