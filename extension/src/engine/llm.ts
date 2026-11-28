@@ -12,13 +12,15 @@ import { bytesToBase64, cleanTags, isEditsDefault, keptRanges, plainTitle } from
 import { buildTimeline, evidenceForReview, filesEndScreenshot } from './repro';
 import type { DuplicateCandidate } from './vibeq';
 
-export type LlmProvider = 'openrouter' | 'anthropic' | 'openai' | 'gemini';
+export type LlmProvider = 'openrouter' | 'anthropic' | 'openai' | 'gemini' | 'custom';
 
 export interface LlmConfig {
   enabled: boolean;
   provider: LlmProvider | null;
   model: string | null;
   keys: Record<LlmProvider, string>;
+  /** OpenAI-compatible base URL for local or self-hosted servers (e.g. http://127.0.0.1:11434/v1). */
+  customBaseUrl: string;
 }
 
 export const DEFAULT_LLM_MODELS: Record<LlmProvider, string> = {
@@ -26,11 +28,46 @@ export const DEFAULT_LLM_MODELS: Record<LlmProvider, string> = {
   anthropic: 'claude-haiku-5-5',
   openai: 'gpt-5.6-luna',
   gemini: 'gemini-3.8-flash',
+  custom: '',
 };
 
+/** Normalizes a custom OpenAI-compatible base URL (strips trailing slash and /chat/completions). */
+export function normalizeCustomBaseUrl(raw: string): string {
+  const trimmed = raw.trim().replace(/\/+$/, '');
+  if (!trimmed) return '';
+  return trimmed.replace(/\/chat\/completions$/i, '').replace(/\/models$/i, '');
+}
+
+export function isLlmProviderConfigured(cfg: LlmConfig, provider: LlmProvider): boolean {
+  if (provider === 'custom') return Boolean(normalizeCustomBaseUrl(cfg.customBaseUrl));
+  return Boolean(cfg.keys[provider]?.trim());
+}
+
 /** Queries the provider's live /models endpoint so Settings never goes stale. */
-export async function listProviderModels(provider: LlmProvider, apiKey: string): Promise<string[]> {
+export async function listProviderModels(
+  provider: LlmProvider,
+  apiKey: string,
+  customBaseUrl = '',
+): Promise<string[]> {
   const key = apiKey.trim();
+  if (provider === 'custom') {
+    const base = normalizeCustomBaseUrl(customBaseUrl);
+    if (!base) return [];
+    const headers: Record<string, string> = {};
+    if (key) headers.Authorization = `Bearer ${key}`;
+    const res = await fetch(`${base}/models`, {
+      headers,
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) throw new Error(`Custom endpoint /models failed (${res.status})`);
+    const body = (await res.json()) as {
+      data?: Array<{ id?: string }>;
+      models?: Array<{ id?: string; name?: string }>;
+    };
+    const fromOpenAi = (body.data ?? []).map((m) => m.id).filter((id): id is string => Boolean(id));
+    if (fromOpenAi.length) return fromOpenAi;
+    return (body.models ?? []).map((m) => m.id ?? m.name).filter((id): id is string => Boolean(id));
+  }
   if (!key) return [DEFAULT_LLM_MODELS[provider]];
   if (provider === 'openrouter') {
     const res = await fetch('https://openrouter.ai/api/v1/models', {
@@ -83,7 +120,8 @@ const DEFAULT_LLM_CONFIG: LlmConfig = {
   enabled: true,
   provider: null,
   model: null,
-  keys: { openrouter: '', anthropic: '', openai: '', gemini: '' },
+  keys: { openrouter: '', anthropic: '', openai: '', gemini: '', custom: '' },
+  customBaseUrl: '',
 };
 
 export async function getLlmConfig(): Promise<LlmConfig> {
@@ -97,13 +135,17 @@ export async function getLlmConfig(): Promise<LlmConfig> {
       anthropic: saved?.keys?.anthropic ?? '',
       openai: saved?.keys?.openai ?? '',
       gemini: saved?.keys?.gemini ?? '',
+      custom: saved?.keys?.custom ?? '',
     },
+    customBaseUrl: saved?.customBaseUrl ?? '',
   };
 }
 
 let llmSaveChain: Promise<unknown> = Promise.resolve();
 
-export function saveLlmConfig(patch: Partial<LlmConfig>): Promise<LlmConfig> {
+export function saveLlmConfig(
+  patch: Partial<Omit<LlmConfig, 'keys'>> & { keys?: Partial<Record<LlmProvider, string>> },
+): Promise<LlmConfig> {
   const run = llmSaveChain.then(async () => {
     const current = await getLlmConfig();
     const next: LlmConfig = {
@@ -115,7 +157,10 @@ export function saveLlmConfig(patch: Partial<LlmConfig>): Promise<LlmConfig> {
         anthropic: patch.keys?.anthropic !== undefined ? patch.keys.anthropic.trim() : current.keys.anthropic,
         openai: patch.keys?.openai !== undefined ? patch.keys.openai.trim() : current.keys.openai,
         gemini: patch.keys?.gemini !== undefined ? patch.keys.gemini.trim() : current.keys.gemini,
+        custom: patch.keys?.custom !== undefined ? patch.keys.custom.trim() : current.keys.custom,
       },
+      customBaseUrl:
+        patch.customBaseUrl !== undefined ? patch.customBaseUrl.trim() : current.customBaseUrl,
     };
     await setSetting('llm.config', next);
     return next;
@@ -124,8 +169,11 @@ export function saveLlmConfig(patch: Partial<LlmConfig>): Promise<LlmConfig> {
   return run;
 }
 
-function resolveProvider(cfg: LlmConfig, requested?: LlmProvider | Agent | null): { provider: LlmProvider; apiKey: string; model: string } {
-  const all: LlmProvider[] = ['openrouter', 'anthropic', 'openai', 'gemini'];
+function resolveProvider(
+  cfg: LlmConfig,
+  requested?: LlmProvider | Agent | null,
+): { provider: LlmProvider; apiKey: string; model: string; baseUrl?: string } {
+  const all: LlmProvider[] = ['openrouter', 'anthropic', 'openai', 'gemini', 'custom'];
   const mapAgent = (a: LlmProvider | Agent | null | undefined): LlmProvider | null => {
     if (!a) return null;
     if (a === 'claude') return 'anthropic';
@@ -135,7 +183,7 @@ function resolveProvider(cfg: LlmConfig, requested?: LlmProvider | Agent | null)
   const isLegacyAgent = requested === 'claude' || requested === 'codex';
   const explicitProvider = !isLegacyAgent ? mapAgent(requested) : null;
 
-  // Respect the user's selected provider first; for legacy 'claude'/'codex' buttons, fall back to any configured key (e.g. OpenRouter/Gemini).
+  // Respect the user's selected provider first; for legacy 'claude'/'codex' buttons, fall back to any configured key or custom endpoint.
   const order: LlmProvider[] = [];
   const push = (p: LlmProvider | null) => {
     if (p && !order.includes(p)) order.push(p);
@@ -149,6 +197,14 @@ function resolveProvider(cfg: LlmConfig, requested?: LlmProvider | Agent | null)
   }
 
   for (const p of order) {
+    if (p === 'custom') {
+      const baseUrl = normalizeCustomBaseUrl(cfg.customBaseUrl);
+      if (baseUrl) {
+        const model = cfg.model?.trim() || 'default';
+        return { provider: 'custom', apiKey: cfg.keys.custom?.trim() ?? '', model, baseUrl };
+      }
+      continue;
+    }
     const key = cfg.keys[p]?.trim();
     if (key) {
       const model = (cfg.provider === p || cfg.provider === null) && cfg.model ? cfg.model : DEFAULT_LLM_MODELS[p];
@@ -157,19 +213,28 @@ function resolveProvider(cfg: LlmConfig, requested?: LlmProvider | Agent | null)
   }
   throw new LensError(
     'auth',
-    'No AI API key configured. Add an OpenRouter, Anthropic, OpenAI, or Gemini API key in Settings.',
+    'No AI provider configured. Add an API key or a Local / Custom OpenAI-compatible URL in Settings.',
   );
 }
 
-/** Returns the provider & model that will currently be used, or null if no key is configured. */
+/** Returns the provider & model that will currently be used, or null if nothing is configured. */
 export function activeLlmSummary(cfg: LlmConfig): { provider: LlmProvider; label: string; model: string } | null {
   try {
     const r = resolveProvider(cfg);
+    let customLabel = 'Local / Custom';
+    if (r.provider === 'custom' && r.baseUrl) {
+      try {
+        customLabel = new URL(r.baseUrl).host;
+      } catch {
+        // keep default label
+      }
+    }
     const names: Record<LlmProvider, string> = {
       openrouter: 'OpenRouter',
       anthropic: 'Anthropic',
       openai: 'OpenAI',
       gemini: 'Gemini',
+      custom: customLabel,
     };
     return { provider: r.provider, label: names[r.provider], model: r.model };
   } catch {
@@ -178,15 +243,15 @@ export function activeLlmSummary(cfg: LlmConfig): { provider: LlmProvider; label
 }
 
 /**
- * Verifies a specific provider's API key against its authenticated endpoint (zero token cost).
+ * Verifies a specific provider's API key (or custom OpenAI-compatible URL) against its authenticated endpoint (zero token cost).
  * Note: OpenRouter's /v1/models is public, so we verify OpenRouter against /v1/key.
  */
 export async function verifyLlmApiKey(
   provider: LlmProvider,
   apiKey: string,
-): Promise<{ provider: LlmProvider; detail: string }> {
+  customBaseUrl = '',
+): Promise<{ provider: LlmProvider; detail: string; models?: string[] }> {
   const key = apiKey.trim();
-  if (!key) throw new Error('Enter an API key first.');
 
   const parseErr = async (res: Response, name: string) => {
     const raw = await res.text().catch(() => '');
@@ -197,8 +262,54 @@ export async function verifyLlmApiKey(
     } catch {
       // keep raw snippet
     }
-    throw new Error(`${name} rejected the key (${res.status}): ${msg || res.statusText}`);
+    throw new Error(`${name} rejected the request (${res.status}): ${msg || res.statusText}`);
   };
+
+  if (provider === 'custom') {
+    const base = normalizeCustomBaseUrl(customBaseUrl);
+    if (!base) throw new Error('Enter a Base URL first (e.g. http://127.0.0.1:11434/v1).');
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(base);
+    } catch {
+      throw new Error('Base URL must start with http:// or https://');
+    }
+    if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+      throw new Error('Base URL must use http:// or https://');
+    }
+    const headers: Record<string, string> = {};
+    if (key) headers.Authorization = `Bearer ${key}`;
+    let res: Response;
+    try {
+      res = await fetch(`${base}/models`, {
+        headers,
+        signal: AbortSignal.timeout(15_000),
+      });
+    } catch (error) {
+      throw new Error(`Could not reach ${parsedUrl.host}: ${(error as Error).message}`);
+    }
+    if (!res.ok) await parseErr(res, parsedUrl.host);
+    const body = (await res.json().catch(() => ({}))) as {
+      data?: Array<{ id?: string }>;
+      models?: Array<{ id?: string; name?: string }>;
+    };
+    const models = (body.data ?? [])
+      .map((m) => m.id)
+      .filter((id): id is string => Boolean(id));
+    const fallbackModels = models.length
+      ? models
+      : (body.models ?? []).map((m) => m.id ?? m.name).filter((id): id is string => Boolean(id));
+    const first = fallbackModels[0];
+    return {
+      provider,
+      models: fallbackModels,
+      detail: first
+        ? `Connected (${fallbackModels.length} model${fallbackModels.length === 1 ? '' : 's'} · e.g. ${first})`
+        : 'Connected',
+    };
+  }
+
+  if (!key) throw new Error('Enter an API key first.');
 
   if (provider === 'openrouter') {
     const res = await fetch('https://openrouter.ai/api/v1/key', {
@@ -245,13 +356,15 @@ export async function verifyLlmApiKey(
 /** Sends a tiny JSON ping to verify the currently configured API key + model work end-to-end. */
 export async function testLlmConnection(): Promise<{ provider: LlmProvider; model: string }> {
   const cfg = await getLlmConfig();
-  const { provider, apiKey, model } = resolveProvider(cfg);
+  const { provider, apiKey, model, baseUrl } = resolveProvider(cfg);
   await callJsonLlm(
     provider,
     apiKey,
     model,
     'Return {"ok":true} as JSON only.',
     'Ping. Respond with {"ok":true}.',
+    [],
+    baseUrl,
   );
   return { provider, model };
 }
@@ -259,21 +372,22 @@ export async function testLlmConnection(): Promise<{ provider: LlmProvider; mode
 /** Legacy protocol compatibility wrappers so Review.tsx keeps working cleanly. */
 export async function listLegacyAgents(): Promise<AgentInfo[]> {
   const cfg = await getLlmConfig();
-  const hasAnyOther = Boolean(cfg.keys.openrouter || cfg.keys.openai || cfg.keys.gemini);
+  const hasCustom = Boolean(normalizeCustomBaseUrl(cfg.customBaseUrl));
+  const hasAnyOther = Boolean(cfg.keys.openrouter || cfg.keys.openai || cfg.keys.gemini || hasCustom);
   return [
     {
       agent: 'claude',
-      state: cfg.keys.anthropic || cfg.keys.openrouter ? 'ready' : 'signIn',
+      state: cfg.keys.anthropic || cfg.keys.openrouter || hasCustom ? 'ready' : 'signIn',
       binary: null,
       broken: [],
-      problem: cfg.keys.anthropic || cfg.keys.openrouter ? null : 'Add an API key in Settings',
+      problem: cfg.keys.anthropic || cfg.keys.openrouter || hasCustom ? null : 'Add an API key or local URL in Settings',
     },
     {
       agent: 'codex',
       state: hasAnyOther ? 'ready' : 'signIn',
       binary: null,
       broken: [],
-      problem: hasAnyOther ? null : 'Add an API key in Settings',
+      problem: hasAnyOther ? null : 'Add an API key or local URL in Settings',
     },
   ];
 }
@@ -292,7 +406,8 @@ export async function setFindingsSettings(settings: FindingsSettings): Promise<F
     settings.provider === 'openrouter' ||
     settings.provider === 'anthropic' ||
     settings.provider === 'openai' ||
-    settings.provider === 'gemini'
+    settings.provider === 'gemini' ||
+    settings.provider === 'custom'
       ? settings.provider
       : settings.provider === 'claude'
         ? 'anthropic'
@@ -329,6 +444,7 @@ async function callJsonLlm(
   system: string,
   user: string,
   images: ImageAttachment[] = [],
+  customBaseUrl?: string,
 ): Promise<unknown> {
   if (provider === 'anthropic') {
     const content: unknown[] = [
@@ -362,37 +478,49 @@ async function callJsonLlm(
     return extractJsonObject(text);
   }
 
-  if (provider === 'openai' || provider === 'openrouter') {
-    const content: unknown[] = [
-      { type: 'text', text: user },
-      ...images.map((img) => ({
-        type: 'image_url',
-        image_url: { url: `data:${img.mediaType};base64,${img.base64}` },
-      })),
-    ];
+  if (provider === 'openai' || provider === 'openrouter' || provider === 'custom') {
     const endpoint =
-      provider === 'openrouter'
-        ? 'https://openrouter.ai/api/v1/chat/completions'
-        : 'https://api.openai.com/v1/chat/completions';
-    const res = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-        ...(provider === 'openrouter'
-          ? { 'HTTP-Referer': 'https://lens.sirv.studio', 'X-Title': 'Sirv Lens' }
-          : {}),
-      },
-      body: JSON.stringify({
-        model,
-        // Direct OpenAI supports json_object reliably; OpenRouter routes to many providers (e.g. Anthropic) where json_object can 400.
-        ...(provider === 'openai' ? { response_format: { type: 'json_object' } } : {}),
-        messages: [
-          { role: 'system', content: `${system}\nReturn valid JSON only with no markdown fences or extra text.` },
-          { role: 'user', content },
-        ],
-      }),
-    });
+      provider === 'custom'
+        ? `${normalizeCustomBaseUrl(customBaseUrl ?? '')}/chat/completions`
+        : provider === 'openrouter'
+          ? 'https://openrouter.ai/api/v1/chat/completions'
+          : 'https://api.openai.com/v1/chat/completions';
+    const sendCompletion = async (withImages: boolean) => {
+      const userContent: unknown =
+        withImages && images.length > 0
+          ? [
+              { type: 'text', text: user },
+              ...images.map((img) => ({
+                type: 'image_url',
+                image_url: { url: `data:${img.mediaType};base64,${img.base64}` },
+              })),
+            ]
+          : user;
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+      if (provider === 'openrouter') {
+        headers['HTTP-Referer'] = 'https://lens.sirv.studio';
+        headers['X-Title'] = 'Sirv Lens';
+      }
+      return fetch(endpoint, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          model,
+          // Direct OpenAI supports json_object reliably; OpenRouter and custom local proxies can reject it.
+          ...(provider === 'openai' ? { response_format: { type: 'json_object' } } : {}),
+          messages: [
+            { role: 'system', content: `${system}\nReturn valid JSON only with no markdown fences or extra text.` },
+            { role: 'user', content: userContent },
+          ],
+        }),
+      });
+    };
+    let res = await sendCompletion(true);
+    // Many local/custom text-only models return 400/422 on multimodal image_url arrays; retry cleanly as plain text.
+    if (provider === 'custom' && images.length > 0 && (res.status === 400 || res.status === 422)) {
+      res = await sendCompletion(false);
+    }
     if (!res.ok) {
       const errText = await res.text().catch(() => '');
       let detail = errText.slice(0, 240);
@@ -404,9 +532,10 @@ async function callJsonLlm(
       } catch {
         // keep raw snippet
       }
+      const providerName = provider === 'openrouter' ? 'OpenRouter' : provider === 'custom' ? 'Custom endpoint' : 'OpenAI';
       throw new LensError(
         res.status === 401 ? 'auth' : 'internal',
-        `${provider === 'openrouter' ? 'OpenRouter' : 'OpenAI'} API error (${res.status}): ${detail}`,
+        `${providerName} API error (${res.status}): ${detail}`,
       );
     }
     const body = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
@@ -452,7 +581,7 @@ const DUPLICATES_SYSTEM =
 
 export async function summarizeObservation(observationId: number): Promise<Summary & { label: string }> {
   const cfg = await getLlmConfig();
-  const { provider, apiKey, model } = resolveProvider(cfg);
+  const { provider, apiKey, model, baseUrl } = resolveProvider(cfg);
 
   const obs = await getObservation(observationId);
   const captures = await listCaptures(observationId);
@@ -509,7 +638,7 @@ export async function summarizeObservation(observationId: number): Promise<Summa
     contextJson,
   ].join('\n');
 
-  const raw = (await callJsonLlm(provider, apiKey, model, SUMMARIZE_SYSTEM, userPrompt)) as Record<string, unknown>;
+  const raw = (await callJsonLlm(provider, apiKey, model, SUMMARIZE_SYSTEM, userPrompt, [], baseUrl)) as Record<string, unknown>;
   const title = plainTitle(String(raw.title ?? obs.title), 120) || obs.title;
   const findings = Array.isArray(raw.findings)
     ? raw.findings.map((f) => String(f).replace(/[\r\n]+/g, ' ').trim().slice(0, 300)).filter(Boolean).slice(0, 8)
@@ -545,14 +674,16 @@ export async function summarizeObservation(observationId: number): Promise<Summa
         ? 'Claude'
         : provider === 'openai'
           ? 'OpenAI'
-          : 'Gemini';
+          : provider === 'custom'
+            ? 'Custom'
+            : 'Gemini';
   const label = `${providerName} (${model})`;
   return { title, findings, tags, issues: keptIssues, agent: legacyAgent, label };
 }
 
 export async function investigateReview(reviewId: number, requestedAgent?: Agent): Promise<Suggestion> {
   const cfg = await getLlmConfig();
-  const { provider, apiKey, model } = resolveProvider(cfg, requestedAgent);
+  const { provider, apiKey, model, baseUrl } = resolveProvider(cfg, requestedAgent);
   const review = await getReview(reviewId);
 
   const images: ImageAttachment[] = [];
@@ -586,7 +717,7 @@ export async function investigateReview(reviewId: number, requestedAgent?: Agent
     JSON.stringify(selection, null, 2),
   ].join('\n');
 
-  const raw = (await callJsonLlm(provider, apiKey, model, INVESTIGATE_SYSTEM, userPrompt, images)) as Record<string, unknown>;
+  const raw = (await callJsonLlm(provider, apiKey, model, INVESTIGATE_SYSTEM, userPrompt, images, baseUrl)) as Record<string, unknown>;
   const markdown = String(raw.markdown ?? '').trim().slice(0, 20_000);
   if (!markdown) throw badRequest('Model returned an empty draft.');
   const findings: SuggestedFinding[] = Array.isArray(raw.findings)
@@ -616,7 +747,7 @@ export async function judgeDuplicatesWithLlm(
   candidates: DuplicateCandidate[],
 ): Promise<Map<string, string> | null> {
   const cfg = await getLlmConfig();
-  let resolved: { provider: LlmProvider; apiKey: string; model: string };
+  let resolved: { provider: LlmProvider; apiKey: string; model: string; baseUrl?: string };
   try {
     resolved = resolveProvider(cfg);
   } catch {
@@ -649,6 +780,8 @@ export async function judgeDuplicatesWithLlm(
     resolved.model,
     DUPLICATES_SYSTEM,
     userPrompt,
+    [],
+    resolved.baseUrl,
   )) as { duplicates?: Array<{ id?: unknown; reason?: unknown }> };
 
   const out = new Map<string, string>();

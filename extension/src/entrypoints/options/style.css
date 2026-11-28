@@ -302,6 +302,42 @@
 .success-text {
   color: var(--success-foreground);
 }
+.custom-endpoint-box {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  background: var(--background);
+}
+.custom-endpoint-box[data-active='true'] {
+  border-color: var(--border-primary);
+}
+.custom-endpoint-box[data-active='true'] .custom-endpoint-head .label {
+  color: var(--primary);
+}
+.custom-endpoint-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.preset-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.preset-chip {
+  height: 22px;
+  padding: 0 7px;
+  font-size: 11px;
+  border-color: var(--border-subtle);
+  color: var(--muted-foreground);
+}
+.preset-chip:hover {
+  color: var(--foreground);
+}
 
 .account {
   display: flex;

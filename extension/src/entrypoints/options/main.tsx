@@ -3,7 +3,9 @@ import { createRoot } from 'react-dom/client';
 import {
   DEFAULT_LLM_MODELS,
   getLlmConfig,
+  isLlmProviderConfigured,
   listProviderModels,
+  normalizeCustomBaseUrl,
   saveLlmConfig,
   testLlmConnection,
   verifyLlmApiKey,
@@ -124,6 +126,7 @@ const PROVIDER_LABELS: Record<LlmProvider, string> = {
   anthropic: 'Anthropic',
   openai: 'OpenAI',
   gemini: 'Gemini',
+  custom: 'Local / Custom',
 };
 
 function notifySettingsChanged() {
@@ -178,13 +181,15 @@ function computeStepStates(snapshot: SetupSnapshot, wizardDone: boolean): Record
       : 'Not set up';
 
   const configuredLlm = snapshot.llm
-    ? (['openrouter', 'anthropic', 'openai', 'gemini'] as LlmProvider[]).filter((p) => Boolean(snapshot.llm?.keys[p]))
+    ? (['openrouter', 'anthropic', 'openai', 'gemini', 'custom'] as LlmProvider[]).filter((p) =>
+        isLlmProviderConfigured(snapshot.llm!, p),
+      )
     : [];
   const firstConfigured = configuredLlm[0] ?? null;
   const activeLlm = snapshot.llm?.provider ?? firstConfigured;
   const aiReady = firstConfigured !== null;
   const aiDetail = aiReady
-    ? activeLlm && snapshot.llm?.keys[activeLlm]
+    ? activeLlm && snapshot.llm && isLlmProviderConfigured(snapshot.llm, activeLlm)
       ? PROVIDER_LABELS[activeLlm]
       : PROVIDER_LABELS[firstConfigured]
     : 'Optional';
@@ -842,34 +847,44 @@ function Models() {
   useLoadOnFocus(load);
 
   const activeProvider: LlmProvider | null = config
-    ? config.provider ?? (['openrouter', 'anthropic', 'openai', 'gemini'] as LlmProvider[]).find((p) => Boolean(config.keys[p])) ?? null
+    ? config.provider ??
+      (['openrouter', 'anthropic', 'openai', 'gemini', 'custom'] as LlmProvider[]).find((p) =>
+        isLlmProviderConfigured(config, p),
+      ) ??
+      null
     : null;
+  const activeConfigured = Boolean(config && activeProvider && isLlmProviderConfigured(config, activeProvider));
   const activeKey = config && activeProvider ? config.keys[activeProvider] : '';
+  const customBaseUrl = config?.customBaseUrl ?? '';
 
   const refreshModels = useCallback(async () => {
-    if (!activeProvider || !activeKey) {
+    if (!activeProvider || !activeConfigured) {
       setLiveModels([]);
       return;
     }
     setLoadingModels(true);
     setProblem(null);
     try {
-      setLiveModels(await listProviderModels(activeProvider, activeKey));
+      setLiveModels(await listProviderModels(activeProvider, activeKey, customBaseUrl));
     } catch (error) {
       setProblem((error as Error).message);
     } finally {
       setLoadingModels(false);
     }
-  }, [activeProvider, activeKey]);
+  }, [activeProvider, activeConfigured, activeKey, customBaseUrl]);
 
   useEffect(() => {
-    if (!activeProvider || activeKey.trim().length < 10) {
+    if (!activeProvider || !activeConfigured) {
+      setLiveModels([]);
+      return;
+    }
+    if (activeProvider !== 'custom' && activeKey.trim().length < 10) {
       setLiveModels([]);
       return;
     }
     const timer = setTimeout(() => void refreshModels(), 600);
     return () => clearTimeout(timer);
-  }, [activeProvider, activeKey, refreshModels]);
+  }, [activeProvider, activeConfigured, activeKey, customBaseUrl, refreshModels]);
 
   if (!config) return problem ? <Problem text={problem} /> : null;
 
@@ -892,20 +907,58 @@ function Models() {
     }
   }
 
+  async function verifyCustomEndpoint() {
+    const base = normalizeCustomBaseUrl(config!.customBaseUrl);
+    setVerifyingProvider('custom');
+    setVerifyByProvider((cur) => ({ ...cur, custom: undefined }));
+    try {
+      if (base) {
+        const origin = new URL(base).origin;
+        if (browser.permissions?.request) {
+          await browser.permissions.request({ origins: [sitePattern(origin)] }).catch(() => false);
+        }
+      }
+      const res = await verifyLlmApiKey('custom', config!.keys.custom, base);
+      setVerifyByProvider((cur) => ({ ...cur, custom: { ok: true, text: res.detail } }));
+      if (res.models?.length) {
+        setLiveModels(res.models);
+        if (!config!.model && res.models[0]) {
+          void update({ model: res.models[0] });
+        }
+      }
+    } catch (error) {
+      setVerifyByProvider((cur) => ({ ...cur, custom: { ok: false, text: (error as Error).message } }));
+    } finally {
+      setVerifyingProvider(null);
+    }
+  }
+
+  const normalizedCustom = normalizeCustomBaseUrl(config.customBaseUrl);
   const providers: Array<[LlmProvider | null, string, string]> = [
-    [null, 'Automatic', 'Uses the first configured key (OpenRouter → Anthropic → OpenAI → Gemini).'],
+    [null, 'Automatic', 'Uses the first configured provider (OpenRouter → Anthropic → OpenAI → Gemini → Local / Custom).'],
     ['openrouter', `OpenRouter (${DEFAULT_LLM_MODELS.openrouter})`, config.keys.openrouter ? 'API key saved' : 'No key set'],
     ['anthropic', `Anthropic (${DEFAULT_LLM_MODELS.anthropic})`, config.keys.anthropic ? 'API key saved' : 'No key set'],
     ['openai', `OpenAI (${DEFAULT_LLM_MODELS.openai})`, config.keys.openai ? 'API key saved' : 'No key set'],
     ['gemini', `Google Gemini (${DEFAULT_LLM_MODELS.gemini})`, config.keys.gemini ? 'API key saved' : 'No key set'],
+    [
+      'custom',
+      'Local / Custom (OpenAI-compatible)',
+      normalizedCustom ? normalizedCustom : 'Ollama, LM Studio, LiteLLM, or a local Claude/Codex proxy',
+    ],
   ];
 
-  const keyInputs: Array<{ id: LlmProvider; label: string; placeholder: string }> = [
+  const keyInputs: Array<{ id: Exclude<LlmProvider, 'custom'>; label: string; placeholder: string }> = [
     { id: 'openrouter', label: 'OpenRouter API key', placeholder: 'sk-or-v1-...' },
     { id: 'anthropic', label: 'Anthropic API key', placeholder: 'sk-ant-...' },
     { id: 'openai', label: 'OpenAI API key', placeholder: 'sk-...' },
     { id: 'gemini', label: 'Google Gemini API key', placeholder: 'AIza...' },
   ];
+
+  const customPresets = [
+    ['Ollama (:11434)', 'http://127.0.0.1:11434/v1'],
+    ['LM Studio (:1234)', 'http://127.0.0.1:1234/v1'],
+    ['Local proxy (:4000)', 'http://127.0.0.1:4000/v1'],
+  ] as const;
 
   return (
     <section aria-label="AI model" className="card settings-section">
@@ -999,9 +1052,84 @@ function Models() {
         })}
       </div>
 
+      <div className="custom-endpoint-box" data-active={activeProvider === 'custom' || undefined}>
+        <div className="custom-endpoint-head">
+          <label htmlFor="custom-llm-url" className="label">
+            Local / Custom OpenAI-compatible Base URL
+          </label>
+          <div className="preset-chips">
+            {customPresets.map(([label, url]) => (
+              <button
+                key={label}
+                type="button"
+                className="btn btn-ghost btn-sm preset-chip"
+                onClick={() => {
+                  setVerifyByProvider((cur) => ({ ...cur, custom: undefined }));
+                  void update({ provider: 'custom', customBaseUrl: url });
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="provider-keys-grid">
+          <div className="field">
+            <input
+              id="custom-llm-url"
+              className="input"
+              type="url"
+              spellCheck={false}
+              value={config.customBaseUrl}
+              placeholder="http://127.0.0.1:11434/v1"
+              onChange={(e) => {
+                setVerifyByProvider((cur) => ({ ...cur, custom: undefined }));
+                void update({ customBaseUrl: e.target.value });
+              }}
+            />
+          </div>
+          <div className="field">
+            <div className="key-input-row">
+              <input
+                id="key-custom"
+                aria-label="Custom endpoint API key (optional)"
+                className="input"
+                type="password"
+                autoComplete="off"
+                value={config.keys.custom}
+                placeholder="API key (optional)"
+                onChange={(e) => {
+                  setVerifyByProvider((cur) => ({ ...cur, custom: undefined }));
+                  void update({ keys: { ...config.keys, custom: e.target.value } });
+                }}
+              />
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                disabled={!normalizedCustom || verifyingProvider === 'custom'}
+                onClick={() => void verifyCustomEndpoint()}
+              >
+                {verifyingProvider === 'custom' ? 'Checking…' : 'Verify'}
+              </button>
+            </div>
+          </div>
+        </div>
+        {verifyByProvider.custom && (
+          <span
+            className={`small key-verify-msg ${verifyByProvider.custom.ok ? 'success-text' : 'danger-text'}`}
+            role="status"
+          >
+            {verifyByProvider.custom.ok && <DoneIcon size={13} />} {verifyByProvider.custom.text}
+          </span>
+        )}
+        <span className="small muted">
+          Works with Ollama, LM Studio, LiteLLM, or any OpenAI-compatible local proxy (e.g. for Claude Code or Codex).
+        </span>
+      </div>
+
       <div className="field">
         <label htmlFor="findings-model" className="label">
-          Model {activeProvider ? `(${activeProvider})` : '(optional)'}
+          Model {activeProvider ? `(${PROVIDER_LABELS[activeProvider]})` : '(optional)'}
         </label>
         <div className="inline-fields">
           <input
@@ -1010,7 +1138,13 @@ function Models() {
             list="live-llm-models"
             defaultValue={config.model ?? ''}
             key={`${activeProvider ?? 'auto'}:${config.model ?? ''}`}
-            placeholder={activeProvider ? `Default: ${DEFAULT_LLM_MODELS[activeProvider]}` : 'Leave empty for provider default'}
+            placeholder={
+              activeProvider && DEFAULT_LLM_MODELS[activeProvider]
+                ? `Default: ${DEFAULT_LLM_MODELS[activeProvider]}`
+                : activeProvider === 'custom'
+                  ? 'e.g. llama3.2, qwen2.5-coder, claude-sonnet-4-5'
+                  : 'Leave empty for provider default'
+            }
             maxLength={100}
             spellCheck={false}
             onBlur={(e) => {
@@ -1018,7 +1152,7 @@ function Models() {
               if (model !== config.model) void update({ model });
             }}
           />
-          {activeProvider && activeKey && (
+          {activeProvider && activeConfigured && (
             <button
               type="button"
               className="btn btn-secondary btn-sm"
@@ -1036,7 +1170,7 @@ function Models() {
         </datalist>
       </div>
 
-      {activeProvider && activeKey && (
+      {activeProvider && activeConfigured && (
         <div className="actions">
           <button
             type="button"
@@ -1047,12 +1181,12 @@ function Models() {
               setTestResult(null);
               setProblem(null);
               void testLlmConnection()
-                .then((res) => setTestResult(`Connected: ${res.provider} (${res.model})`))
+                .then((res) => setTestResult(`Connected: ${PROVIDER_LABELS[res.provider]} (${res.model})`))
                 .catch((error: Error) => setProblem(error.message))
                 .finally(() => setTesting(false));
             }}
           >
-            {testing ? 'Testing…' : 'Test API key'}
+            {testing ? 'Testing…' : activeProvider === 'custom' ? 'Test local model' : 'Test API key'}
           </button>
           {testResult && (
             <span className="small" role="status">
