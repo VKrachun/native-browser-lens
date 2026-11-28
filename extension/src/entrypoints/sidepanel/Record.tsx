@@ -198,7 +198,7 @@ export function RecordControls({
       // The first await of the click: browsers open the screen-share picker only during a user gesture.
       if (videoMode) {
         try {
-          film = await recordTabVideo();
+          film = await recordTabVideo({ includeMic: voice });
           setNotice(null);
         } catch (error) {
           setNotice(
